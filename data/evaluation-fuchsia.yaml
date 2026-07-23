@@ -1,0 +1,3317 @@
+# yaml-language-server: $schema=schema/evaluation.schema.json
+# Fuchsia F30 (Zircon 18e076df165365da341315cf2bb86b2c1e0eb8a4)
+# kernel hardening evaluation.
+# Scores for x86-64 primary architecture; arch-divergent mechanisms carry an
+# arm64: overlay (materialized as the derived os fuchsia-arm64).
+os: fuchsia
+schema_version: 1
+baseline_class: shipped-default
+default_config: >-
+  Fuchsia F30 standard x64 build target at immutable source revision
+  18e076df165365da341315cf2bb86b2c1e0eb8a4, using the official Clang
+  toolchain, in the release (production) posture: default kernel boot
+  options — kernel.enable-debugging-syscalls=false and
+  kernel.enable-serial-syscalls=disabled (options.inc defaults at
+  zircon/kernel/lib/boot-options/include/lib/boot-options/options.inc:516,533)
+  — and the standard product assert level (DEBUG_ASSERTs compiled out;
+  LK_DEBUGLEVEL-gated paths inactive), which is the posture the per-mechanism
+  scores in this file already assume.
+arm64_default_config: >-
+  Fuchsia F30 standard arm64 build target (Zircon at
+  18e076df165365da341315cf2bb86b2c1e0eb8a4, official Clang
+  toolchain; QEMU arm64 and production Amlogic/Qualcomm boards). The Clang
+  kernel ABI replaces x86's SafeStack with the Shadow Call Stack
+  (-fsanitize=shadow-call-stack, reserved x18); PAN is enabled whenever
+  FEAT_PAN is present (SCTLR_EL1.SPAN=0, PAN-bracketed user copies) and every
+  user mapping carries PXN unconditionally. Spectre v2 is mitigated by default
+  via alternate EL0 exception vectors (kernel.arm64.alternate-vbar=auto, SMCCC
+  ARCH_WORKAROUND_3/1) plus branch-predictor invalidation on the vulnerable
+  core list; kernel.arm64.disable_spec_mitigations=false. The port ships NO
+  PAC/BTI/GCS or MTE use (feature-ID decode only), no KASLR (fixed
+  KERNEL_ASPACE_BASE; devicetree kaslr-seed ingested as entropy only), no
+  SSBS/ARCH_WORKAROUND_2, and no EL0 kernel-unmap/E0PD (CSV3-reliant).
+arm64_comparator_configs:
+- "QEMU arm64 (-cpu max): FEAT_PAN/PAC/BTI/MTE/RNG-capable upper bound — only PAN and RNDR are consumed by the kernel"
+- "Production Amlogic A53/A73-class boards (ARMv8.0: no FEAT_PAN/PAuth/BTI/MTE silicon — lower bound; SoC TRNG via amlogic_rng)"
+
+mechanisms:
+  C1a.1:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "SafeStack enabled by default on x86-64 (-fsanitize=safe-stack)"
+      - "-fstack-clash-protection enabled in build/config/BUILD.gn"
+      - "kernel.stack.canary-percent-free boot option (default=0)"
+      source_files:
+      - "zircon/kernel/lib/libc/abort.cc (__stack_chk_fail)"
+      - "zircon/kernel/arch/x86/phys/start.S (stack guard init from RDSEED/RDRAND)"
+      - "zircon/kernel/arch/x86/include/arch/x86/mp.h (stack_guard in percpu)"
+      - "zircon/kernel/vm/kstack.cc (stack canary write/check)"
+      default_state: >-
+        Clang stack protector enabled by default for Fuchsia targets.
+        SafeStack (-fsanitize=safe-stack) enabled by default on x86-64,
+        separating safe stack (return addresses) from unsafe stack (local
+        buffers). Stack guard canary initialized from RDSEED/RDRAND at
+        early boot, falling back to address-based XOR if no hardware RNG.
+    commits:
+    - hash: "911dc99ce8e73be836544ed81559a5816adb8f7e"
+      date: "2017-06-05"
+      description: "[kernel][arch][x86] Revamp stack-protector/safe-stack early setup (makes the whole x86 startup path runnable with the kernel's stack-protector/SafeStack instrumentation)"
+    - hash: "3390080aefca72af3c37ff95aa42bcc91a3bd5ff"
+      date: "2025-05-20"
+      description: "[build] Enable compiling with -fstack-clash-protection (stack-clash probe hardening in the default build config)"
+    discussions: []
+    rationale: >-
+      Stack canaries via Clang plus SafeStack on x86-64. SafeStack
+      separates return addresses from local variables, providing
+      stronger protection than canaries alone. Canary initialized from
+      hardware RNG. S=2: known bypass via info-leak for canary; SafeStack
+      adds defense-in-depth but both stacks are in the same address space.
+      D=3 (mandatory in Fuchsia build, cannot be opted out). A=3
+      (compiler-enforced, no opt-out). T=2: T_age=3 (kernel stack-protector
+      setup dates to 2017, 911dc99ce8e), T_maintained=2 (9 substantive
+      commits on the cited stack-protector/SafeStack files in the 18-month
+      window).
+    arm64:
+      P: 1
+      D: 3
+      S: 2
+      A: 3
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options:
+        - "-fsanitize=shadow-call-stack + -fno-sanitize=safe-stack (arm64 kernel ABI config)"
+        - "kernel.stack.canary-percent-free boot option (default=0)"
+        source_files:
+        - "zircon/kernel/lib/libc/abort.cc (__stack_chk_fail)"
+        - "zircon/kernel/arch/arm64/BUILD.gn:25-32 (SCS instead of SafeStack for the kernel ABI)"
+        - "zircon/kernel/arch/arm64/phys/start.S:74-92 (boot stack guard from RNDRRS/RNDR, load-address XOR fallback)"
+        - "zircon/kernel/top/debug.cc:134-141 (choose_stack_guard from hw_rng)"
+        - "zircon/kernel/dev/hw_rng/amlogic_rng/amlogic-rng.cc (SoC TRNG backend on production boards)"
+        default_state: >-
+          Clang stack protector enabled exactly as on x86-64. The unsafe-stack
+          split is different: the arm64 kernel ABI config explicitly disables
+          SafeStack and enables the Shadow Call Stack instead
+          ("Use shadow-call-stack rather than safe-stack for the kernel,
+          regardless of the compiler's default"), so return addresses are
+          protected by SCS (scored in C2b.1) rather than SafeStack. The boot
+          stack guard comes from FEAT_RNG RNDRRS/RNDR when the silicon has it,
+          falling back to a load-address XOR constant; the kernel proper
+          re-chooses the guard from the hw_rng driver (Amlogic/Qualcomm SoC
+          TRNG on production boards, absent RNDR on ARMv8.0 cores).
+      commits:
+      - hash: "8f6ff41970eecda24e57f1fb1698fa2971894ebf"
+        date: "2019-10-10"
+        description: "[kernel] Use shadow-call-stack on ARM64 (the arm64 kernel ABI replaces x86's SafeStack with the Shadow Call Stack, protecting kernel return addresses)"
+      - hash: "b128549bbd1d5ae049ba1e4810563a1518282353"
+        date: "2021-04-13"
+        description: "[kernel][arm64][phys] Use hardware RNG when available for stack-guard (boot stack-guard canary seeded from FEAT_RNG RNDRRS/RNDR with load-address XOR fallback)"
+      rationale: >-
+        arm64: same canary posture as x86-64 (P=1, D=3 mandatory in the build,
+        A=3 compiler-enforced). The defense-in-depth partner changes:
+        SafeStack is explicitly disabled in favor of the Shadow Call Stack
+        (C2b.1), which protects the same asset (return addresses) at least as
+        strongly. S=2 — canary still bypassable via info-leak, and on
+        ARMv8.0 boot paths without FEAT_RNG the early guard falls back to a
+        weak load-address-derived value before hw_rng re-seeding. T=3:
+        T_age=3 (SCS since 2019, canaries since 2017) and the arm64
+        SCS/entry paths remain actively maintained (unlike the base
+        column's x86 stack-protector files, audited at T_maintained=2).
+  C1a.2:
+    P: 1
+    D: 3
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/lib/thread-stack/include/lib/thread-stack/abi.h (kStackGuardRegionSize)"
+      - "zircon/kernel/vm/kstack.cc (VMAR with upper+lower guard regions)"
+      - "zircon/kernel/lib/virtual_alloc/include/lib/virtual_alloc.h (alloc_guard)"
+      - "zircon/kernel/lib/fbl/arena.cc (unmapped guard page)"
+      default_state: >-
+        Every kernel stack (machine stack, unsafe stack, shadow call stack)
+        has unmapped guard regions of 1 page (kStackGuardRegionSize =
+        kPageSize) on both upper and lower boundaries. Guard pages are
+        created unconditionally via VMAR mappings. fbl::Arena also uses
+        unmapped guard pages.
+    commits:
+    - hash: "56fd1c5cb674243ad86e33e8874b0c9717a12816"
+      date: "2018-04-25"
+      description: "[kernel][vm] provide a generic routine for allocating kernel stacks (kernel stacks become VMAR mappings with an unmapped guard page in front and behind)"
+    discussions: []
+    rationale: >-
+      Unmapped guard pages on both sides of every kernel stack. Hardware
+      page fault on any overflow/underflow. Unconditional, cannot be
+      disabled. D=3 (mandatory). S=2 (true unmapped guard pages, stronger
+      than redzones; 1-page guard can be bypassed by large jumps but
+      practically effective). A=2 (in-tree, integral to stack allocation).
+      T=2 (T_maintained=2: 8 substantive commits on the cited guard-page
+      files in the 18-month window).
+  C1a.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/lib/user_copy/include/lib/user_copy/user_ptr.h"
+      - "zircon/kernel/arch/x86/user-copy/user-copy.cc"
+      - "zircon/kernel/arch/x86/user-copy/user-copy.S (stac/clac for SMAP)"
+      default_state: >-
+        Type-safe user_ptr<T> wrapper enforces compile-time direction
+        checking (kIn/kOut/kInOut), ABI-safety type checks, address range
+        validation (is_user_accessible_range), SMAP clac/stac windows,
+        Spectre V1 lfence barrier before ToUser copies, and overflow
+        checking via mul_overflow().
+    commits:
+    - hash: "5ba131bdc6e7af02222ad37b92e3386a490a775d"
+      date: "2019-09-05"
+      description: "[kernel] User copy variants that capture and return faults (fault-capturing user-copy variants behind the validating user_ptr interface)"
+    discussions: []
+    rationale: >-
+      Comprehensive user-kernel copy hardening via type-safe C++ wrappers.
+      Compile-time policy enforcement + runtime address validation + SMAP
+      + Spectre V1 barriers. Stronger than simple copyin/copyout bounds
+      checks. S=2 (no slab-cache object size validation like Linux
+      HARDENED_USERCOPY, but compile-time type safety compensates).
+      T=2 (T_maintained=2: 2 substantive commits on the cited user-copy
+      files in the 18-month window).
+    arm64:
+      P: 1
+      D: 2
+      S: 2
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/lib/user_copy/include/lib/user_copy/user_ptr.h"
+        - "zircon/kernel/arch/arm64/user-copy/user-copy.cc:25-66 (PAN-bracketed copies, Spectre V1 address confinement)"
+        - "zircon/kernel/arch/arm64/user-copy/user-copy.S (fault redirection via data_fault_resume)"
+        default_state: >-
+          The same type-safe user_ptr<T> wrapper (compile-time kIn/kOut/kInOut
+          direction policy, ABI-safety checks, is_user_accessible_range
+          validation, mul_overflow checks) feeds the arm64 copy routines. The
+          x86 SMAP clac/stac windows become PAN brackets:
+          arm64_user_copy_pan_wrapped disables PSTATE.PAN only for the
+          duration of each copy and re-enables it after (when FEAT_PAN is
+          present). The Spectre V1 lfence is replaced by masking-based
+          confinement: validate_user_accessible_range confines {addr, len} to
+          user addresses before the copy.
+      commits:
+      - hash: "e0839c6c2416d9cb33ef3306909077b55ece274e"
+        date: "2020-04-02"
+        description: "[kernel][arm64] Spectre V1: Protect copy_from_user against |src, len| (address-confines {src,len} of copy_from_user to the user range under speculation)"
+      - hash: "f70eb90bec6be6c4f8b12e65400deaf0bfb6ac4e"
+        date: "2025-11-03"
+        description: "[kernel][arm64] implement PAN for hardware that supports it (PSTATE.PAN set on every exception via SCTLR_EL1.SPAN=0; user copies become PAN-bracketed windows)"
+      rationale: >-
+        arm64: same scores as x86-64 — the wrapper layer is arch-neutral and
+        the two arch-specific ingredients have direct equivalents (SMAP
+        windows → PAN brackets, lfence → address-confinement masking). S=2
+        for the same reason as x86 (no allocator object-size validation).
+        PAN bracketing depends on FEAT_PAN silicon (ARMv8.1+); on ARMv8.0
+        boards the copies run without the hardware backstop, but the
+        validation and confinement layers are unconditional.
+  C1a.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/BUILD.gn (complete kernel compiler configuration at F30; no _FORTIFY_SOURCE definition)"
+      default_state: >-
+        No -D_FORTIFY_SOURCE in kernel build configs. Only reference is
+        #undef _FORTIFY_SOURCE in third-party jitterentropy library.
+        Fuchsia relies on SafeStack, ASan, and type-safe wrappers instead.
+    commits: []
+    discussions: []
+    rationale: >-
+      FORTIFY_SOURCE is not applied to kernel builds. The Zircon kernel
+      uses alternative mechanisms (SafeStack, type-safe user_ptr, KASAN
+      variant) for buffer overflow detection. P=0 (absent from kernel).
+  C1a.5:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "kasan build variant"
+      - "kernel.pmm-checker.enable (default=false)"
+      - "kernel.ubsan.action (default=panic)"
+      source_files:
+      - "zircon/kernel/lib/instrumentation/asan/README.md"
+      - "zircon/kernel/lib/instrumentation/include/lib/instrumentation/asan.h"
+      - "zircon/kernel/arch/x86/start.S (KASAN shadow setup)"
+      - "zircon/kernel/lib/heap/cmpctmalloc/cmpctmalloc.cc (redzone integration)"
+      default_state: >-
+        Full KASAN implementation with shadow map at [-128GB, -64GB),
+        heap redzones (left/right), quarantine (65536-element circular
+        queue), global variable instrumentation, and PMM integration.
+        Enabled via kasan build variant, not in production. UBSan also
+        available.
+    commits:
+    - hash: "54c5edfc37afe7294256552cefefca64c6ce7e94"
+      date: "2020-04-29"
+      description: "[build] Add kasan variant (introduces the kernel ASAN (kasan) build variant)"
+    discussions: []
+    rationale: >-
+      Comprehensive KASAN with shadow map, redzones, quarantine, and
+      global instrumentation. Well-designed but testing-only (not
+      production). D=1 (available, requires opt-in via build variant).
+      S=2 (comprehensive detection when enabled). PMM checker provides
+      additional page-level corruption detection.
+  C1a.6:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/BUILD.gn (x64 primary target; ARM MTE is not an x86 facility)"
+      default_state:
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM MTE (spatial mode) does not exist on x86-64. N/A.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/lib/arch/include/lib/arch/arm64/feature.h:448-453 (ID_AA64PFR1_EL1.MTE decode: MTE/MTE2/MTE3)"
+        default_state: >-
+          Zircon decodes the ID_AA64PFR1_EL1.MTE feature field but makes no
+          use of memory tagging: no SCTLR_EL1.ATA/ATA0 enablement, no
+          TCR_EL1.TBI/TBID configuration for tag-checked accesses, no MAIR
+          Tagged-Normal attribute, and no tag-aware allocator (cmpctmalloc and
+          the PMM are tag-oblivious). No kasan-hw-tags-style build variant
+          exists.
+      rationale: >-
+        arm64: P=0 — on AArch64 the surface exists (FEAT_MTE is an
+        architecture feature; QEMU -cpu max and current Cortex silicon provide
+        it) but Zircon implements no spatial memory-tagging mode at all,
+        feature-ID decode aside. The evaluated production boards (Cortex-A53/
+        A73-class, ARMv8.0) also lack MTE silicon, so there is no
+        latent-but-unused hardware path either. P=0 forces D=S=A=T=0.
+  C1a.7:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "ubsan build variant (is_ubsan toolchain)"
+      - "kernel.ubsan.action (default=panic)"
+      source_files:
+      - "zircon/kernel/lib/instrumentation/ubsan/BUILD.gn (gated on is_ubsan)"
+      - "zircon/kernel/lib/instrumentation/ubsan/runtime.cc (Report/VPrintf, action from kernel.ubsan.action)"
+      - "zircon/kernel/lib/boot-options/include/lib/boot-options/options.inc:945 (kernel.ubsan.action)"
+      default_state: >-
+        Array-index / signed-overflow / etc. checking is delivered by the
+        clang UndefinedBehaviorSanitizer toolchain, compiled into the kernel
+        only under the `ubsan` build variant (is_ubsan). The check set
+        includes -fsanitize=bounds (array-index, the UBSAN_BOUNDS analogue);
+        the custom check handlers live in //src/lib/ubsan-custom (outside the
+        zircon sparse tree). When instrumented, kernel.ubsan.action (default
+        panic, alternative oops) decides whether a detected violation is fatal.
+        Standard production kernels (BUILD.gn defaults) ship WITHOUT the ubsan
+        variant, so no array-bounds instrumentation is present by default.
+        This mirrors the KASAN treatment in C1a.5 (debug/CI build variant, not
+        a production default).
+    commits:
+    - hash: "f8dec1517a4b26f17539de20ed674297e88ae26c"
+      date: "2023-05-31"
+      description: "[kernel] Add kubsan variant. (kernel UBSan build variant with array-bounds checking)"
+    discussions: []
+    rationale: >-
+      Surface exists and UBSan array-bounds instrumentation is available, so
+      P=1 (not na): Zircon has a real, maintained ubsan toolchain variant used
+      in CI, exactly parallel to the kasan variant scored under C1a.5. D=1
+      because it is opt-in via the is_ubsan build variant and is absent from
+      the evaluated production build (BUILD.gn defaults compile no UBSan); this
+      tracks the openbsd C1a.7 precedent (P=1 D=1, KUBSAN debug option absent
+      from GENERIC) rather than the linux one (D=2, Fedora ships
+      UBSAN_BOUNDS default-on). S=2: when enabled the bounds check meaningfully
+      raises difficulty by trapping out-of-bounds array indexing at the point
+      of access (kernel.ubsan.action=panic fail-stops), matching the openbsd
+      S=2; not S=3 because it only covers compiler-visible array accesses and a
+      build can be configured to oops-and-continue. A=2: in-tree, toolchain-
+      integrated instrumentation that is not a core design property (bolt-on
+      sanitizer selected at build time). T_age=2: the kernel ubsan runtime was
+      introduced 2023-05-31 (~3y, in the 1-5y band). T_maintained=3: actively
+      maintained (most recent touch 2025-11-24, gBootOptions migration).
+      T=min(2,3)=2.
+  C1b.1:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "kasan build variant (enables quarantine)"
+      - "kernel.pmm-checker.enable (default=false)"
+      - "kernel.pmm-checker.action (default=oops)"
+      source_files:
+      - "zircon/kernel/lib/instrumentation/include/lib/instrumentation/asan.h (Quarantine, 65536 elements)"
+      - "zircon/kernel/lib/instrumentation/asan/asan-poisoning.cc (Quarantine::push)"
+      - "zircon/kernel/lib/heap/cmpctmalloc/cmpctmalloc.cc (quarantine in free, FREE_FILL 0x77)"
+      - "zircon/kernel/vm/pmm_checker.cc (fill pattern 0x43)"
+      default_state: >-
+        KASAN quarantine (65536-element circular queue) delays
+        reallocation of freed memory and poisons it. PMM checker fills
+        free pages with 0x43 pattern and checks on alloc. Both disabled
+        by default in production. Pinned pages get delayed reuse by
+        default (PmmOptDelayReuse).
+    commits:
+    - hash: "9e77f271d735210a6df31a234fe0e697ed84aebb"
+      date: "2020-05-29"
+      description: "[kernel][x86][kasan] Quarantine allocations (8/N) (65536-element quarantine delays reuse of freed kernel heap memory)"
+    - hash: "906701b8bbdcf4941620eedc4873f9c537f4edef"
+      date: "2020-05-20"
+      description: "[kernel][x86][kasan] Poison heap allocations/frees (7/N) (free-fill poisoning of kernel heap allocations)"
+    - hash: "7cfc760f8ed68c70104dac5e9566e738dd1e4385"
+      date: "2020-02-11"
+      description: "[kernel][pmm] Replace PMM free fill with PmmChecker (kernel.pmm-checker page-level fill-on-free with pattern verification on reallocation)"
+    discussions: []
+    rationale: >-
+      KASAN quarantine provides strong UAF mitigation when enabled.
+      PMM checker detects free-page corruption. Pinned page delayed
+      reuse is always-on. D=1 (quarantine and PMM checker disabled by
+      default in production). S=2 (65536-element quarantine significantly
+      increases UAF exploit difficulty when active). T=2 (T_maintained=2:
+      6 substantive commits on the cited quarantine/PMM-checker files in
+      the 18-month window).
+  C1b.2:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "CMPCT_DEBUG (debug fill patterns)"
+      - "kasan variant (heap redzones)"
+      source_files:
+      - "zircon/kernel/lib/heap/cmpctmalloc/cmpctmalloc.cc"
+      - "zircon/kernel/lib/heap/cmpctmalloc/include/lib/cmpctmalloc.h"
+      default_state: >-
+        cmpctmalloc allocator has debug fill patterns (ALLOC_FILL=0x99,
+        FREE_FILL=0x77, PADDING_FILL=0x55) in CMPCT_DEBUG builds.
+        KASAN redzones and header poisoning in kasan variant.
+        ZX_DEBUG_ASSERT for double-free detection (debug builds).
+        kHeapMaxAllocSize cap always present. No metadata obfuscation
+        or randomized bucket layout in production.
+    commits:
+    - hash: "d49ef9856bcdfcf6a3bacd83b6455ee59972b21b"
+      date: "2021-02-24"
+      description: "[kernel][heap] Enable sized delete, assert static size fits in heap block (size-consistency assert on every sized heap free)"
+    - hash: "12575a48fb333e7871bf58fb153f33030463d775"
+      date: "2021-04-08"
+      description: "[kernel][cmpctmalloc] Improve existing assert in unlink_free (free-list unlink integrity assert in cmpctmalloc)"
+    discussions: []
+    rationale: >-
+      cmpctmalloc has limited production hardening. Debug fills and
+      KASAN redzones are variant/debug-only. No freelist obfuscation,
+      no canaries, no randomized buckets in production. Max allocation
+      size cap always present. Always-on ZX_ASSERT sanity checks in
+      free path (header size validation) provide basic corruption
+      detection but not true metadata hardening. D=1 (hardening
+      features are debug/variant-only). S=1 (weak: sanity asserts
+      only in production, no obfuscation or integrity checks).
+      T=2 (T_maintained=2: 6 substantive commits on cmpctmalloc in the
+      18-month window).
+  C1b.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/system/ulib/fbl/include/fbl/ref_counted_internal.h"
+      - "zircon/system/ulib/fbl/include/fbl/ref_counted.h"
+      default_state: >-
+        fbl::RefCountedBase uses int32_t atomic reference counts with
+        pre-adoption sentinel (0xC0000000) to detect double-adopt,
+        use-before-adopt, and use-after-free. ZX_ASSERT_MSG (fires in
+        all builds) on AddRef with rc < 1 and on Release with rc < 1.
+        No explicit saturation/clamping on overflow, but sentinel value
+        is maximally distant from wrapping.
+    commits:
+    - hash: "cdf2f1ce6600d4eca8883ed3fa18ba514b6a58cf"
+      date: "2017-07-26"
+      description: "[mxtl] RefCounted: Add dead- and dying-object asserts (asserts catch refcount manipulation on dead and dying objects)"
+    - hash: "170331480ad1926653d799ce40127f29ee42c45f"
+      date: "2018-09-17"
+      description: "[fbl][ref_counted] Remove size differences in RefCounted. (pre-adopted sentinel value makes adoption-protocol violations detectable in release builds)"
+    discussions: []
+    rationale: >-
+      RefPtr with unconditional assertions (ZX_ASSERT_MSG in all builds).
+      Adoption protocol catches common misuse patterns. No saturation
+      on overflow (implementation
+      uses sentinel approach instead). Practically safe since reaching
+      2^31 references is infeasible. D=2 (always-on assertions).
+      S=2 (significantly increases difficulty, catches most errors).
+      T=1 (T_maintained=1: the cited fbl/ref_counted*.h headers are
+      dormant — untouched since 2024-10, no commits in the 18-month
+      window).
+  C1b.4:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "LK_DEBUGLEVEL > 1 (enables DEBUG_ASSERT; off in production builds)"
+      source_files:
+      - "zircon/system/ulib/fbl/include/fbl/intrusive_double_list.h:71-183 (ZX_DEBUG_ASSERT IsValid()/InContainer() on node destruction and erase)"
+      - "zircon/system/ulib/fbl/include/fbl/intrusive_single_list.h (same assert pattern)"
+      - "zircon/kernel/include/assert.h (DEBUG_ASSERT gated on LK_DEBUGLEVEL)"
+      default_state: >-
+        The fbl intrusive containers used throughout the kernel
+        (fbl::DoublyLinkedList, fbl::SinglyLinkedList, fbl::WAVLTree)
+        carry ZX_DEBUG_ASSERT integrity checks on every insert/remove:
+        IsValid() validates next/prev consistency, InContainer() detects
+        double-insert and double-remove; node pointers are cleared to
+        nullptr on removal. The asserts compile away in production
+        (LK_DEBUGLEVEL-gated), exactly like NetBSD QUEUEDEBUG under
+        DIAGNOSTIC and FreeBSD QUEUE_MACRO_DEBUG under INVARIANTS.
+    commits:
+    - hash: "7c912a17b5a59abc722f8322546a2ec53bd5c057"
+      date: "2016-07-23"
+      description: "[utils] Add managed pointer support to DoublyLinkedList<> (the new intrusive list implementation lands with pervasive DEBUG_ASSERT state checks)"
+    discussions: []
+    rationale: >-
+      P=1: fbl intrusive containers perform real linked-list integrity
+      verification — next/prev consistency and in-container state asserted
+      on every insert/remove — directly analogous to NetBSD QUEUEDEBUG and
+      FreeBSD QMD/INVARIANTS queue checks (both scored P=1), and the
+      kernel uses these containers pervasively. D=1: compiled out of
+      production builds (LK_DEBUGLEVEL-gated), mirroring the
+      DIAGNOSTIC/INVARIANTS D=1 precedent. S=1: detects corruption and
+      misuse deterministically when enabled, but removed entries are
+      nullptr-cleared rather than poisoned, and release builds get no
+      protection. A=2 (template-enforced at every call site). T_age=3
+      (asserts shipped with the original 2016 container implementation),
+      T_maintained=2 (one substantive change to the cited intrusive-container
+      headers in the 18-month window).
+  C1b.5:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/BUILD.gn (x64 primary target; ARM MTE temporal tagging is not applicable)"
+      default_state:
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM MTE (temporal mode) does not exist on x86-64. N/A.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/lib/arch/include/lib/arch/arm64/feature.h:448-453 (ID_AA64PFR1_EL1.MTE decode: MTE/MTE2/MTE3)"
+        default_state: >-
+          Same finding as C1a.6: the MTE feature field is decoded but no
+          tagging mode is ever enabled (no SCTLR_EL1.ATA, no TCR TBI/TBID, no
+          MAIR Tagged-Normal), so there is no retag-on-free / temporal
+          use-after-free detection either. Temporal heap defenses on arm64
+          are the same software ones as on x86 (KASAN quarantine and the PMM
+          checker, both opt-in — C1b.1).
+      rationale: >-
+        arm64: P=0 — temporal MTE (retag-on-free) is absent; only the
+        feature-ID field is read. Mirrors C1a.6: surface exists on the
+        architecture, mechanism not implemented. P=0 forces D=S=A=T=0.
+  C1c.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "-ftrivial-auto-var-init=pattern (build/config/BUILD.gn, auto-var-init config)"
+      source_files:
+      - "build/config/BUILD.gn (auto-var-init config)"
+      default_state: >-
+        Clang -ftrivial-auto-var-init=pattern enabled globally for all
+        Fuchsia C/C++ builds including kernel. Uses pattern value (not
+        zero) to maximize bug exposure: uninitialized reads produce
+        visibly wrong values rather than silently appearing correct.
+    commits:
+    - hash: "c2e69b2cfd04956050323b8a47d802ba223c3064"
+      date: "2019-09-25"
+      description: "[zircon][gn] Enable automatic variable initialization (-ftrivial-auto-var-init=pattern enabled for the Zircon build)"
+    discussions: []
+    rationale: >-
+      Global -ftrivial-auto-var-init=pattern. Pattern mode chosen over
+      zero to improve bug detection. Covers all automatic variables
+      including in kernel code. D=2 (default-on in standard build).
+      S=2 (prevents use of uninitialized stack data; pattern mode
+      reduces info-leak risk though less than zero-init).
+  C1c.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "kernel.heap.alloc-fill-threshold (default=0, disabled for kernel heap)"
+      source_files:
+      - "zircon/kernel/vm/vm.cc (zero_page allocation)"
+      - "zircon/kernel/vm/vm_cow_pages.cc (ZeroPage, IsZeroPage, zero-page COW)"
+      - "zircon/kernel/lib/heap/cmpctmalloc/cmpctmalloc.cc (g_fill_on_alloc_threshold)"
+      - "zircon/kernel/lib/boot-options/include/lib/boot-options/options.inc"
+      default_state: >-
+        All VMOs created via zx_vmo_create() are always zero-filled by
+        design. Kernel maintains a shared zero page; new pages use
+        copy-on-write semantics until written. Kernel heap zero-fill
+        is opt-in via kernel.heap.alloc-fill-threshold boot option
+        (default=0, disabled).
+    commits:
+    - hash: "f7531f802a61f188e3b57f5902e3f2e9c3534d1e"
+      date: "2017-03-14"
+      description: "[kernel][vm] add zero page optimization (anonymous VMO pages are zero-filled via a deduplicated zero page — the default-on core of the mechanism)"
+    - hash: "e6f9d966c79431bbe8efc1a5dba44f49057af02f"
+      date: "2021-12-13"
+      description: "[kernel][heap]: Optionally zero allocations at alloc time (kernel.heap.alloc-fill-threshold fill-on-allocation boot option)"
+    discussions: []
+    rationale: >-
+      VMO zero-fill is a fundamental security guarantee: all new memory
+      allocation starts as zero via COW zero-page. This is a core design
+      property (A=3), not an add-on. Kernel heap zero-fill is opt-in.
+      D=2 (VMO zeroing is default for the primary allocation path).
+      S=2 (prevents info leaks from recycled VMO memory; kernel heap
+      gap reduces overall strength).
+  C1d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/vm/kstack.cc"
+      - "zircon/kernel/vm/vm_aspace.cc (ASLR enabled for User type only)"
+      default_state: >-
+        ASLR is only enabled for user-type address spaces. Kernel address
+        space is Type::Kernel with ASLR disabled (prng=nullptr, index=0,
+        deterministic first-fit). No per-syscall or per-thread kernel
+        stack offset randomization.
+    commits: []
+    discussions: []
+    rationale: >-
+      No kernel stack randomization. Kernel ASLR is disabled; user ASLR
+      is enabled (30-bit entropy) but that is a separate mechanism.
+      Kernel stacks are allocated deterministically. P=0 (absent).
+  C1d.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/lib/heap/cmpctmalloc/cmpctmalloc.cc"
+      default_state: >-
+        cmpctmalloc is a deterministic best-fit allocator. cmpct_alloc()
+        uses find_nonempty_bucket() to find the first free block in the
+        appropriate size bucket. No freelist randomization, no random
+        padding, no allocation-order randomization.
+    commits: []
+    discussions: []
+    rationale: >-
+      cmpctmalloc is fully deterministic. No randomization of allocation
+      order, freelist, or inter-allocation padding. P=0 (absent).
+  C1d.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/BUILD.gn (kernel Clang flags contain no structure-layout randomization pass)"
+      default_state: >-
+        No randomize_layout, __randomize_layout, or randstruct equivalent.
+        Fuchsia uses Clang, which has no structure layout randomization
+        plugin. Expected for C++ codebases.
+    commits: []
+    discussions: []
+    rationale: >-
+      No structure layout randomization. Struct layouts are fixed and
+      known at compile time. P=0 (absent, confirmed).
+  C1e.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/mmu.cc (NXE in EFER, SMEP/SMAP in CR4)"
+      - "zircon/kernel/vm/unittests/aspace_unittest.cc (kernel region permissions)"
+      - "zircon/kernel/arch/x86/mmu_tests.cc (physmap NX test)"
+      - "zircon/kernel/vm/include/vm/arch_vm_aspace.h (PERM flags)"
+      default_state: >-
+        NXE enabled in EFER MSR. Kernel segments: code=R+X, rodata=R,
+        relro=R, data_bss=R+W. Physmap mapped NX (verified by test).
+        Non-executable pages get X86_MMU_PG_NX bit. Hardware features
+        auto-detected via CPUID.
+    commits:
+    - hash: "99eca20c97cbf08a977925ffa35425ea32bdb4d7"
+      date: "2021-01-06"
+      description: "[kernel] Mark the physmap no-execute (closes the largest executable-mapped region in the kernel address space)"
+    - hash: "af317f4bf49ae602e70c0db63ef58c6d06cd3f76"
+      date: "2024-08-07"
+      description: "[kernel][x86] Protect physmap (unmaps non-RAM portions of the physmap on x86)"
+    discussions: []
+    rationale: >-
+      NX enforcement with proper kernel segment separation (code RX,
+      data RW, rodata RO). Physmap is NX. SMEP/SMAP enabled (see C1e.4).
+      Gap: MMU layer does not prohibit RWX mappings (bootstrap uses RWX);
+      no software-level W^X policy. S=2 (hardware enforcement with
+      proper default segments, but RWX possible in theory).
+    arm64:
+      P: 1
+      D: 2
+      S: 2
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/arch/arm64/include/arch/arm64/mmu.h:355-390 (MMU_PTE_KERNEL_RO/DATA_FLAGS carry UXN|PXN; only the RWX boot-ident flags omit PXN)"
+        - "zircon/kernel/arch/arm64/mmu.cc:245-285 (PTE attribute construction: non-executable mappings get UXN|PXN)"
+        - "zircon/kernel/vm/unittests/aspace_unittest.cc (kernel region permissions)"
+        default_state: >-
+          Same per-ELF-segment discipline as x86 (the segment-permission
+          handoff mapping is arch-neutral): kernel code R+X, rodata/relro
+          read-only, data/bss RW — enforced on arm64 through the UXN/PXN and
+          AP page-table attribute bits rather than EFER.NXE. Kernel rodata
+          and data carry both UXN and PXN; the physmap is non-executable.
+          The early-boot identity map uses MMU_PTE_KERNEL_RWX_FLAGS, the same
+          bootstrap-RWX gap noted on x86.
+      commits:
+      - hash: "7d731b4e9599088ac3073956933559da7bca6a00"
+        date: "2021-12-07"
+        description: "[kernel][arm64][mmu] Fix bug where privileged executable pages are executable from EL0 (corrects UXN/PXN assignment — PXN stamped on user-executable mappings, UXN|PXN on non-executable ones — so kernel and user pages are never executable from the wrong privilege level)"
+      rationale: >-
+        arm64: same scores as x86-64. Execute-never is a base-ISA page
+        attribute (UXN/PXN) applied per segment, with the identical
+        residual gap: the MMU layer itself does not prohibit RWX mappings
+        (the boot identity map is RWX), and there is no software W^X
+        policy object for kernel space. S=2, D=2, A=2, T=3 carried over.
+  C1e.2:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/kernel.ld (RODATA and RELRO segments)"
+      - "zircon/kernel/vm/unittests/aspace_unittest.cc (kernel region permissions)"
+      - "zircon/kernel/arch/x86/ioapic.cc (informal ro-after-init comment)"
+      default_state: >-
+        Linker script defines separate RODATA (__rodata_start to
+        __rodata_end) and RELRO (__relro_start to __relro_end) segments,
+        both mapped read-only at boot. No __ro_after_init annotation or
+        dynamic page protection transition mechanism.
+    commits:
+    - hash: "d7dc587c7c41c4b3ea155501fd7e616dcfaa9a6b"
+      date: "2017-10-13"
+      description: "[kernel] Place rodso images first in RODATA segment (the kernel image's read-only RODATA segment organization, in place since 2017)"
+    - hash: "23089061850f387755d0726cc4cc7f8b25ec3211"
+      date: "2025-03-19"
+      description: "[kernel] Ensure .dynamic ends up as read-only (link-time-relocated .dynamic metadata sealed read-only in the kernel image)"
+    - hash: "de9a82db765755c8023ea2d7e84f8cef236549f5"
+      date: "2025-03-27"
+      description: "[kernel] Make kernel link compatible with GNU ld's RELRO requirements (kernel image link layout brought in line with RELRO segment requirements)"
+    discussions: []
+    rationale: >-
+      RODATA and RELRO segments are read-only by default. However, no
+      equivalent of Linux's __ro_after_init that dynamically transitions
+      data to read-only after initialization. Some data is informally
+      documented as "read-only after initialization" (ioapic.cc) but
+      enforced only by convention, not hardware page protection changes.
+      S=1 (static segments only, no dynamic ro-after-init transition).
+  C1e.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/object/include/object/vm_object_dispatcher.h (InitialMutability)"
+      - "zircon/kernel/object/vm_object_dispatcher.cc (ZX_INFO_VMO_IMMUTABLE)"
+      - "zircon/kernel/lib/syscalls/vmo.cc (immutable snapshot creation)"
+      - "zircon/kernel/vm/vm.cc (kernel heap VMAR: no CAN_MAP_EXECUTE)"
+      default_state: >-
+        VMOs created with ZX_VMO_CHILD_SNAPSHOT without write rights are
+        immutable (VmObjectDispatcher::InitialMutability::kImmutable).
+        Kernel heap VMAR created with CAN_MAP_READ|CAN_MAP_WRITE only
+        (no CAN_MAP_EXECUTE), enforcing W^X on heap. Kernel code segment
+        is always RX-only.
+    commits:
+    - hash: "0e83c15f5d0f7408f441bd1319b70f187f82bf42"
+      date: "2021-04-02"
+      description: "[zircon][kernel] Support for ZX_INFO_VMO_IMMUTABLE (RFC-0080 immutable VMO snapshots reported via InitialMutability)"
+    discussions: []
+    rationale: >-
+      VMO-level immutability for snapshots plus kernel heap W^X (no
+      execute on heap VMAR). Code segments inherently immutable (RX).
+      D=2 (heap W^X and code RX are default). S=2 (effective for
+      preventing code injection via heap and data modification of
+      immutable VMOs).
+  C1e.4:
+    P: 1
+    D: 2
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/mmu.cc:1190 (cr4.set_smep)"
+      - "zircon/kernel/arch/x86/include/arch/x86/registers.h (X86_CR4_SMEP)"
+      - "zircon/kernel/arch/x86/include/arch/x86/feature.h (X86_FEATURE_SMEP)"
+      default_state: >-
+        SMEP enabled unconditionally when CPU supports it:
+        cr4.set_smep(x86_feature_test(X86_FEATURE_SMEP)). SMAP also
+        enabled: cr4.set_smap(g_x86_feature_has_smap). NXE always
+        enabled: efer_msr |= X86_EFER_NXE. Auto-detected via CPUID.
+    commits:
+    - hash: "194eb2de832e80318255f258a6cb3162d73b446b"
+      date: "2021-12-14"
+      description: "[test][kernel_panic] Add SMEP/PXN tests. (regression tests pinning that ring-0 execution of user pages panics; the SMEP enable itself predates the visible history)"
+    discussions: []
+    rationale: >-
+      SMEP hardware enforcement prevents kernel from executing userspace
+      pages. Auto-enabled when CPU supports it. S=3 (hardware-enforced,
+      no known practical bypass without kernel write to CR4). SMAP
+      provides complementary access prevention (scored in C3b.2).
+    arm64:
+      P: 1
+      D: 3
+      S: 3
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/arch/arm64/mmu.cc:272-281 (user-executable mappings get MMU_PTE_ATTR_PXN; non-executable mappings get UXN|PXN)"
+        - "zircon/kernel/arch/arm64/include/arch/arm64/mmu.h:196-203 (PXN/UXN attribute bits)"
+        default_state: >-
+          The SMEP equivalent on AArch64 is PXN (Privileged Execute Never).
+          Zircon's PTE construction sets MMU_PTE_ATTR_PXN on every user
+          mapping — user-executable pages get PXN (kernel cannot execute
+          them), and non-executable pages get UXN|PXN. Unlike x86 SMEP this
+          is not a CPUID-conditional CPU control bit: PXN is a base-ARMv8
+          page-table attribute applied unconditionally, with no boot knob.
+      commits:
+      - hash: "7d731b4e9599088ac3073956933559da7bca6a00"
+        date: "2021-12-07"
+        description: "[kernel][arm64][mmu] Fix bug where privileged executable pages are executable from EL0 (corrects UXN/PXN assignment — PXN stamped on user-executable mappings, UXN|PXN on non-executable ones — so kernel and user pages are never executable from the wrong privilege level)"
+      rationale: >-
+        arm64: P=1 — PXN provides kernel execute-never over all userspace
+        mappings. D=3 (above the x86 D=2): SMEP depends on CPU support and
+        a CR4 setting, while PXN is stamped into every user PTE by
+        construction on all ARMv8 hardware and cannot be disabled. S=3 —
+        hardware-enforced, no practical bypass short of corrupting page
+        tables themselves. A=2, T=3 (page-table code stable and actively
+        maintained since the arm64 port's beginning).
+  C1e.5:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/object/include/object/dispatcher.h (Dispatcher base class)"
+      - "zircon/kernel/object/include/object/handle_table.h (per-process HandleTable)"
+      - "zircon/kernel/object/include/object/process_dispatcher.h (immutable fields)"
+      - "zircon/kernel/object/include/object/job_policy.h (immutable const instances)"
+      default_state: >-
+        Every kernel resource is a Dispatcher subclass with intrusive
+        atomic reference counting. HandleTable is per-process with
+        lock-guarded access and anti-prediction handle value mixing.
+        Thread state split across typed kernel objects (ThreadDispatcher,
+        ProcessDispatcher). ProcessDispatcher explicitly marks immutable
+        fields. JobPolicy objects are immutable const. No Linux-style
+        thread_info adjacency to kernel stack.
+    commits:
+    - hash: "2cf39818e66520c65b835eed958c83bad95da98a"
+      date: "2020-10-16"
+      description: "[kernel][handle] Factor out a HandleTable from ProcessDispatcher (per-process handle table becomes a distinct kernel-heap object out of user reach)"
+    discussions: []
+    rationale: >-
+      Zircon's Dispatcher/Handle object model provides strong isolation
+      of kernel metadata through dedicated C++ objects with per-process
+      handle tables. Handle values mixed for anti-prediction. Immutable
+      fields explicitly annotated. This is fundamental to Zircon
+      architecture. D=3 (mandatory, cannot be bypassed). S=2: hardware
+      address-space isolation is total against userspace, and Fuchsia sits
+      at the top of the S=2 band — Handles live in a dedicated guarded
+      arena (fbl/arena.cc sub-VMAR with unmapped guard page) and kernel
+      stacks are separately VMO-mapped with guard regions — but Dispatchers
+      and the HandleTable itself are ordinary objects on the shared
+      cmpctmalloc kernel heap (process_dispatcher.cc AllocChecker new ->
+      malloc) with no metadata-integrity hardening and no proof, so an
+      in-kernel heap overflow can still corrupt adjacent dispatcher
+      metadata (matches Fiasco/Tock/Linux/Redox S=2; seL4's S=3 is
+      proof-backed). A=3 (core design property).
+  C1f.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/phys/efi/mkfatfs/src/main.rs (build tool only, not kernel)"
+      default_state: >-
+        Zircon kernel is written entirely in C++. No Rust in kernel
+        proper. Fuchsia userspace services use Rust extensively but the
+        kernel itself is C++. C++ safety features used: fbl::RefPtr,
+        ktl::unique_ptr, fbl::AllocChecker, SafeStack, SCS, lockdep
+        annotations (TA_REQ, TA_GUARDED).
+    commits: []
+    discussions: []
+    rationale: >-
+      Kernel is C++, not a memory-safe language. Extensive C++ safety
+      features (smart pointers, RAII, lockdep) provide partial
+      mitigation but do not eliminate memory-safety vulnerabilities.
+      Rust is used only in userspace services. P=0 (no memory-safe
+      language in kernel).
+  C2a.1:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 1
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "-fsanitize=cfi (build variant)"
+      - "__cfi_check exported per ELF module"
+      source_files:
+      - "zircon/kernel/phys/cfi-runtime.cc (__cfi_slowpath, __cfi_slowpath_diag)"
+      - "zircon/kernel/phys/BUILD.gn:946 (CFI cross-DSO checking)"
+      - "zircon/kernel/phys/main-symbolize-cfi.cc (CFI check dispatch)"
+      - "zircon/kernel/phys/elf-image.cc:255 (__cfi_check symbol)"
+      default_state: >-
+        Clang CFI infrastructure built into physboot/kernel loading
+        pipeline. Cross-DSO CFI checking via __cfi_slowpath runtime.
+        Each loaded ELF module checked for __cfi_check function.
+        Enabled via -fsanitize=cfi build variant; not confirmed as
+        default in production kernel build.
+    commits:
+    - hash: "fb357c1b6d150604fece851ef3437ec124a367f0"
+      date: "2025-09-15"
+      description: "[kernel][phys] Wire up a custom runtime for -fsanitize-cfi-cross-dso (cross-DSO CFI runtime (__cfi_slowpath/__cfi_check) for the kernel phys ELF images)"
+    discussions: []
+    rationale: >-
+      Clang CFI infrastructure present in kernel phys modules with
+      full cross-DSO checking runtime. Build system exports __cfi_check.
+      D=1 (build variant, not confirmed as production default).
+      S=2 (Clang CFI is moderate: type-based checks effective against
+      type-confused indirect calls). T_age=1: commit-history review
+      shows the kernel/phys CFI runtime first landed 2025-09-15
+      (fb357c1b6d1), about seven months before the evaluated snapshot;
+      no kernel CFI build variant existed earlier (pre-2025 commits
+      added only assembly CFI annotations, no runtime checking).
+      T = min(1, 3) = 1.
+  C2a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/BUILD.gn (x86 kernel build contains no CET-IBT/ENDBR enablement)"
+      default_state: >-
+        No ENDBR, IBT, or Intel CET IBT references in Zircon x86 arch
+        code. Zircon primarily targets ARM64; x86 support exists but
+        no IBT landing pad instructions are present.
+    commits: []
+    discussions: []
+    rationale: >-
+      Intel IBT (Indirect Branch Tracking) not implemented on x86-64.
+      No ENDBR instructions in kernel code. P=0 (absent).
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/arch/arm64/BUILD.gn (AArch64 target; Intel CET-IBT is not applicable)"
+        default_state: >-
+          Intel IBT/ENDBR is an x86 ISA feature. On arm64 the hardware
+          forward-edge mechanism is BTI, scored in C2a.3.
+      rationale: >-
+        arm64: N/A — Indirect Branch Tracking is x86-only; the AArch64
+        analogue (ARM BTI) is evaluated under C2a.3.
+  C2a.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/arm64/include/arch/arm64/registers.h (BTYPE flags)"
+      - "zircon/kernel/lib/arch/include/lib/arch/arm64/feature.h (FEAT_BTI detection)"
+      default_state: >-
+        BTI feature detection and BTYPE flag handling present in ARM64
+        code. Scored in supplementary ARM64 column.
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM BTI is N/A in the primary x86-64 evaluation.
+      BTI feature detection present in ARM64 arch code but the kernel
+      itself does not appear to be compiled with BTI enforcement.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/lib/arch/include/lib/arch/arm64/feature.h:461-464 (ID_AA64PFR1_EL1.BT decode)"
+        - "zircon/kernel/arch/arm64/include/arch/arm64/registers.h (BTYPE flag handling for userspace exceptions)"
+        default_state: >-
+          Zircon decodes the FEAT_BTI feature field and understands BTYPE in
+          exception state, but the kernel is not compiled with
+          -mbranch-protection (no flag anywhere in the zircon tree), emits no
+          BTI landing pads, never sets the guarded-page (GP) page-table
+          attribute for kernel text, and does not enable SCTLR_EL1.BT.
+          Kernel forward-edge protection remains the optional Clang CFI build
+          variant (C2a.1).
+      rationale: >-
+        arm64: P=0 — the surface exists on AArch64 (Clang supports
+        -mbranch-protection=bti; QEMU -cpu max and ARMv8.5+ silicon provide
+        FEAT_BTI) but the kernel ships no BTI enforcement: feature decode
+        only, no landing pads, no GP-bit, no SCTLR_EL1.BT. The evaluated
+        production boards (ARMv8.0 A53/A73-class) also lack BTI silicon.
+        P=0 forces D=S=A=T=0.
+  C2b.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "-fsanitize=safe-stack (x86-64 default)"
+      - "-fsanitize=shadow-call-stack (ARM64 default)"
+      source_files:
+      - "zircon/kernel/arch/arm64/BUILD.gn:27-30 (SCS for ARM64)"
+      - "zircon/kernel/arch/arm64/exceptions.S:287-310 (SCS save/restore)"
+      - "zircon/kernel/arch/arm64/asm.S:16-50 (SCS context switch)"
+      default_state: >-
+        On x86-64: SafeStack (-fsanitize=safe-stack) separates safe
+        stack (return addresses, spill slots) from unsafe stack (local
+        variables). On ARM64: Shadow Call Stack (-fsanitize=shadow-call-stack)
+        uses x18 register as dedicated SCS pointer. Both default-on for
+        their respective architectures.
+    commits:
+    - hash: "b8854b6ea6f9d3a8eca60d6486ab807e4b7ef3b5"
+      date: "2017-04-21"
+      description: "Enable SafeStack for Fuchsia (splits return addresses onto the compiler-managed safe stack by default)"
+    discussions: []
+    rationale: >-
+      SafeStack on x86-64 provides backward-edge protection by isolating
+      return addresses on a separate stack. Shadow Call Stack on ARM64
+      is stronger (dedicated register, separate memory). For x86-64
+      evaluation: SafeStack is moderate (S=2) since both stacks share
+      the same address space (unlike SCS which uses a dedicated register).
+      D=2 (default-on for x86-64 builds). Dependency cap: C1d.1 is
+      P=0 — Zircon does not randomize the kernel stack, so the unsafe stack's
+      location is predictable relative to leaked kernel pointers. SafeStack
+      relies on the separate stack being hard to find, so S_eff=1.
+    arm64:
+      P: 1
+      D: 2
+      S: 2
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options:
+        - "-fsanitize=shadow-call-stack + -fno-sanitize=safe-stack (arm64 kernel ABI config, Clang)"
+        source_files:
+        - "zircon/kernel/arch/arm64/BUILD.gn:25-32 (SCS enabled for the kernel ABI)"
+        - "zircon/kernel/arch/arm64/exceptions.S (shadow_call_sp save/restore on EL0 entry/exit)"
+        - "zircon/kernel/arch/arm64/asm.S (SCS pointer in context switch)"
+        - "zircon/kernel/vm/kstack.cc (per-thread shadow call stack with unmapped guard regions)"
+        default_state: >-
+          The arm64 kernel is built with -fsanitize=shadow-call-stack
+          (SafeStack explicitly disabled): return addresses are pushed to a
+          separate shadow stack addressed by the reserved x18 register, which
+          is saved/restored across exceptions and context switches. Each
+          thread's SCS is a dedicated kernel-stack mapping with unmapped guard
+          regions on both sides (C1a.2). Default-on for the official Clang
+          toolchain (the only supported production toolchain); a GCC build
+          would lack it.
+      commits:
+      - hash: "8f6ff41970eecda24e57f1fb1698fa2971894ebf"
+        date: "2019-10-10"
+        description: "[kernel] Use shadow-call-stack on ARM64 (the arm64 kernel ABI replaces x86's SafeStack with the Shadow Call Stack, protecting kernel return addresses)"
+      rationale: >-
+        arm64: P=1 — the backward edge is protected by the Shadow Call Stack,
+        a stronger realization than x86's SafeStack: the SCS pointer lives in
+        a reserved register (x18) rather than memory, so an arbitrary-write
+        attacker must first locate the shadow stack. S=2 — SCS memory is
+        still ordinary writable kernel memory with no integrity protection
+        (unlike PAC/GCS), so a strong read+write primitive defeats it;
+        matches the Linux SCS anchor. D=2 — default-on in the standard
+        (Clang) build. A=2, T=3 (SCS in the arm64 kernel ABI since ~2019,
+        actively maintained). Dependency cap: C1d.1 is P=0 — Zircon
+        does not randomize kernel stack placement, so the "must first locate
+        the shadow stack" step above rests on no randomization budget and a
+        single kernel-pointer leak exposes it. S_eff=1.
+  C2b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/BUILD.gn (x86 kernel build contains no CET shadow-stack enablement)"
+      default_state: >-
+        No CET Shadow Stack (SHSTK, WRSS, INCSSPQ) or CET-related MSR
+        references in Zircon x86 arch code.
+    commits: []
+    discussions: []
+    rationale: >-
+      Intel CET Shadow Stack not implemented. P=0 (absent). No kernel
+      CET-SS support in any target OS as of 2026.
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/arch/arm64/BUILD.gn (AArch64 target; Intel CET shadow stack is not applicable)"
+        default_state: >-
+          Intel CET Shadow Stack (SHSTK) is an x86 ISA feature. The AArch64
+          hardware backward-edge mechanisms are PAC (C2b.3) and GCS (C2b.4);
+          the software realization is the Shadow Call Stack (C2b.1).
+      rationale: >-
+        arm64: N/A — CET-SS is x86-only; the ARM hardware analogues are
+        scored at C2b.3 (PAC) and C2b.4 (GCS).
+  C2b.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/scripts/arm-esr.py (PAC trap/exception recognition)"
+      default_state: >-
+        ARM PAC exception handling recognized in diagnostic scripts but
+        not used for kernel code protection. Scored in supplementary
+        ARM64 column.
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM PAC is N/A in the primary x86-64 evaluation.
+      PAC exception handling recognized but no compiler flags or PAC
+      key setup found in kernel code.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/lib/arch/include/lib/arch/arm64/feature.h:178-207 (ID_AA64ISAR1_EL1 APA/API Pauth decode)"
+        - "zircon/kernel/scripts/arm-esr.py (PAC trap exception-class names in the ESR decoder)"
+        default_state: >-
+          Zircon decodes the pointer-authentication feature fields and can
+          name PAC faults in diagnostics, but the kernel is not compiled with
+          -mbranch-protection=pac-ret (no flag in the tree), contains no
+          paciasp/autiasp sequences, programs no APIA/APIB/APDA/APDB/APGA
+          keys, and never sets SCTLR_EL1.EnIA/EnIB/EnDA/EnDB. Kernel
+          backward-edge protection is the Shadow Call Stack (C2b.1).
+      rationale: >-
+        arm64: P=0 — the surface exists on AArch64 (FEAT_PAuth since
+        ARMv8.3; Clang supports pac-ret) but Zircon implements no kernel
+        PAC: no signing instructions, no key management, no SCTLR enables.
+        The evaluated production boards (ARMv8.0 A53/A73-class) also lack
+        PAuth silicon. P=0 forces D=S=A=T=0.
+  C2b.4:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/lib/arch/include/lib/arch/arm64/feature.h:416 (ID_AA64PFR1_EL1.GCS field decode only)"
+      - "zircon/kernel/scripts/arm-esr.py:395 (GCS exception-class name in ESR decoder)"
+      default_state: >-
+        ARM Guarded Control Stack (FEAT_GCS, ARMv9.4-A) is an AArch64-only
+        feature and is therefore N/A in the primary x86-64 evaluation, the same
+        framing used for ARM PAC in C2b.3. Even in the supplementary ARM64
+        column there is no GCS enablement: Zircon only decodes the
+        ID_AA64PFR1_EL1.GCS feature-ID field and names the "GCS exception"
+        class in a diagnostic script. There is no GCSCR_EL1/GCSPR_EL1
+        programming, no GCS context-switch save/restore, and no guarded-stack
+        setup. Kernel backward-edge protection on ARM64 is provided by the
+        Shadow Call Stack (scored in C2b.1).
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: FEAT_GCS is an AArch64 (ARMv9.4-A) feature with no
+      x86-64 counterpart, so it is N/A in the primary x86-64 evaluation. This
+      file mirrors that choice — C2b.3 (the directly analogous ARM hardware
+      backward-edge mechanism, PAC) is also scored na as "N/A in x86-64 primary
+      evaluation" — so for in-file consistency C2b.4 is na as well rather than
+      the P=0 the fuchsia os_hint suggests (a defensible alternative would be
+      scored P=0, since the arm64 production target's surface exists and the
+      mechanism is absent; the established in-file ARM-backward-edge precedent
+      (C2b.3 = na) wins for consistency). Either way the substantive finding is
+      identical: no FEAT_GCS silicon ships and Zircon contains only feature-ID
+      decode, no GCS mechanism (backward-edge on ARM64 is SCS, C2b.1).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/lib/arch/include/lib/arch/arm64/feature.h:416 (ID_AA64PFR1_EL1.GCS field decode)"
+        - "zircon/kernel/scripts/arm-esr.py:395 (GCS exception-class name in ESR decoder)"
+        default_state: >-
+          As the base entry already records: Zircon only decodes the
+          ID_AA64PFR1_EL1.GCS feature-ID field and names the GCS exception
+          class in a diagnostic script. There is no GCSCR_EL1/GCSPR_EL1
+          programming, no GCS context-switch save/restore, and no
+          guarded-stack setup. Kernel backward-edge protection is the Shadow
+          Call Stack (C2b.1).
+      rationale: >-
+        arm64: P=0 — in the AArch64 column the surface exists (FEAT_GCS is an
+        ARMv9.4-A architecture feature) and the mechanism is absent, so the
+        base entry's na (chosen for x86-column consistency with C2b.3)
+        becomes a scored P=0 here, exactly as C2b.3 does. No FEAT_GCS
+        silicon ships in the evaluated targets. P=0 forces D=S=A=T=0.
+  C2c.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/BUILD.gn (complete statically compiled Zircon kernel inputs; no JIT subsystem)"
+      default_state: >-
+        Zircon has no in-kernel JIT engine. Only "jit" references are
+        jitterentropy (entropy source), which is unrelated.
+    commits: []
+    discussions: []
+    rationale: >-
+      No in-kernel JIT subsystem exists. N/A.
+      No JIT means no JIT attack surface.
+  C3a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - "aslr.disable (user ASLR only, default=false)"
+      - "aslr.entropy_bits (user ASLR only, default=30)"
+      source_files:
+      - "zircon/kernel/vm/vm_aspace.cc (ASLR enabled for User type only)"
+      - "zircon/kernel/arch/x86/include/arch/kernel_aspace.h:15 (fixed KERNEL_ASPACE_BASE 0xffffff8000000000)"
+      - "zircon/kernel/phys/lib/boot-shim/devicetree-secure-entropy-item.cc (kaslr-seed)"
+      default_state: >-
+        Kernel loaded at fixed virtual address 0xffff'ffff'0000'0000 on
+        x86-64. ASLR is enabled only for user-type address spaces (30-bit
+        entropy default, max 36 bits). KASLR infrastructure exists
+        (gen-kaslr-fixups.sh, devicetree kaslr-seed extraction) but
+        kernel base is not randomized on x86-64.
+    commits: []
+    discussions: []
+    rationale: >-
+      Kernel base address is NOT randomized on x86-64. Fixed virtual
+      address 0xffff'ffff'0000'0000. KASLR infrastructure (fixup scripts,
+      seed handling) exists suggesting future work, but currently not
+      active. User ASLR is strong (30-bit entropy) but is a separate
+      mechanism. P=0 (kernel ASLR absent on x86-64).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options:
+        - "aslr.disable (user ASLR only, default=false)"
+        - "aslr.entropy_bits (user ASLR only, default=30)"
+        source_files:
+        - "zircon/kernel/vm/vm_aspace.cc (ASLR enabled for User type only)"
+        - "zircon/kernel/arch/arm64/include/arch/kernel_aspace.h:15 (fixed KERNEL_ASPACE_BASE 0xffff000000000000)"
+        - "zircon/kernel/phys/lib/boot-shim/devicetree-secure-entropy-item.cc (devicetree kaslr-seed ingested as ZBI entropy only)"
+        default_state: >-
+          Identical posture to x86-64: kernel ASLR is disabled for the
+          Type::Kernel address space (prng=nullptr, deterministic
+          first-fit); the arm64 kernel address space base is the fixed
+          KERNEL_ASPACE_BASE. The devicetree kaslr-seed property that arm64
+          bootloaders/QEMU provide is extracted, but only as a ZBI entropy
+          item for the CPRNG — it does not randomize the kernel base. User
+          ASLR (30-bit default) is a separate mechanism.
+      rationale: >-
+        arm64: P=0 — kernel base not randomized, same as x86-64; the
+        kaslr-seed handling visible in the devicetree boot-shim feeds the
+        entropy pool, not a relocated kernel base. P=0 forces D=S=A=T=0.
+  C3a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/include/arch/kernel_aspace.h:15 (fixed kernel base leaves no FG-KASLR foundation)"
+      default_state: >-
+        No fine-grained function randomization or per-function layout
+        randomization. KASLR itself is not active (see C3a.1), so
+        FG-KASLR has no basis.
+    commits: []
+    discussions: []
+    rationale: >-
+      No FG-KASLR or function-granularity randomization. P=0 (absent).
+  C3b.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/page_tables/include/arch/x86/page_tables/page_tables.h:605-642"
+      - "zircon/kernel/lib/syscalls/restricted.cc (sys_restricted_enter)"
+      - "zircon/kernel/arch/x86/syscall.S (Swapgs + lfence mitigation)"
+      - "zircon/kernel/arch/x86/asm.S (mds_buff_overwrite via VERW)"
+      default_state: >-
+        Zircon uses shared + restricted page tables with explicit
+        isolation rules instead of traditional KPTI. Restricted mode
+        (sys_restricted_enter) provides separate user/kernel page table
+        views. Swapgs mitigation with lfence on syscall entry. MDS
+        buffer overwrite (VERW) on kernel-to-user transitions. L1D
+        cache flush on syscall error returns.
+    commits:
+    - hash: "6566e8231b1c23def0881e3bb866e2a4446a972a"
+      date: "2022-07-19"
+      description: "[kernel][restricted mode] First implementation of restricted mode (restricted/shared page-table-root pairs isolating untrusted code, x86 first)"
+    discussions: []
+    rationale: >-
+      No traditional KPTI but restricted mode page tables provide
+      kernel/user isolation via separate page table hierarchies —
+      separate address spaces are an architectural property of the
+      microkernel design, scored as a functional equivalent of KPTI.
+      MDS/VERW mitigations complement.
+      S=2 (different approach from KPTI; effective separation but
+      unclear if fully equivalent for Meltdown on vulnerable Intel CPUs).
+      T_age=2: commit-history review shows restricted mode first landed
+      2022-07-19 (6566e8231b1), ~3.7 years before the evaluated
+      snapshot; before that Zircon had unified shared kernel/user page
+      tables with Meltdown detection only, no isolation mitigation.
+      T = min(2, 3) = 2.
+    arm64:
+      P: 1
+      D: 2
+      S: 1
+      A: 2
+      T_age: 2
+      T_maintained: 3
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/arch/arm64/mmu.cc:2039-2060 (unified aspace pairs restricted + shared page-table roots)"
+        - "zircon/kernel/arch/arm64/restricted.cc (arm64 restricted-mode state validation)"
+        - "zircon/kernel/lib/syscalls/restricted.cc (sys_restricted_enter)"
+        - "zircon/kernel/lib/arch/include/lib/arch/arm64/feature.h:314-323 (CSV3 decode only)"
+        - "zircon/kernel/lib/arch/include/lib/arch/arm64/system.h:292-293 (TCR E0PD bits defined, never set)"
+        default_state: >-
+          The restricted/shared/unified aspace machinery exists identically
+          on arm64 (the unified aspace shares the restricted page-table root
+          and ASID), and kernel/user translation regimes are split across
+          TTBR1/TTBR0. However none of the x86 column's auxiliary leak
+          defenses have arm64 counterparts in Zircon: there is no
+          UNMAP_KERNEL_AT_EL0-style trampoline, TCR_EL1.E0PD is defined but
+          never programmed, CSV3 is only decoded, and there is no analogue of
+          the swapgs/lfence, MDS/VERW, or L1D-flush paths. Cortex-A75 — on
+          the kernel's own Spectre-v2 uarch list — is Meltdown-affected and
+          runs with the kernel mapped while EL0 executes.
+      commits:
+      - hash: "ff318e729018ee1f8c9d6d4b2d55930c39705e2d"
+        date: "2025-01-09"
+        description: "[zircon] support for aarch64/aarch32 restricted mode (arm64 unified aspace pairs restricted and shared translation-table roots)"
+      rationale: >-
+        arm64: P=1 — the same restricted-mode page-table separation scored on
+        x86 as a functional equivalent of KPTI is fully implemented on arm64.
+        S=1 (below the x86 S=2): the x86 column's complementary mitigations
+        (swapgs hardening, VERW, L1D flush) do not exist on arm64, and for
+        the one Meltdown-affected core Zircon supports (Cortex-A75) there is
+        no software unmap/E0PD fallback — isolation rests on hardware CSV3
+        immunity of the remaining cores. D=2 (default for restricted-mode
+        aspaces). A=2. T_age=2 (unified/restricted aspace machinery landed
+        ~2023), T_maintained=3 → T=2.
+  C3b.2:
+    P: 1
+    D: 2
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/feature.cc (g_x86_feature_has_smap)"
+      - "zircon/kernel/arch/x86/mmu.cc:1187-1191 (CR4: SMEP + SMAP)"
+      - "zircon/kernel/arch/x86/exceptions.S:45 (CLAC in interrupt entry)"
+      - "zircon/kernel/arch/x86/faults.cc:356-363 (SMAP violation detection)"
+      - "zircon/kernel/arch/x86/user-copy/BUILD.gn (SMAP-aware copy variants)"
+      default_state: >-
+        SMAP enabled via CR4 when hardware supports it. SMEP also enabled.
+        Separate SMAP-aware user-copy variants (_x86_copy_to_or_from_user
+        _movsq_smap / _movsb_smap). SMAP violation detected and reported
+        in exception handler. CLAC/STAC bracket user-copy operations.
+    commits:
+    - hash: "285227886372226f1a8c1dc0657992a591d2d442"
+      date: "2017-09-07"
+      description: "[kernel][x86] Add a global variable to cache x86_feature_test(X86_FEATURE_SMAP) (SMAP feature plumbing for the user-copy fault paths)"
+    - hash: "edd438b8f6fe755ee92d2b3cbe8b06cdaa1da541"
+      date: "2017-10-11"
+      description: "[kernel][x86] Implement startup-time code patching for SMAP instructions (STAC/CLAC patched into user-copy windows at startup)"
+    discussions: []
+    rationale: >-
+      SMAP hardware enforcement prevents kernel from accidentally
+      accessing userspace memory outside explicit copy windows.
+      Auto-enabled when CPU supports it. Dedicated SMAP-aware
+      user-copy implementations. S=3 (hardware enforcement, no known
+      practical bypass). D=2 (default when hardware supports it).
+    arm64:
+      P: 1
+      D: 2
+      S: 3
+      A: 2
+      T_age: 1
+      T_maintained: 3
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/arch/arm64/arch.cc:328-337 (arm64_enable_pan + SCTLR_EL1.SPAN=0: PSTATE.PAN set on every exception)"
+        - "zircon/kernel/arch/arm64/include/arch/arm64.h:107-109 (PAN set/clear helpers)"
+        - "zircon/kernel/arch/arm64/user-copy/user-copy.cc:25-35 (arm64_user_copy_pan_wrapped: PAN dropped only inside copy windows)"
+        - "zircon/kernel/arch/arm64/feature.cc:627-633 (FEAT_PAN detection)"
+        default_state: >-
+          The SMAP equivalent on AArch64 is PAN (Privileged Access Never,
+          ARMv8.1). When the CPU has FEAT_PAN, Zircon enables PSTATE.PAN at
+          init and clears SCTLR_EL1.SPAN so PAN is re-asserted by hardware on
+          every exception entry; user copies disable PAN only for the
+          duration of each bracketed copy (the clac/stac window analogue).
+          On ARMv8.0 cores (the A53/A73-class production boards) FEAT_PAN
+          does not exist and there is no hardware backstop — the same
+          hardware-dependence as SMAP on pre-Broadwell x86.
+      commits:
+      - hash: "0111f1e3102dc2afecc7f9377ba172e917d5840e"
+        date: "2020-04-07"
+        description: "[kernel][arm64] Keep the value of PSTATE.PAN unchanged on taking an exception to EL1 (SPAN groundwork; PAN itself not yet enabled)"
+      - hash: "f70eb90bec6be6c4f8b12e65400deaf0bfb6ac4e"
+        date: "2025-11-03"
+        description: "[kernel][arm64] implement PAN for hardware that supports it (PSTATE.PAN set on every exception via SCTLR_EL1.SPAN=0; user copies become PAN-bracketed windows)"
+      rationale: >-
+        arm64: P=1 — PAN gives supervisor-mode access prevention with PAN-
+        bracketed user-copy windows, structurally identical to the x86
+        SMAP/CLAC/STAC scheme. S=3 — hardware-enforced where present, no
+        practical bypass without first corrupting PSTATE/SCTLR. D=2 —
+        auto-enabled when hardware supports it (absent on the ARMv8.0
+        production cores, exactly mirroring the x86 hardware-conditional
+        D=2). A=2. T_age=1: commit-history review shows PAN enforcement
+        was only implemented 2025-11-03 (f70eb90bec6), about five months
+        before the evaluated snapshot — the 2020 SCTLR.SPAN handling
+        (0111f1e3102) was groundwork that left PAN disabled. A large
+        x86/arm64 maturity divergence: SMAP enforcement is 2017-era,
+        PAN is brand new. T = min(1, 3) = 1.
+  C3c.1:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "kernel.pmm-checker.enable (default=false)"
+      - "kernel.pmm-checker.action (default=oops)"
+      source_files:
+      - "zircon/kernel/vm/include/vm/pmm_checker.h (PmmChecker class)"
+      - "zircon/kernel/vm/pmm_node.cc:709-711 (FillPattern on free)"
+      - "zircon/kernel/vm/include/vm/pmm.h (PmmOptDelayReuse)"
+      - "zircon/kernel/vm/include/vm/vm_cow_pages.h (delayed reuse for pinned pages)"
+      default_state: >-
+        PmmChecker fills free pages with pattern (0x43) and checks on
+        alloc. Disabled by default (kernel.pmm-checker.enable=false).
+        Demand-zero on allocation via COW zero-page ensures no stale
+        data in new VMO pages. Pinned pages get delayed reuse by default.
+    commits:
+    - hash: "7cfc760f8ed68c70104dac5e9566e738dd1e4385"
+      date: "2020-02-11"
+      description: "[kernel][pmm] Replace PMM free fill with PmmChecker (kernel.pmm-checker page-level fill-on-free with pattern verification on reallocation)"
+    discussions: []
+    rationale: >-
+      PmmChecker (zero-on-free equivalent) is disabled by default.
+      Demand-zero on allocation (C1c.2) provides the info-leak
+      prevention at alloc time rather than free time. Pinned page
+      delayed reuse always on. D=1 (PmmChecker disabled). S=1 (pattern
+      fill, not actual zeroing; detection-oriented).
+  C3c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/exceptions.S (kernel return path restores state without stack erasure)"
+      default_state: >-
+        No stackleak or equivalent. Kernel stack is not erased on syscall
+        return. Register state is restored from saved iframe but stack
+        frames are not cleared.
+    commits: []
+    discussions: []
+    rationale: >-
+      No stack erasure on syscall return. The exposure is smaller on a
+      microkernel (minimal kernel stack usage per syscall), but the
+      attack surface still exists (kernel stack may contain sensitive
+      data). P=0 (absent).
+  C3c.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 2
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/syscall.S:28-37 (ZERO_COMMON_UNUSED_REGISTERS)"
+      - "zircon/kernel/arch/x86/syscall.S:370-398 (register restore on return)"
+      - "zircon/kernel/arch/x86/exceptions.S:123-141 (GPR zeroing on exception entry)"
+      - "zircon/kernel/arch/arm64/exceptions.S:775-790 (speculation_clear_gprs)"
+      default_state: >-
+        x86: ZERO_COMMON_UNUSED_REGISTERS macro zeroes rax, rbx, rbp,
+        r10-r15 on every syscall entry. All GPRs zeroed on exception/
+        interrupt entry. On return: registers restored from iframe,
+        "private kernel data must not be leaked to user mode."
+        ARM64: speculation_clear_gprs zeroes x8, x11-x15, x17, x19,
+        x21-x30 on syscall entry. Applied on every syscall dispatch.
+    commits:
+    - hash: "602bef7f8e276b20986fb111ae698afd6ecd568c"
+      date: "2022-07-12"
+      description: "[kernel][x86] syscall: Clear non-arg user regs on syscall entry (ZERO_COMMON_UNUSED_REGISTERS scrubs GPRs at syscall entry)"
+    - hash: "4e4db1968f2f7074f753eb70943cf93d7ab9b098"
+      date: "2022-07-12"
+      description: "[kernel][x86] interrupts: Clear (possibly) user regs on interrupt entry (extends GPR scrubbing to exception/interrupt entry)"
+    discussions: []
+    rationale: >-
+      Comprehensive register scrubbing on all syscall and exception
+      entry/return paths on both x86 and ARM64. Explicitly documented
+      as constraining speculative execution with user-controlled values.
+      Also prevents kernel register data leakage. D=2 (always-on).
+      S=2 (effective against register-based info leaks and Spectre
+      gadget construction). T_age=2: commit-history review shows GPR
+      scrubbing landed 2022-07-12 (602bef7f8e2/4e4db1968f2), ~3.7 years
+      before the evaluated snapshot; the 2020-2021 Spectre work used
+      branch-predictor invalidation, not register clearing.
+      T_maintained=2: the cited syscall/exception entry files saw only
+      sporadic non-trivial work in the 18-month window.
+      T = min(2, 2) = 2.
+    arm64:
+      P: 1
+      D: 2
+      S: 2
+      A: 2
+      T_age: 2
+      T_maintained: 3
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/arch/arm64/exceptions.S:775-790 (speculation_clear_gprs macro)"
+        - "zircon/kernel/arch/arm64/exceptions.S:846-848 (speculation_clear_gprs at the top of arm64_syscall_dispatcher)"
+        default_state: >-
+          On every syscall dispatch, speculation_clear_gprs zeroes the
+          general-purpose registers not carrying syscall arguments (x8,
+          x11-x15, x17, x19, x21-x30) before any kernel code runs, both to
+          deny speculative-execution gadgets user-controlled register values
+          and to avoid leaking stale kernel register state. On return,
+          register state is restored from the saved iframe.
+      commits:
+      - hash: "d8eee5f43faafbdeb11ffd50ecbb8ab7287646d1"
+        date: "2022-10-18"
+        description: "[kernel][arm64] syscall: Clear non-arg user regs on syscall entry (speculation_clear_gprs macro scrubs GPRs in the arm64 syscall dispatcher)"
+      rationale: >-
+        arm64: same scores as x86-64 — the mechanism exists natively on this
+        architecture (the base entry already cites it); this overlay simply
+        leads with the arm64 evidence instead of the x86
+        ZERO_COMMON_UNUSED_REGISTERS macro. D=2 (always-on), S=2, A=2.
+        T_age=2 (arm64 scrubbing landed 2022-10-18, d8eee5f43fa);
+        T = min(2, 3) = 2.
+  C3d.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/lib/syscalls/zircon.cc:137-175 (debuglog requires resource handle)"
+      - "zircon/kernel/lib/syscalls/debug.cc:46 (debug_read requires resource)"
+      default_state: >-
+        No dmesg, /proc/kallsyms, or equivalent. Kernel logs are
+        capability-gated: sys_debuglog_create requires
+        ZX_RSRC_SYSTEM_DEBUGLOG_BASE resource handle for readable logs.
+        sys_debug_read requires ZX_RSRC_SYSTEM_DEBUG_BASE resource.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no dmesg, kallsyms; logs
+      capability-gated by design. The attack surface (kernel
+      pointer/log exposure to unprivileged users) does not exist
+      because Fuchsia has no dmesg or kallsyms equivalent and kernel
+      log access requires explicit capability handles.
+  C3d.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/lib/syscalls/syscalls.cc (capability-gated syscall interface replaces procfs/sysfs diagnostics)"
+      default_state: >-
+        No procfs, sysfs, or filesystem-based kernel information
+        interfaces. All kernel information accessed via Zircon syscall
+        interface with capability-based access control using resource
+        handles (ZX_RSRC_KIND_SYSTEM, ZX_RSRC_SYSTEM_INFO_BASE).
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no procfs/sysfs. Fuchsia has
+      no filesystem-based kernel diagnostic interfaces. The attack
+      surface does not exist.
+  C4.2:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/object/handle.cc (Handle::Make, Handle::Dup, rights)"
+      - "zircon/kernel/object/handle_table.cc (per-process handle tables)"
+      - "zircon/kernel/object/include/object/dispatcher.h (default_rights template)"
+      default_state: >-
+        Every kernel object accessed exclusively through handles with
+        zx_rights_t rights. Rights can never be escalated. Handle values
+        use generation counters to prevent stale reuse. Handle lookup
+        uses fbl::conditional_select_nospec_eq for Spectre safety.
+        Handle count limited to 256K per arena. No ambient authority.
+    commits:
+    - hash: "0d77bb6c67469aa837e95693d06ddcf3255a634e"
+      date: "2016-11-17"
+      description: "[magenta][rights] introduce MX_RIGHT_ENUMERATE (early refinement of the fine-grained handle-rights model)"
+    - hash: "a20d84bcaa3c9ead03166bcdf306ccde4cb6f088"
+      date: "2020-02-06"
+      description: "[fbl]: conditional_select_nospec_*: Safely select between values vs Spectre V1 (Spectre-safe selection primitive used in capability lookups)"
+    - hash: "a44b73c3b034656c6093ab1234b28144d83b26ee"
+      date: "2020-02-07"
+      description: "[kernel] Spectre V1: Harden handle arena bounds check (handle-arena bounds check hardened against speculative bypass)"
+    discussions: []
+    rationale: >-
+      Zircon's native security model. Handle-based capability access is
+      the only way to interact with kernel objects. Rights cannot be
+      escalated, only attenuated. D=3 (mandatory, cannot be bypassed).
+      S=3 (no bypass without handle, Spectre-safe lookup). A=3 (core
+      design property since Zircon inception).
+  C4.3:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "kernel.enable-debugging-syscalls (default=false)"
+      source_files:
+      - "zircon/vdso (the complete syscall ABI - 209 production methods in .fidl files; 21 @vdsocall never enter the kernel, leaving 188 kernel-entry syscalls)"
+      - "zircon/kernel/lib/syscalls/syscalls.cc"
+      - "zircon/kernel/object/job_policy.cc (ZX_POL_* conditions, default-allow)"
+      default_state: >-
+        The syscall surface is architecturally fixed and mandatory for
+        every process: 209 production methods in zircon/vdso/*.fidl, of
+        which 21 are @vdsocall (pure userspace), leaving 188 kernel-entry
+        syscalls (~172 reachable under the stable vDSO variant, which
+        blocks @next). Most operate on an explicit handle the caller must
+        hold, but 29 kernel entries take no handle (object-creation calls,
+        the unkeyed futex family, restricted_enter, cprng_add_entropy,
+        thread_raise_exception, and internal vDSO-support entries).
+        JobPolicy covers 17 ZX_POL_* conditions (12 NEW_* creation types
+        plus BAD_HANDLE/WRONG_OBJECT/VMAR_WX/NEW_ANY/AMBIENT_MARK_VMO_EXEC)
+        and defaults to allow; clock/counter/iob-shared-region creation has
+        no policy condition. There is no per-process syscall-narrowing
+        mechanism (no seccomp/pledge equivalent). Syscall-origin pinning
+        (vDSO-only entry, kernel-validated caller PC) is scored separately
+        at C4.8.
+    commits: []
+    discussions: []
+    rationale: >-
+      Surface reduction is architectural rather than filter-based: a fixed
+      188-kernel-entry handle-oriented ABI with no ioctl-style multiplexing
+      is enforced for every process. D=3 (mandatory for all processes).
+      S=2: the surface is fixed, medium-sized, and mostly handle-mediated,
+      but 29 entries need no handle, JobPolicy is default-allow and covers
+      only creation-class conditions, and no per-process narrowing exists —
+      the profile of the S=2 band (Hurd ~25 traps, NuttX, Tock, Redox: "no
+      per-context filter"), not of the S=3 comparators (Fiasco's single
+      IPC entry, seL4's verified ~13-call surface, or genuine per-process
+      allowlists); per-handle authority mediation itself is credited at
+      C4.2, not double-counted here. A=3
+      (core design). The vDSO-only-entry property that additionally pins
+      syscall origin is credited at C4.8, not here.
+  C4.5:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/BUILD.gn (fixed kernel image build has no loadable-module subsystem)"
+      default_state: >-
+        Zircon has no loadable kernel module mechanism. No insmod,
+        modprobe, or equivalent. All services that would be kernel
+        modules in Linux run as userspace components.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no loadable module support.
+      Microkernel design eliminates the attack surface entirely.
+  C4.6:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/object/include/object/job_dispatcher.h"
+      - "zircon/kernel/object/include/object/process_dispatcher.h"
+      - "zircon/kernel/object/include/object/resource_dispatcher.h"
+      - "zircon/kernel/object/resource.cc"
+      default_state: >-
+        Hierarchical job tree: every process belongs to a job, jobs
+        contain sub-jobs. Jobs provide enumeration/control, policy
+        enforcement, and exception propagation. ProcessDispatcher
+        inherits immutable policy from containing job. Each process
+        has own HandleTable, VmAspace, FutexContext. ResourceDispatcher
+        provides fine-grained typed resource access (MMIO, IRQ, IOPORT,
+        SMC, SYSTEM) with range validation. The root job handle is
+        capability-routed rather than ambient: userboot receives a
+        duplicate with default rights (lib/userabi/userboot.cc) and hands
+        it to component_manager; policy immutability is enforced by
+        CanSetPolicy() once a job has children.
+    commits:
+    - hash: "ce44248dc36d4a588c09984383301dab78f41b01"
+      date: "2016-10-10"
+      description: "[kernel][magenta] Basic skeleton of Job dispatcher (JobDispatcher introduces the job/process containment hierarchy)"
+    - hash: "8b59957f2391a3579053aa8b3430d06a8030d35b"
+      date: "2017-04-19"
+      description: "[kernel][magenta] kernel policy refresh (immutable job policies constraining child process behaviour)"
+    - hash: "03247536ef47c4c93051e07f3d0a2fdec6ff2272"
+      date: "2016-08-23"
+      description: "[magenta][resource] initial bare-bones Resource object (ResourceDispatcher for fine-grained platform-resource access)"
+    discussions: []
+    rationale: >-
+      Job tree provides hierarchical isolation with inherited-but-
+      immutable policies, typed resource access control, and collective
+      process management. The root job is reachable only via the
+      capability chain through userboot/component_manager, never as
+      ambient authority. D=3 (mandatory,
+      all processes in job tree). S=3 (handle-mediated, range-validated
+      resource access). A=3 (core design).
+  C4.7:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "kernel.enable-debugging-syscalls (default=false)"
+      source_files:
+      - "zircon/vdso/process.fidl (process memory read/write syscalls)"
+      - "zircon/kernel/lib/syscalls/task.cc:183 (debug register gating)"
+      - "zircon/kernel/lib/syscalls/debug.cc (debug syscall gating)"
+      default_state: >-
+        No ptrace syscall. No UNIX credential model (no uid/gid). No
+        setuid/setgid. Every introspection path is rights-checked on the
+        target's handle: process_read_memory needs ZX_RIGHT_READ|WRITE,
+        thread_read_state needs READ, task_suspend and thread_write_state
+        need WRITE, task_create_exception_channel needs
+        INSPECT|DUPLICATE|TRANSFER|MANAGE_THREAD.
+        kernel.enable-debugging-syscalls (default false) additionally
+        gates process_write_memory and thread_write_state(DEBUG_REGS)
+        only — it is not the gate for reads, suspension, or exception
+        channels. Identity expressed through capabilities, not credentials.
+    commits:
+    - hash: "91ec3e9e7115bef4ecfd3b45fa6c8d725fefcd41"
+      date: "2019-10-15"
+      description: "[syscalls] Disable various syscalls when kernel.enable-debugging-syscalls=false (debugging syscalls gated behind kernel.enable-debugging-syscalls=false)"
+    discussions: []
+    rationale: >-
+      No ptrace, no uid/gid/setuid credential model, no ambient
+      introspection path — a task can be inspected only by a holder of its
+      process/thread handle, and every path is rights-checked
+      (task.cc/exceptions.cc). kernel.enable-debugging-syscalls (default
+      false) additionally removes process_write_memory and
+      thread_write_state(DEBUG_REGS), but is not the gate for memory
+      reads, register reads/writes, suspension, or exception channels.
+      D=3: the capability gate is unconditional with no disable path.
+      S=3 per the seL4/Fiasco profile: unforgeable authority, complete
+      mediation (cap-gated TCB register access is the same shape);
+      residual coarseness is the absent dedicated debug right —
+      ZX_DEFAULT_PROCESS_RIGHTS includes ZX_RIGHTS_IO, and task.cc
+      carries TODO(fxbug.dev/42105831) for splitting debug rights out.
+      A=3 (core design).
+  C5a.1:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "src/devices/bin/driver_manager/driver_host_runner.cc (driver-host process lifecycle and restart handling)"
+      - "src/devices/bin/driver_manager/driver_runner.cc (drivers launched and connected as userspace components)"
+      - "src/devices/bin/driver-host/meta/driver_host.cml (component sandbox for a driver host)"
+      default_state: >-
+        All drivers run as userspace processes in driver hosts. Driver
+        hosts managed by Driver Manager (driver_manager.cm). Drivers
+        communicate via FIDL over Zircon channels. A crashing driver
+        only crashes its driver host process, not the kernel. Driver
+        hosts can be restarted independently.
+    commits:
+    - hash: "45de4e958d2fb50b7943f624c020179e77e50d37"
+      date: "2016-06-30"
+      description: "[ulib][driver] library for building standalone drivers (standalone-driver library: drivers are built as userspace components)"
+    - hash: "a21c54041fa2229c4c26d7cc9dca9649bfcd17fe"
+      date: "2016-08-29"
+      description: "[kernel][virtio] remove all the kernel virtio drivers (in-kernel virtio drivers removed in favour of userspace implementations — device drivers expelled from the kernel)"
+    discussions: []
+    rationale: >-
+      Core Fuchsia microkernel design: all drivers in userspace with
+      restart capability. P=1, D=3 (all drivers
+      userspace), S=3 (architectural guarantee), A=3 (core design),
+      T=3: the userspace-driver architecture dates to the 2016 inception
+      and has shipped in production (Nest devices) since 2021.
+  C5a.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/BUILD.gn (fixed kernel image has no module-loading surface to isolate)"
+      default_state: >-
+        Zircon has no loadable kernel module mechanism. The sandbox
+        property is vacuous.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no runtime-loadable kernel modules,
+      so the sandbox property is vacuous.
+  C5a.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/BUILD.gn (complete kernel inputs contain no in-kernel programmable VM)"
+      default_state: >-
+        Zircon has no eBPF or equivalent in-kernel VM. Any such
+        functionality would be implemented as a userspace service.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no eBPF-class in-kernel VM
+      subsystem.
+  C5b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/hypervisor/ (Zircon provides hypervisor services)"
+      default_state: >-
+        Zircon includes a hypervisor subsystem providing guest VM
+        creation and management. Zircon operates at the lowest privilege
+        level. No external hypervisor protects Zircon itself (unlike
+        HEKI where a hypervisor protects the OS kernel).
+    commits: []
+    discussions: []
+    rationale: >-
+      Zircon IS the lowest layer and provides hypervisor services itself.
+      No external hypervisor protects Zircon's own integrity. The attack
+      surface (kernel compromise) exists but the mechanism (external
+      hypervisor protection) is absent. P=0.
+  C5b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/arm64/smccc.S (SMC support, ARM only)"
+      - "zircon/vdso/smc.fidl (SMC syscall)"
+      default_state: >-
+        TEE access provided via SMC (Secure Monitor Call) syscall on
+        ARM platforms. On x86-64, no equivalent enclave mechanism in
+        Zircon kernel. No SGX, TXT, or TPM-sealed key support found.
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM TEE via SMC exists but is ARM-only. On x86-64 (this
+      evaluation), no enclave-style key protection mechanism in the
+      kernel. P=0 on x86-64.
+    arm64:
+      P: 1
+      D: 2
+      S: 2
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options:
+        - "kernel.arm64.smccc-qcom (default=false; QCOM yielding-call protocol)"
+        source_files:
+        - "zircon/kernel/arch/arm64/smccc.S (arm_smccc_smc/hvc conduits)"
+        - "zircon/kernel/lib/syscalls/driver_arm64.cc (arch_smc_call: fast + yielding SMCCC calls)"
+        - "zircon/kernel/object/include/object/resource.h:53 (ranged ZX_RSRC_KIND_SMC validation per service-call number)"
+        - "zircon/kernel/platform/generic-arm/platform.cc:561 (SMC resource allocator initialized on every arm64 platform)"
+        - "zircon/vdso/smc.fidl (zx_smc_call syscall surface)"
+        default_state: >-
+          On arm64 the kernel provides a first-class, capability-gated
+          conduit to the secure world: zx_smc_call issues SMCCC fast or
+          yielding calls, and access is mediated by the ranged
+          ZX_RSRC_KIND_SMC resource (per service-call-number validation),
+          initialized unconditionally by the generic-arm platform code.
+          Production Fuchsia devices ship a TrustZone TEE through this path,
+          so device key material is sealed outside the Zircon kernel's
+          reach — a kernel compromise cannot extract keys held in the secure
+          world.
+      commits:
+      - hash: "a08c216af7776e3e971b9a6b01129eda21a22fe9"
+        date: "2018-06-13"
+        description: "[syscalls] Add ARM SMCCC support to SMC syscall (zx_smc_call gains full SMCCC register support for capability-gated TEE calls)"
+      rationale: >-
+        arm64: P=1 — the enclave-style key-protection path exists and is the
+        production design on arm64 (TEE behind capability-gated SMC), versus
+        P=0 on x86-64 where no SGX/TXT equivalent is wired up. D=2 —
+        SMC support and its resource gating are always-on in the arm64
+        build; actual TEE presence is a product/board property. S=2 —
+        TrustZone isolation keeps key material out of a compromised kernel,
+        but the secure-world interface itself remains attack surface and the
+        kernel can still invoke (if not extract) keys, so not S=3. A=2 —
+        in-tree arch + platform support; the TEE itself is firmware. T=3 —
+        SMC support predates the 2019 fuchsia.git merge and is actively
+        maintained (QCOM yielding-call support is recent).
+  C5c.1:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "ZX_IOMMU_TYPE_STUB (identity mapping)"
+      source_files:
+      - "zircon/kernel/include/dev/iommu.h (Iommu abstract class)"
+      - "zircon/kernel/object/bus_transaction_initiator_dispatcher.cc (BTI)"
+      - "zircon/kernel/object/iommu_dispatcher.cc (STUB and ARM_SMMU types)"
+      - "zircon/kernel/dev/iommu/stub/stub_iommu.cc (identity mapping)"
+      default_state: >-
+        BTI (Bus Transaction Initiator) kernel objects provide IOMMU
+        abstraction. BTIs pin memory, grant access to specific hardware
+        transaction IDs with permissions. PMTs quarantined when BTI
+        closed (prevents DMA to reallocated memory). On x86-64: only
+        StubIommu available (identity mapping, no hardware protection).
+        Intel VT-d not implemented.
+    commits:
+    - hash: "f27ddf4acbac8b2d522d219f227340448dbb5d1c"
+      date: "2017-12-11"
+      description: "[object][iommu] Implement the IommuDispatcher (IommuDispatcher abstraction for DMA isolation)"
+    - hash: "5f45d5a370fc77a118d126c745307b56101e653a"
+      date: "2018-02-27"
+      description: "[object][bti] Implement the BusTransactionInitiatorDispatcher (BTI object mediates DMA: pinned-memory tokens with quarantine)"
+    discussions: []
+    rationale: >-
+      Well-designed BTI/IOMMU abstraction with PMT quarantine mechanism.
+      On x86-64, only stub IOMMU (identity mapping, no hardware DMA
+      isolation). Intel VT-d not implemented. D=1 (stub provides no
+      real protection on x86-64). S=1 (software-level PMT quarantine
+      only, no hardware enforcement on x86-64). The "IOMMU required
+      for device access" expectation applies to ARM
+      platforms, not x86-64. T=2 (T_maintained=2: 9 substantive commits
+      on the cited iommu/BTI files in the 18-month window).
+    arm64:
+      P: 1
+      D: 1
+      S: 1
+      A: 2
+      T_age: 2
+      T_maintained: 3
+      implementation:
+        config_options:
+        - "ZX_IOMMU_TYPE_ARM_SMMU (accepted, but currently backed by StubIommu)"
+        source_files:
+        - "zircon/kernel/object/iommu_dispatcher.cc:38-52 (ARM_SMMU case returns StubIommu::Create() — \"temporary hack\" until full SMMU support lands)"
+        - "zircon/kernel/dev/iommu/stub/stub_iommu.cc (identity mapping)"
+        - "zircon/kernel/object/bus_transaction_initiator_dispatcher.cc (BTI + PMT quarantine)"
+        default_state: >-
+          The handle-mediated BTI/PMT abstraction (memory pinning, per-
+          transaction-ID grants, PMT quarantine on BTI close) is identical to
+          x86. The kernel accepts ZX_IOMMU_TYPE_ARM_SMMU descriptors, but the
+          dispatcher's own TODO explains this is a temporary hack: it returns
+          a StubIommu (identity mapping) so user-mode can adopt the eventual
+          SMMU API shape before "full support lands". No ARM SMMU driver
+          exists in the kernel tree; there is no hardware DMA isolation.
+      commits:
+      - hash: "e621cb36f3ed9ce46e1508fde0355a4df4418448"
+        date: "2025-11-05"
+        description: "[kernel][smmu] Introduce an ARM SMMU Iommu type. (ARM SMMU IOMMU type addressable by SMMU base address (stub-backed pending full SMMU support))"
+      rationale: >-
+        arm64: same scores as x86-64 — the architecture-specific IOMMU is
+        unimplemented on both: Intel VT-d absent there, ARM SMMU a stub
+        here (the API type exists but is explicitly a placeholder). D=1,
+        S=1 (software PMT quarantine only), A=2. T_age=2 (the ARM_SMMU API
+        surface is recent), T_maintained=3.
+  C5c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/object/include/object/process_dispatcher.h (per-process VmAspace — userspace isolation, not intra-kernel domains)"
+      - "zircon/kernel/lib/heap/cmpctmalloc/cmpctmalloc.cc (single shared kernel heap, no sub-domain boundary)"
+      default_state: >-
+        The Zircon kernel itself is a single privileged protection domain:
+        no PKS/PKU-style intra-kernel memory-protection domains, no
+        sub-domain boundary within the kernel address space. Services that
+        would be kernel subsystems in monolithic kernels run as userspace
+        processes — that architectural separation is scored at C5d.1, not
+        here.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0 — this row scores intra-kernel memory-protection domains, and
+      within the Zircon kernel none exist (its former text conceded "no
+      explicit PKS/PKU-style memory protection domains"). The microkernel
+      services-in-userspace argument belongs to C5d.1 and is scored there;
+      crediting it here double-counts (the row's own precedents: seL4 P=0
+      "kernel is a single privileged domain", Hurd P=0 "scored at
+      C5d.1/C5d.2 to avoid double-count", Fiasco/NuttX P=0; Tock's P=1
+      rests on a genuine intra-kernel core/capsule boundary). P=0 forces
+      D=S=A=T=0.
+  C5c.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/BUILD.gn (x64 primary target has no ARM MTE domain facility)"
+      default_state:
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM MTE domain separation does not exist on x86-64. N/A.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/lib/arch/include/lib/arch/arm64/feature.h:448-453 (ID_AA64PFR1_EL1.MTE decode)"
+        default_state: >-
+          As with C1a.6/C1b.5, Zircon makes no use of MTE: no tag-based
+          isolation domains, no per-subsystem tag assignment, no SCTLR/TCR
+          tagging configuration. Intra-kernel domain separation comes from
+          the microkernel architecture itself (C5c.2), not memory tagging.
+      rationale: >-
+        arm64: P=0 — MTE-based domain separation is absent (feature decode
+        only); the surface exists on AArch64 but no tagging mechanism is
+        implemented. P=0 forces D=S=A=T=0.
+  C5d.1:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/lib/userabi/userboot.cc (minimal kernel hands control to the initial userspace process)"
+      - "zircon/kernel/object/channel_dispatcher.cc (kernel IPC primitive used by userspace services)"
+      - "src/sys/component_manager/README.md (userspace component/service composition)"
+      default_state: >-
+        Zircon kernel provides only: IPC (channels, ports, sockets,
+        FIFOs), process/thread/job management, virtual memory, handle
+        management, and basic hardware access primitives. All services
+        run in userspace: filesystems (blobfs, minfs, fxfs via fshost),
+        drivers (via driver_manager), network stack (netstack), package
+        management, audio, graphics. Boot: userboot -> component_manager
+        -> all services.
+    commits:
+    - hash: "a21c54041fa2229c4c26d7cc9dca9649bfcd17fe"
+      date: "2016-08-29"
+      description: "[kernel][virtio] remove all the kernel virtio drivers (in-kernel virtio drivers removed in favour of userspace implementations — device drivers expelled from the kernel)"
+    - hash: "92403d6781b2950de908fa7cfc0b740b956fb0cf"
+      date: "2016-07-14"
+      description: "[magenta][syscalls] move \"private\" syscalls to libddk (DDK syscall surface moved behind a userspace library)"
+    discussions: []
+    rationale: >-
+      Defining architectural feature of Fuchsia. Most architecturally
+      separated OS kernel in the evaluation set. Kernel provides only
+      IPC, memory management, scheduling, and hardware primitives.
+      Everything else is userspace. D=3 (mandatory, microkernel).
+      S=3 (hardware address-space separation). A=3 (core design).
+      Scored as an inherent architectural property of the microkernel
+      design.
+  C5d.2:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/object/include/object/resource_dispatcher.h"
+      - "zircon/kernel/object/resource.cc (root_resource_filter_can_access_region)"
+      - "zircon/kernel/object/include/object/job_dispatcher.h"
+      default_state: >-
+        Minimal kernel (~153K LOC). Handle-mediated access prevents
+        kernel object discovery without explicit handles. Resource
+        system uses range-based access control for MMIO, IRQ, IOPORT.
+        Jobs provide hierarchical containment. Exception propagation
+        follows job tree. Root job handle not exposed to usermode.
+    commits:
+    - hash: "26d0276e1aa290f27abbec0a534af2d92cd9096c"
+      date: "2020-06-26"
+      description: "[kernel][resources] Add a root resource filter. (root resource filter denies kernel-internal MMIO/IRQ ranges to userspace holders)"
+    discussions: []
+    rationale: >-
+      Minimal kernel surface + handle-mediated access + hierarchical
+      job containment + range-validated resources effectively limits
+      lateral movement. D=3 (mandatory). S=3 (combination of minimal
+      kernel, handle mediation, and job hierarchy). A=3 (core design).
+  C6.1:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "src/firmware/ (the verified-boot chain implementation: firmware SDK, AVB integration — the live maintenance surface)"
+      - "zircon/system/public/zircon/hw/gpt.h:134-167 (verified boot partition types)"
+      - "zircon/third_party/tools/android/ (AVB tooling)"
+      - "zircon/system/ulib/sysconfig-client/ (verified boot metadata)"
+      default_state: >-
+        Fuchsia uses Android Verified Boot (AVB) via libavb. Bootloader
+        cryptographically verifies Zircon Boot Image (ZBI) before
+        execution. Fuchsia Verified Execution (FVX) extends verification
+        into runtime: verified ZBI verifies package management system.
+        Hardware-based anti-rollback prevents version downgrades. A/B/R
+        partition slots for reliable updates.
+    commits:
+    - hash: "96b313a8441501146bed90407e3d4f32765c2124"
+      date: "2018-09-27"
+      description: "[build][arm64] Add support for Android Verified Boot (AVB) (Android Verified Boot (AVB) integration for the boot chain)"
+    - hash: "54310afb4c4634b1ebf06542fe781dde3a3e5ae2"
+      date: "2020-12-05"
+      description: "[firmware][sdk][avb]Integrate libavb (libavb integrated for cryptographic verification of boot images)"
+    discussions: []
+    rationale: >-
+      Strong verified boot chain: AVB cryptographic verification of
+      ZBI, FVX runtime delegation, hardware anti-rollback. Addresses
+      both physical attacks and kernel-mode attacker control. D=3
+      (mandatory, boot won't proceed without verification). S=3
+      (cryptographic chain of trust). A=3 (core platform design).
+  C6.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/lib/efi/include/efi/protocol/tcg2.h (TCG2 protocol headers)"
+      default_state: >-
+        EFI library defines TCG2 protocol interface (GetCapability,
+        HashLogExtendEvent, PCR bank management) for EFI compatibility.
+        No actual usage of the protocol found. No TPM driver,
+        attestation service, or PCR extension logic in kernel source.
+    commits: []
+    discussions: []
+    rationale: >-
+      TCG2 EFI protocol headers exist but are unused. No measured boot
+      implementation, no TPM driver, no PCR extension, no remote
+      attestation in the Zircon kernel. P=0 (headers alone do not
+      constitute an implemented mechanism).
+  C6.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/lib/userabi/userboot.cc (fixed boot image hands off to userspace; no post-boot kernel code loader)"
+      default_state: >-
+        No loadable kernel module mechanism. All kernel code compiled
+        into ZBI and verified at boot via AVB (C6.1).
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no loadable modules. All kernel
+      code is verified at boot (C6.1). Post-boot kernel code injection
+      is architecturally impossible.
+  C6.4:
+    P: 1
+    D: 3
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/idt.cc:116 (idt_setup_readonly)"
+      - "zircon/kernel/vm/vm.cc:163-166 (kernel heap VMAR: no CAN_MAP_EXECUTE)"
+      - "zircon/kernel/phys/phys.ld (separate code/rodata/data segments)"
+      - "zircon/kernel/phys/handoff-prep-vm.cc:290-306 (per-segment page permissions)"
+      - "zircon/kernel/vm/unittests/aspace_unittest.cc:31-56 (kernel_code R-X, rodata R--)"
+      default_state: >-
+        IDT remapped read-only after setup (idt_setup_readonly). Kernel
+        heap VMAR created without CAN_MAP_EXECUTE (W^X on heap).
+        Kernel text pages mapped R-X (no write), rodata and relro
+        mapped R-- (no write, no execute), data mapped RW- (no execute).
+        Page permissions derived from ELF segment headers at boot via
+        MapInto(). No loadable modules prevents runtime code injection.
+    commits:
+    - hash: "9aca82d07da834ab79b3512795b2311af808ffdd"
+      date: "2017-02-28"
+      description: "[kernel][x86] Remap the IDT as read-only (IDT remapped read-only to prevent runtime corruption)"
+    - hash: "75a537922e19a71f051b49fa768cd78e4e84b1c8"
+      date: "2025-09-15"
+      description: "[kernel][phys] Generalize ElfImage::MapInto, use it for the kernel (per-ELF-segment page permissions enforced for the kernel image)"
+    discussions: []
+    rationale: >-
+      IDT read-only + kernel text R-X + kernel heap W^X + no loadable
+      modules provides solid runtime integrity. Kernel segment
+      permissions are unconditional (derived from ELF headers at boot,
+      cannot be disabled). No equivalent of Linux Lockdown LSM for
+      comprehensive runtime restriction, but microkernel design reduces
+      attack surface. D=3 (mandatory, unconditional). S=2 (effective
+      for code injection prevention, but no full lockdown equivalent).
+  C6.5:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "src/lib/digest/ (Merkle-tree digest library used at runtime by blobfs)"
+      - "src/storage/blobfs/ (content-addressed verified storage — the enforcement surface)"
+      - "zircon/tools/merkleroot/merkleroot.cc (build-time Merkle tree computation)"
+      default_state: >-
+        BlobFS: cryptographic content-addressed filesystem. Every blob
+        identified by SHA-256 root hash of Merkle tree. Blobs are
+        immutable after creation. Package BLOBs de-duplicated across
+        packages and cryptographically verified using content hash.
+        fuchsia-pkg:// URI scheme references packages by content hash.
+        BlobFS is the sole storage for executable code and read-only data.
+    commits:
+    - hash: "395bfba2d6f867c467ce5bfe4d8876d85c70fed6"
+      date: "2017-03-07"
+      description: "[merkle] Initial commit of ulib/merkle and tools/merkleroot (Merkle-tree library underlying blobfs executable integrity)"
+    discussions: []
+    rationale: >-
+      BlobFS Merkle tree verification provides strong executable/object
+      integrity. Content-addressed + immutable + cryptographic hash
+      verification. D=3 (mandatory, BlobFS is the only storage for
+      executables). S=3 (SHA-256 Merkle tree, no known bypass).
+      A=3 (core platform design).
+  C7a.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/syscall.S:297-301 (cmov syscall clamping)"
+      - "zircon/kernel/arch/x86/user-copy/user-copy.cc:80-89 (lfence after validation)"
+      - "zircon/kernel/arch/x86/feature.cc:1076-1098 (L1D flush on error)"
+      - "zircon/kernel/arch/x86/amd.cc:42-55 (AMD LFENCE serializing)"
+      - "zircon/kernel/arch/arm64/user-copy/user-copy.cc (address confinement)"
+      - "zircon/kernel/arch/arm64/exceptions.S:893 (SPECULATION_POSTFENCE)"
+      default_state: >-
+        x86: cmov (not branch) for syscall number bounds clamping,
+        lfence in user-copy before data transfer, L1D cache flush on
+        ZX_ERR_INVALID_ARGS/BAD_HANDLE, AMD LFENCE serializing via
+        DE_CFG MSR. ARM64: address confinement in user-copy,
+        SPECULATION_POSTFENCE (DSB NSH; ISB) after SVC.
+    commits:
+    - hash: "eedaf885d6be1e56ba4ae348755b786e754b1870"
+      date: "2020-01-06"
+      description: "[kernel][x86] Spectre V1, V2: Harden syscall entry point (cmov clamp of the syscall number plus lfence after validation)"
+    - hash: "d7da0611a97621587416f8d5f2d973704392c909"
+      date: "2020-03-12"
+      description: "[kernel][x86] Spectre V1: Flush L1D$/all caches on some syscall errors (L1D flush on syscall-error paths against transient leaks)"
+    discussions: []
+    rationale: >-
+      Comprehensive Spectre v1 mitigations: cmov-based bounds clamping
+      (avoids branch-based speculation), lfence barriers, L1D flush on
+      error paths, AMD LFENCE serialization. ARM64 equivalents present.
+      D=2 (default-on). S=2 (mitigates known patterns but new gadgets
+      possible in evolving attack class). T=2 (T_maintained=2: 5
+      substantive commits on the cited Spectre-v1 path files in the
+      18-month window).
+    arm64:
+      P: 1
+      D: 2
+      S: 2
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options:
+        - "kernel.arm64.disable_spec_mitigations (default=false)"
+        source_files:
+        - "zircon/kernel/arch/arm64/exceptions.S:854-864 (syscall-number clamp: csel to zero + csdb on wrong-path speculation)"
+        - "zircon/kernel/arch/arm64/exceptions.S:846-848 (speculation_clear_gprs before dispatch)"
+        - "zircon/kernel/arch/arm64/user-copy/user-copy.cc:53-58 (Spectre V1 address confinement of {addr,len} to user range)"
+        - "zircon/kernel/arch/arm64/exceptions.S:875-877 (speculation_postfence after the dispatch BR)"
+        default_state: >-
+          arm64 mirrors the x86 strategy instruction-for-instruction: the
+          syscall number is clamped with a conditional select (csel) followed
+          by csdb — the AArch64 consumption-of-speculative-data barrier — so
+          out-of-range numbers only exist on wrong speculative paths;
+          user-copy pointers are confined to the user address range by
+          masking before any access; GPRs are zeroed on entry to deny
+          user-controlled gadget inputs; and speculation_postfence (DSB NSH;
+          ISB) blocks speculation through the dispatch BR. The vDSO syscall
+          return path also carries a dedicated speculation barrier
+          (ARM64_SYSCALL_SPECULATION_BARRIER).
+      commits:
+      - hash: "a6f2e6fe2f787d102847178189b7c5c02a329c01"
+        date: "2020-04-03"
+        description: "[kernel][arm64] Spectre V1: Harden syscall entry point (csel-to-zero + csdb clamp of the syscall number on wrong-path speculation)"
+      - hash: "e0839c6c2416d9cb33ef3306909077b55ece274e"
+        date: "2020-04-02"
+        description: "[kernel][arm64] Spectre V1: Protect copy_from_user against |src, len| (address-confines {src,len} of copy_from_user to the user range under speculation)"
+      rationale: >-
+        arm64: same scores as x86-64 — equivalent mitigation pattern with
+        the architecture's own primitives (csel+csdb for cmov, masking
+        confinement for lfence). No L1D-flush-on-error path exists on arm64,
+        but that x86 measure targets Intel L1TF-adjacent leakage rather than
+        v1 proper. D=2 (default-on; global opt-out boot option). S=2
+        (mitigates known patterns; gadget class evolves). T=3 (mitigations
+        in place since the 2018-2020 Spectre response, maintained).
+  C7a.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/BUILD.gn:52-68 (-mretpoline)"
+      - "zircon/kernel/arch/x86/retpoline/basic.S (retpoline thunk)"
+      - "zircon/kernel/arch/x86/feature.cc:281-283 (Enhanced IBRS)"
+      - "zircon/kernel/arch/x86/thread.cc:120-131 (IBPB on context switch)"
+      - "zircon/kernel/arch/x86/ops.S:121-171 (x86_ras_fill, 32 RSB entries)"
+      - "zircon/kernel/arch/x86/amd.cc:23-39 (Retbleed: AMD BTC-NOBR)"
+      - "zircon/kernel/lib/arch/include/lib/arch/x86/bug.h:446-496 (mitigation selection)"
+      default_state: >-
+        Multi-layered: retpoline (-mretpoline), Enhanced IBRS when
+        available (preferred), IBPB on context switch between address
+        spaces, RSB filling (32 entries) on context switch and before
+        idle, STIBP when needed. AMD Retbleed (BTC-NOBR) mitigation
+        for Zen/Zen2. Mitigation strategy auto-selected via
+        GetPreferredSpectreV2Mitigation().
+    commits:
+    - hash: "11b0d6dc164ac67ba633e430d6a2b9635606e5d6"
+      date: "2020-01-23"
+      description: "[kernel][x86] Spectre V2: Enhanced IBRS: Enable IBRS (Enhanced IBRS enabled where available)"
+    - hash: "b4135eda402637e5da261db895bf7ec8f067cf31"
+      date: "2020-01-22"
+      description: "[kernel][x86] Spectre V2: Flush RAS on context switches, not every kernel entry (RSB/RAS stuffing on context switch (32 entries))"
+    - hash: "3d0d8e14c2aaab3000576497e2854663a22bfec7"
+      date: "2022-10-22"
+      description: "[kernel][x86] AMD Zen 2: Mitigate RETbleed (STIBP, SuppressBPOnNonBr) (AMD Zen 2 RETbleed mitigation via STIBP cross-thread isolation and branch-predictor suppression)"
+    discussions: []
+    rationale: >-
+      Comprehensive Spectre v2 mitigation with auto-selected strategy:
+      retpoline (default), Enhanced IBRS (preferred when available),
+      IBPB on aspace switch, RSB filling, STIBP. AMD Retbleed fix.
+      D=2 (default-on with auto-selection). S=2 (multi-layered but
+      evolving attack class with new variants). T=2 (T_maintained=2: 7
+      substantive commits on the cited Spectre-v2 files in the 18-month
+      window, none of them in the retpoline/ directory).
+    arm64:
+      P: 1
+      D: 2
+      S: 2
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options:
+        - "kernel.arm64.alternate-vbar (default=auto: SMCCC_ARCH_WORKAROUND_3/1 or PSCI_VERSION per CPU)"
+        - "kernel.arm64.disable_spec_mitigations (default=false)"
+        source_files:
+        - "zircon/kernel/arch/arm64/uarch.cc (vulnerable-core list: Cortex-A57/A72/A73/A75, Cavium CN99XX; BP invalidate via PSCI call)"
+        - "zircon/kernel/arch/arm64/arch.cc:394-405 (per-CPU should_invalidate_bp_on_context_switch / on_el0_exception; alternate vbar install)"
+        - "zircon/kernel/arch/arm64/code-patches/code-patches.cc:44-81 (SMCCC_ARCH_WORKAROUND_3/1 / PSCI_VERSION alternate exception vectors)"
+        - "zircon/kernel/arch/arm64/thread.cc:108 (BP invalidation on context switch)"
+        - "zircon/kernel/arch/arm64/exceptions_c.cc:208-558 (BP invalidation on EL0 exceptions)"
+        default_state: >-
+          Two default-on layers. (1) Alternate EL0->EL1 exception vectors,
+          selected per CPU at boot (kernel.arm64.alternate-vbar=auto): when
+          firmware reports SMCCC >= 1.1 with ARCH_WORKAROUND_3 (or _1), entry
+          from EL0 invokes the firmware branch-predictor workaround;
+          redundant software mitigations are then disabled per CPU. (2) On
+          the known-vulnerable core list (A57/A72/A73/A75/CN99XX), indirect
+          branch predictors are invalidated on context switch and EL0
+          exception via PSCI_VERSION when no better SMCCC function is
+          available. There is no retpoline/eIBRS analogue (not needed:
+          firmware workarounds + predictor maintenance are the AArch64
+          mechanism).
+      commits:
+      - hash: "8d8b6b1cf9e0018fbd21a90321a737d1ec29fc1c"
+        date: "2020-06-18"
+        description: "[kernel][arm64] Spectre V2: Invalidate branch pred. on suspicious kernel entries (branch-predictor invalidation on EL0 exceptions for vulnerable cores)"
+      - hash: "42c2dd27a71b8c63c497d17fda4941d40405f541"
+        date: "2020-07-15"
+        description: "[kernel][arm64] PSCI: Definitions for SMC calls to flush branch predictors (PSCI/SMC conduit definitions for branch-predictor flush workarounds)"
+      rationale: >-
+        arm64: P=1 — real, layered Spectre v2 response: firmware
+        SMCCC ARCH_WORKAROUND vectors auto-selected per CPU plus BP
+        invalidation on context switch / kernel entry for the vulnerable
+        uarch list. D=2 (default-on with auto-selection; opt-out boot
+        options). S=2 — comparable to the x86 multi-layer posture but
+        firmware-dependent: on systems whose firmware lacks SMCCC 1.1
+        support the auto mode degrades to the coarser PSCI BP-invalidate
+        (with a TODO for cores left uncovered), and BHB-style variants are
+        not specifically addressed. A=2, T=3 (initial response 2018-2020;
+        alternate-vbar code-patching actively maintained).
+  C7a.3:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "kernel.x86.spec_store_bypass_disable (default=false)"
+      source_files:
+      - "zircon/kernel/lib/arch/include/lib/arch/x86/bug.h:230-324 (SSBD implementation)"
+      - "zircon/kernel/lib/boot-options/include/lib/boot-options/x86.inc:64-76"
+      - "zircon/kernel/arch/x86/feature.cc:320-324 (per-CPU SSBD)"
+      default_state: >-
+        SSBD (Speculative Store Bypass Disable) implemented for Intel
+        and AMD CPUs. HasX86SsbBug() detects vulnerability across
+        Core2-RaptorLake (Intel) and Bulldozer-Zen3 (AMD).
+        MitigateX86SsbBug() sets SSBD via IA32_SPEC_CTRL or AMD
+        alternatives. Default is FALSE due to negative performance
+        impact.
+    commits:
+    - hash: "5fb3ad64cb404ab320744402de55c3b963a01e9e"
+      date: "2019-09-30"
+      description: "[kernel][x86] speculation: Enumerate SSB bug (CVE-2018-3639) (SSB (CVE-2018-3639) enumeration across vendors)"
+    - hash: "a4e36b890c4381317ccc3a9f5a1b8e77d49b3e38"
+      date: "2019-10-04"
+      description: "[kernel][x86] Mitigate SSB (Spectre V4) via 'spec-store-disable' (CVE-2018-3639) (SSBD via the kernel.x86.spec-store-bypass-disable option)"
+    discussions: []
+    rationale: >-
+      SSBD available but disabled by default due to performance impact.
+      Covers Intel Core2 through RaptorLake and AMD Bulldozer through
+      Zen3. D=1 (available but disabled, opt-in via boot option).
+      S=2 (effective when enabled, addresses the specific vulnerability).
+      T=2 (T_maintained=2: one substantive SSB fix on the cited files in
+      the 18-month window).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/lib/arch/include/lib/arch/arm64/feature.h:455-459 (ID_AA64PFR1_EL1.SSBS decode: SSBS/SSBS2)"
+        default_state: >-
+          The AArch64 speculative-store-bypass controls are FEAT_SSBS
+          (PSTATE.SSBS) and the firmware-side SMCCC ARCH_WORKAROUND_2.
+          Zircon decodes the SSBS feature field but never sets PSTATE.SSBS /
+          SSBS2 for kernel or user execution, and the SMCCC workaround
+          machinery (code-patches.cc) implements only ARCH_WORKAROUND_3/1 —
+          there is no ARCH_WORKAROUND_2 call anywhere in the tree. The
+          kernel.x86.spec_store_bypass_disable boot option has no arm64
+          counterpart.
+      rationale: >-
+        arm64: P=0 — Spectre v4 mitigation is absent on arm64: SSBS is
+        decode-only and SMCCC ARCH_WORKAROUND_2 is not implemented, whereas
+        the x86 column at least ships an opt-in SSBD (P=1 D=1). The surface
+        exists (the supported A57-A75 cores are SSB-affected), so P=0 rather
+        than na. P=0 forces D=S=A=T=0.
+  C7a.4:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 2
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "-mharden-sls=all (build/config/x64/BUILD.gn)"
+      - "HARDEN_SLS define"
+      source_files:
+      - "build/config/x64/BUILD.gn (harden_sls config)"
+      - "zircon/kernel/arch/x86/BUILD.gn:46 (applied to kernel)"
+      - "zircon/kernel/arch/x86/feature.cc:489-491 (verified at boot)"
+      - "zircon/kernel/arch/arm64/include/arch/asm_macros.h:115-117 (SPECULATION_POSTFENCE)"
+      default_state: >-
+        x86: -mharden-sls=all inserts INT3/fences after control transfer
+        instructions (CVE-2021-26341). Applied to kernel build config.
+        ARM64: SPECULATION_POSTFENCE (DSB NSH; ISB) used extensively
+        after control transfers in exception, cache, SMC, and hypervisor
+        code.
+    commits:
+    - hash: "46c16e4d1b3d12da8ad6db4e1d72567a5f7f5646"
+      date: "2022-09-29"
+      description: "[kernel][x86] AMD-SB-1036, 1037/Sequential Spec.: Insert INT3 after JMPs/RETs in generated code (-mharden-sls=all for the x86 kernel build)"
+    - hash: "1a434923c30fbf8ad759f14706c9ce76535e8505"
+      date: "2022-09-29"
+      description: "[kernel][x86] AMD-SB-1036, 1037/Sequential Spec.: Insert INT3 after JMPs/RETs in assembly (RET_AND_SPECULATION_POSTFENCE in hand-written asm)"
+    - hash: "285a6a65fd4939d401dee67aee2d6188ee0e179d"
+      date: "2020-01-11"
+      description: "[kernel][arm64] Speculation: Mitigate speculation through ERET"
+    discussions: []
+    rationale: >-
+      SLS mitigation via -mharden-sls=all on x86 and explicit
+      speculation barriers on ARM64. Default-on for kernel. D=2.
+      S=2 (compiler-assisted, addresses known vulnerability class).
+      T_age=2 (CVE-2021-26341 mitigations from ~2022, 4 years),
+      T_maintained=2 (only sporadic non-trivial work on the cited
+      harden-sls/barrier files in the 18-month window); T = min(2, 2) = 2.
+    arm64:
+      P: 1
+      D: 2
+      S: 2
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/arch/arm64/include/arch/asm_macros.h:115-117 (SPECULATION_POSTFENCE = DSB NSH; ISB)"
+        - "zircon/kernel/arch/arm64/uspace_entry.S (postfence after ERET to EL0)"
+        - "zircon/kernel/arch/arm64/exceptions.S (postfence after the syscall-dispatch BR; vDSO-side ARM64_SYSCALL_SPECULATION_BARRIER)"
+        - "zircon/kernel/arch/arm64/smccc.S (postfences after SMC control transfers)"
+        - "zircon/kernel/arch/arm64/asm.S (postfences after control transfers)"
+        - "zircon/kernel/arch/arm64/cache-ops.S (postfences after cache-operation control transfers)"
+        - "zircon/kernel/arch/arm64/hypervisor/el2.S (postfences after EL2 control transfers)"
+        default_state: >-
+          Instead of x86's compiler-inserted -mharden-sls=all, the arm64
+          kernel places explicit SPECULATION_POSTFENCE (DSB NSH; ISB)
+          barriers after the instructions that straight-line speculation can
+          run past: ERET to userspace, the indirect BR in the syscall
+          dispatcher, SMC calls, and the EL2/hypervisor and cache-ops control
+          transfers. The SVC return path additionally accounts for a 12-byte
+          speculation barrier on the userspace side.
+      commits:
+      - hash: "285a6a65fd4939d401dee67aee2d6188ee0e179d"
+        date: "2020-01-11"
+        description: "[kernel][arm64] Speculation: Mitigate speculation through ERET"
+      rationale: >-
+        arm64: P=1 — straight-line-speculation hardening is present as
+        hand-placed barriers at the kernel's speculation-hazard exits rather
+        than a blanket compiler flag. S=2 — covers the user-reachable SLS
+        surfaces (ERET/BR/SMC); narrower than -mharden-sls=all (ordinary
+        RET sites are not fenced) but targeting the cases that matter for
+        kernel exit. D=2 (unconditional in the build). A=2. T=3 — predates
+        the x86 CVE-2021-26341 response by two years (ERET mitigation landed
+        2020-01-11), an instructive arch divergence: arm64 T_age=3 vs x86
+        T_age=2.
+  C7b.1:
+    status: xref
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: >-
+      Cross-reference to C3b.1 (KPTI equivalent). Meltdown mitigation
+      is provided by the same mechanism that provides kernel page table
+      isolation. Fuchsia uses restricted mode page tables rather than
+      traditional KPTI. Meltdown detection present in
+      lib/arch/x86/bug.h (HasX86MeltdownBug). See C3b.1 for full
+      scoring.
+    arm64:
+      status: xref
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/arch/arm64/feature.cc (ARM feature/errata handling; no Intel Meltdown fault class)"
+        default_state:
+      rationale: >-
+        Cross-reference to C3b.1 (see its arm64 overlay). On arm64 the
+        Meltdown story is thinner than on x86: there is no
+        UNMAP_KERNEL_AT_EL0-style trampoline and TCR_EL1.E0PD is never
+        programmed — isolation rests on hardware CSV3 immunity, which holds
+        for most supported cores but NOT for Cortex-A75 (Meltdown-affected,
+        on the kernel's own Spectre uarch list) where no software fallback
+        exists. CSV3 is feature-decoded only. See the C3b.1 arm64 overlay
+        for the scored verdict (S=1 vs x86 S=2).
+  C7b.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/lib/arch/include/lib/arch/x86/bug.h:391-440 (HasX86L1tfBug)"
+      - "zircon/kernel/arch/x86/feature.cc:230-231 (g_l1d_flush_on_vmentry)"
+      - "zircon/kernel/arch/x86/hypervisor/vcpu.cc:1023-1028 (L1D flush before vmentry)"
+      - "zircon/kernel/arch/x86/feature.cc:1076-1098 (L1D flush on syscall error)"
+      - "zircon/kernel/arch/x86/mmu_tests.cc:92-161 (PTE inversion invariant)"
+      default_state: >-
+        L1D flush on VM entry when g_has_l1tf && l1d_flush CPUID
+        feature present. L1D flush on syscall error returns (combined
+        Spectre v1 + L1TF). PTE inversion invariant tested: non-present
+        PTEs must not point to valid page frames.
+    commits:
+    - hash: "22929240365d9fb36f698bf1d268ad57835c5df4"
+      date: "2019-04-04"
+      description: "[zircon][x86] Enumerate L1TF, conservatively (L1TF enumeration, conservatively assuming vulnerability)"
+    - hash: "9e7907a8efb28083938291e2eab177f6b9902126"
+      date: "2019-11-20"
+      description: "[kernel][x86] vmm: Flush L1D$ or MDS buffers on VM Entry (L1TF, MDS) (L1D flush (or MDS buffer overwrite) before every VM entry)"
+    discussions: []
+    rationale: >-
+      L1TF mitigated via L1D flush on VM entry, L1D flush on syscall
+      error paths, and PTE inversion invariant. D=2 (default-on when
+      hardware vulnerable). S=2 (addresses the specific vulnerability).
+      T=2 (T_maintained=2: 9 substantive commits on the cited L1TF files
+      in the 18-month window).
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/arch/arm64/feature.cc (ARM feature/errata handling; Intel L1TF is not applicable)"
+        default_state: >-
+          L1 Terminal Fault / Foreshadow is an Intel-specific
+          microarchitectural defect (terminal-fault page walks leaking L1D
+          contents). AArch64 cores have no L1TF equivalent; the L1D-flush and
+          PTE-inversion machinery is x86-only code.
+      rationale: >-
+        arm64: N/A — L1TF is an Intel erratum class with no AArch64
+        counterpart; the attack surface does not exist on this
+        architecture.
+  C7c.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "kernel.x86.md_clear_on_user_return (default=true)"
+      source_files:
+      - "zircon/kernel/lib/arch/include/lib/arch/x86/bug.h:123-220 (MDS/TAA detection)"
+      - "zircon/kernel/arch/x86/asm.S:71-84 (mds_buff_overwrite via VERW)"
+      - "zircon/kernel/arch/x86/feature.cc:204-215 (TSX disable)"
+      - "zircon/kernel/arch/x86/code-patches/include/arch/code-patches/case-id.h:26-32 (kMdsTaaMitigation patch)"
+      - "zircon/kernel/arch/x86/exceptions.S:181-185 (VERW on interrupt return)"
+      - "zircon/kernel/arch/x86/hypervisor/vcpu.cc:1027-1030 (VERW before VM entry)"
+      default_state: >-
+        VERW instruction clears microarchitectural buffers on every
+        kernel-to-user transition (md_clear_on_user_return=true) and
+        VM entry. TSX proactively disabled when spec mitigations
+        enabled. Code-patching: default is mitigation ON, NOPs patched
+        in when not needed. MDS/TAA detection covers Intel
+        microarchitectures.
+    commits:
+    - hash: "2bc6712446202c04cc82c7a7f69df04eecae9bdd"
+      date: "2019-10-01"
+      description: "[kernel][x86] Mitigate MDS Speculative Execution vulnerability [1/3] (VERW buffer overwrite on kernel-to-user transitions)"
+    - hash: "67710e8f6974dc1577dfabfb7e5f89a6d46632dc"
+      date: "2019-11-19"
+      description: "[kernel][x86] Mitigate new 'TSX Asynchronous Abort' (TAA) vulnerability (TAA mitigated by extending the MDS defenses to TSX)"
+    - hash: "d7689a848a0cf35f5c9fa317af04b51864f1f483"
+      date: "2019-11-25"
+      description: "[kernel][x86] Enable MD_CLEAR (MDS mitigation) by default as required (MD_CLEAR mitigation enabled by default)"
+    discussions: []
+    rationale: >-
+      Comprehensive MDS/TAA mitigation: VERW on every kernel-to-user
+      and VM entry, TSX disable, code-patching for optimal
+      performance. md_clear_on_user_return defaults true. D=2
+      (default-on). S=2 (addresses known MDS/TAA/MMIO vulnerabilities).
+      T=2 (T_maintained=2: 7 substantive commits on the cited MDS/TAA
+      files in the 18-month window).
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/arch/arm64/feature.cc (ARM feature/errata handling; Intel MDS/TAA is not applicable)"
+        default_state: >-
+          MDS/TAA/MMIO stale-data sampling are Intel-specific defects in
+          store buffers, fill buffers, and TSX. AArch64 cores have no
+          equivalent sampling primitive and no TSX; the VERW/TSX-disable
+          machinery is x86-only code.
+      rationale: >-
+        arm64: N/A — microarchitectural data sampling is an Intel defect
+        class; the attack surface does not exist on AArch64.
+  C7c.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/feature.cc:274-318 (STIBP in Spectre v2 strategy)"
+      - "zircon/kernel/arch/x86/feature.cc:293-301 (AMD RSB cross-thread)"
+      - "zircon/kernel/arch/x86/mp.cc:416-470 (x86_ras_fill before MWAIT/HLT)"
+      default_state: >-
+        STIBP enabled as part of Spectre v2 mitigation when
+        kIbpbRetpolineStibp selected (AMD with STIBP support) or for
+        Retbleed-affected AMD CPUs with HT active. RSB filling
+        (x86_ras_fill) before MWAIT and HLT to prevent cross-thread
+        RSB consumption (AMD-SB-1045 for family 0x17). STIBP skipped
+        when HT disabled.
+    commits:
+    - hash: "6960b497d70792c13cdd8c0d6c50d7ab49c24a34"
+      date: "2020-01-31"
+      description: "[kernel][x86] Spectre V2: AMD: Enable STIBP if always-on STIBP is set (STIBP enabled on AMD parts with always-on STIBP)"
+    - hash: "3d0d8e14c2aaab3000576497e2854663a22bfec7"
+      date: "2022-10-22"
+      description: "[kernel][x86] AMD Zen 2: Mitigate RETbleed (STIBP, SuppressBPOnNonBr) (AMD Zen 2 RETbleed mitigation via STIBP cross-thread isolation and branch-predictor suppression)"
+    discussions: []
+    rationale: >-
+      STIBP conditionally enabled based on hardware and mitigation
+      strategy. AMD RSB cross-thread vulnerability (SB-1045) mitigated
+      via RSB filling before idle. HT-aware: skips mitigations when
+      HT disabled. D=2 (auto-enabled when needed based on hardware
+      detection). S=2 (effective for known cross-thread attacks).
+      T=2 (T_maintained=2: 5 substantive commits on the cited
+      STIBP/RSB-fill files in the 18-month window).
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/arch/arm64/feature.cc (scored ARM SoCs expose no SMT sibling-control surface)"
+        default_state: >-
+          STIBP and the AMD cross-thread RSB advisories are x86 SMT
+          mechanisms. None of the arm64 cores Zircon targets (Cortex-A53
+          through A75 class) implement simultaneous multithreading, so
+          there is no sibling hardware thread to isolate against.
+      rationale: >-
+        arm64: N/A — cross-SMT speculation isolation presupposes SMT;
+        the supported AArch64 cores are single-threaded per core, so the
+        attack surface does not exist in the evaluated configuration.
+  C1e.6:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/vm/vm_mapping.cc (VM permission implementation has no execute-only mapping encoding)"
+      default_state: >-
+        Zircon's VMAR/VMO API exposes ZX_VM_PERM_READ /
+        ZX_VM_PERM_WRITE / ZX_VM_PERM_EXECUTE flags. There is no
+        execute-only permission encoding; mappings with EXECUTE
+        require READ.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no execute-only memory primitive in the Zircon VMAR API.
+  C1e.7:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/object/vm_address_region_dispatcher.cc (VMAR protect/unmap paths have no immutable-mapping state)"
+      default_state: >-
+        Zircon has no mimmutable/mseal equivalent. VMAR mappings
+        can be unmapped via zx_vmar_unmap; permissions can be
+        changed via zx_vmar_protect.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no immutable-mapping primitive in Zircon.
+  C1e.8:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 2
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "-mharden-sls=all (build/config/x64/BUILD.gn harden_sls, applied to the kernel)"
+      - "RET_AND_SPECULATION_POSTFENCE macro in hand-written assembly"
+      source_files:
+      - "build/config/x64/BUILD.gn (harden_sls config)"
+      - "zircon/kernel/arch/x86/BUILD.gn (harden_sls applied to kernel arch config)"
+      default_state: >-
+        The compiler places an INT3 trap after every JMP and RET in
+        kernel code (-mharden-sls=all) and hand-written assembly mirrors
+        it via RET_AND_SPECULATION_POSTFENCE, so control flow that runs
+        past a transfer instruction traps deterministically. Unlike the
+        OpenBSD/NetBSD trapsleds, inter-function alignment padding is
+        NOT filled with traps — coverage is limited to
+        post-control-transfer positions.
+    commits:
+    - hash: "46c16e4d1b3d12da8ad6db4e1d72567a5f7f5646"
+      date: "2022-09-29"
+      description: "[kernel][x86] AMD-SB-1036, 1037/Sequential Spec.: Insert INT3 after JMPs/RETs in generated code (-mharden-sls=all for the x86 kernel build)"
+    - hash: "1a434923c30fbf8ad759f14706c9ce76535e8505"
+      date: "2022-09-29"
+      description: "[kernel][x86] AMD-SB-1036, 1037/Sequential Spec.: Insert INT3 after JMPs/RETs in assembly (RET_AND_SPECULATION_POSTFENCE in hand-written asm)"
+    discussions: []
+    rationale: >-
+      P=1: the kernel's INT3-after-JMP/RET insertion makes straight-line
+      execution past a control transfer trap deterministically — the same
+      protective effect class the OpenBSD/NetBSD trapsleds are scored P=1
+      for, though motivated by AMD-SB-1036/1037 sequential speculation
+      (the same -mharden-sls flag is cited under C7a.4 for its
+      anti-speculation effect; counted here for its architectural
+      trap-fill/anti-fall-through effect, per the NetBSD trapsleds
+      precedent of scoring the two threat models separately). D=2
+      (default in the kernel build). S=1, below the BSDs' S=2: alignment
+      padding between functions remains NOP-filled, so a stray jump into
+      padding still slides; only post-transfer positions trap. A=2
+      (compiler-enforced). T_age=2 (landed 2022-09), T_maintained=2 (only
+      sporadic non-trivial work on the cited harden-sls build-config files
+      in the 18-month window); T = min(2, 2) = 2.
+  C4.8:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/lib/syscalls/syscalls.cc:61-157 (do_syscall_pre obtains the process vDSO code address; per-syscall wrappers reject entries whose caller PC is not the valid vDSO address, routing them to sys_invalid_syscall -> ZX_EXCP_POLICY_CODE_BAD_SYSCALL)"
+      - "zircon/kernel/lib/userabi/include/lib/userabi/vdso.h (VDso::ValidSyscallPC, valid_code_mapping)"
+      - "zircon/kernel/lib/userabi/gen-vdso-valid-sysret.sh (generates the per-syscall valid-PC predicates)"
+      - "zircon/kernel/lib/userabi/vdso.cc"
+      default_state: >-
+        Every syscall's caller PC is validated against the process's vDSO
+        mapping — and against the exact per-syscall entry offset
+        (pn_pins[code] + pn_start == addr): userspace can enter the kernel
+        only through the vDSO entry points, and a syscall instruction
+        executed from any other code page raises a
+        ZX_EXCP_POLICY_CODE_BAD_SYSCALL policy exception. The pinned entry
+        code cannot be forged: vm_address_region.cc permits at most one
+        vDSO code mapping per address space, covering exactly the valid
+        range, and processes receive the vDSO VMO without write rights
+        (valid_code_mapping() itself only checks that the mapping covers
+        kVdsoCodeStart..kVdsoCodeSize). There is no configuration to
+        disable the check.
+    commits:
+    - hash: "870afa5b6cc526c9fe430931bccf07bfd90da4a5"
+      date: '2017-05-23'
+      description: "[kernel][syscalls] Enforce vDSO use for system calls (syscall PC validated against the vDSO mapping; non-vDSO syscall sites are rejected)"
+    discussions: []
+    rationale: >-
+      Zircon is the architectural realization of syscall-origin pinning:
+      where OpenBSD's ld.so registers libc.so text via pinsyscalls(2),
+      Zircon builds the property into the ABI itself - the vDSO is the only
+      valid syscall origin and the kernel validates the caller PC on every
+      syscall. P=1. D=3 (mandatory; no knob exists to disable the check).
+      S=3 (no bypass without corrupting the vDSO mapping, which the
+      single-mapping rule in vm_address_region.cc plus non-writable VMO
+      rights forbid; a ROP/JOP chain must terminate in
+      legitimate vDSO entry points). A=3 (core design property of the
+      Zircon ABI). T=2 (T_age=3: in place since Zircon's inception ~2016;
+      T_maintained=2: 7 substantive commits on the cited vDSO
+      valid-sysret/userabi files in the 18-month window).
+  C5e.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "kernel.lockup-detector.critical-section-threshold-ms (default=3000)"
+      - "kernel.lockup-detector.critical-section-fatal-threshold-ms (default=10000)"
+      - "kernel.lockup-detector.heartbeat-period-ms (default=1000)"
+      - "kernel.lockup-detector.heartbeat-age-threshold-ms (default=3000)"
+      - "kernel.oom.behavior (default=reboot; alt jobkill)"
+      - "kernel.force-watchdog-disabled (default=false)"
+      source_files:
+      - "zircon/kernel/lib/lockup_detector/lockup_detector.cc (critical-section + heartbeat checkers)"
+      - "zircon/kernel/top/main.cc:187 (lockup_init/lockup_percpu_init at boot)"
+      - "zircon/kernel/dev/pdev/hw_watchdog/hw_watchdog.cc (HW watchdog pdev framework)"
+      - "zircon/kernel/dev/hw_watchdog/generic32/hw_watchdog.cc (generic32 HW watchdog driver)"
+      - "zircon/kernel/lib/crashlog/crashlog.cc (panic crashlog persistence)"
+      default_state: >-
+        Multiple default-on detection/recovery layers. (1) In-kernel lockup
+        detector (initialised unconditionally at boot in top/main.cc): a
+        critical-section checker (warn >3000ms, fatal >10000ms) and a per-CPU
+        heartbeat checker (period 1000ms, threshold 3000ms) detect locked-up /
+        stalled CPUs and emit an OOPS or fatal report. (2) Hardware-watchdog
+        pdev framework (generic32 + pdev driver) pets a board watchdog so a
+        wedged kernel triggers a SOFTWARE_WATCHDOG reboot. (3) On panic the
+        crashlog is persisted (crashlog.cc) and recovered into a feedback crash
+        report after reboot. (4) kernel.oom.behavior defaults to `reboot`: on
+        OOM the kernel signals userspace and gracefully reboots (alt `jobkill`
+        kills ZX_PROP_JOB_KILL_ON_OOM job subtrees, see C5e.3). (5) Userspace
+        containment: a crashing driver only takes down its driver-host process
+        and is restartable (C5a.1); critical system components may set
+        on_terminate=reboot (RFC-0110) for graceful whole-system recovery.
+        Component_manager does NOT auto-restart arbitrary crashed components by
+        default — per-component restart is parent-orchestrated via
+        fuchsia.component.Realm.
+    commits:
+    - hash: "6fed4cb5d6dc3d47410bca90622a6f158648deaa"
+      date: "2020-10-01"
+      description: "[kernel][lockup] Add lockup_detector library and instrument kernel"
+    discussions: []
+    rationale: >-
+      P=1: a real fault-detection/recovery surface exists. D=2 (not 3): the
+      core layers — kernel lockup detector and graceful OOM-reboot — are
+      default-on in the evaluated production build, but the HW watchdog depends
+      on board support and per-component restart is opt-in/orchestrated, so it
+      is strongly-default rather than mandatory; this matches linux C5e.1
+      D=2 (lockup detectors default-on, kdump opt-in). S=2: faults
+      are reliably detected (lockup oops/fatal, heartbeat stalls) and crashes
+      are contained to userspace process boundaries with crashlog-assisted
+      recovery; a true kernel panic is still whole-machine (reboot, not in-
+      place recovery), so not S=3 — equal to linux S=2 and above openbsd S=1
+      (reboot-only, no detector). A=3 (exceeds linux/openbsd A=2): the
+      microkernel structure makes fault containment a core design property —
+      drivers, filesystems and the network stack are ordinary userspace
+      processes whose crash cannot panic the kernel and which are restartable
+      (C5a.1/C5d.1), and the job/exception-channel model is the native fault-
+      propagation substrate. T_age=3: the in-kernel lockup detector dates to
+      2020-10-01 (>5y); crashlog and the userspace driver/component model are
+      older still. T_maintained=3: actively maintained (lockup detector touched
+      2025-11-24). T=min(3,3)=3. Cross-ref C4.6/C5a.1 score the isolation
+      facet of the job/driver model; this entry scores only the availability/
+      fault-recovery facet, no double-count.
+  C5e.2:
+    P: 1
+    D: 2
+    S: 1
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "zx_profile_create deadline params (capacity, relative_deadline, period)"
+      - "requires profile resource ZX_RSRC_KIND_SYSTEM / ZX_RSRC_SYSTEM_PROFILE_BASE + ZX_POL_NEW_PROFILE"
+      source_files:
+      - "zircon/kernel/kernel/scheduler.cc (fair weight-based + deadline EDF run queues; deadline_utilization tracking)"
+      - "zircon/kernel/object/profile_dispatcher.cc:67-93 (deadline param validation: 0<capacity<=relative_deadline<=period)"
+      - "zircon/kernel/lib/syscalls/profile.cc:41 (profile resource check on zx_profile_create)"
+      default_state: >-
+        The Zircon scheduler (always on, the only scheduler) provides two
+        disciplines via profiles: fair weight-based scheduling and deadline
+        scheduling. A deadline profile is a (capacity, relative_deadline,
+        period) reservation; profile_dispatcher validates the relationship
+        0<capacity<=relative_deadline<=period but performs NO system-wide
+        schedulability/admission test that would reject an over-subscribed set
+        of deadline threads. The scheduler tracks per-CPU deadline_utilization
+        and clamps total_utilization to kThreadUtilizationMax for placement /
+        load-balancing decisions, but binding a thread to a deadline profile is
+        not refused on overcommit. Creating any profile requires the system
+        profile resource (ZX_RSRC_SYSTEM_PROFILE_BASE) and ZX_POL_NEW_PROFILE
+        job policy, so unprivileged components cannot self-elevate into the
+        deadline class. Fair-class threads have weights but no per-thread or
+        hierarchical CPU-bandwidth cap (no cgroup cpu.max analogue).
+    commits:
+    - hash: "1eb5dad7ab79cd2732485b31634a44932293fa5d"
+      date: "2019-12-13"
+      description: "[kernel][sched] Introduce deadline support in unified scheduler. (EDF run queue with capacity/deadline/period reservations)"
+    - hash: "68e6b5c27934de17c946610aa3d139596cc34459"
+      date: "2026-01-14"
+      description: "[kernel][sched] Fix cpu_stats update coherency (F30-line maintenance of the unified scheduler and its CPU accounting)"
+    discussions: []
+    rationale: >-
+      P=1: Zircon has a real CPU-budget primitive (deadline reservations bound
+      a thread's CPU time to capacity per period). D=2: the scheduler is
+      mandatory and deadline reservations are a first-class, always-available
+      mechanism in the production build (not an opt-in module); scored D=2 like
+      linux/openbsd rather than 3 because the default discipline for ordinary
+      threads is uncapped fair scheduling — a budget only applies to threads
+      explicitly placed in the deadline class. S=1 (matches openbsd, below
+      linux S=2): although a granted deadline thread is bounded, there is no
+      admission control rejecting an over-subscribed deadline set and no cap at
+      all on fair-class CPU consumption, so a fair-class thread (or many) can
+      still monopolise CPUs and a careless deadline reservation set is not
+      schedulability-checked; this is materially weaker than linux's
+      SCHED_DEADLINE EDF admission control + cgroup cpu.max hierarchical
+      bandwidth (S=2). The privilege gate (profile resource + ZX_POL_NEW_PROFILE)
+      prevents self-elevation but does not bound the fair class, so it does not
+      lift S. A=3 (above linux A=2): the unified deadline+fair scheduler with
+      profile-as-capability is a core Zircon design property, not a bolt-on
+      controller. T_age=3: profiles/deadline scheduling have been core for >5y.
+      T_maintained=3: actively maintained on the F30 release line (scheduler
+      CPU-accounting fix 68e6b5c27934de17c946610aa3d139596cc34459,
+      2026-01-14). T=min(3,3)=3.
+  C5e.3:
+    P: 1
+    D: 2
+    S: 1
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "zx_job_set_policy ZX_POL_NEW_* (NEW_PROCESS/NEW_CHANNEL/NEW_VMO/... deny)"
+      - "ZX_PROP_JOB_KILL_ON_OOM (+ kernel.oom.behavior=jobkill)"
+      - "kMaxHandleCount = 256*1024 (system-wide handle arena)"
+      source_files:
+      - "zircon/kernel/object/include/object/job_dispatcher.h:140-275 (kill_on_oom, policy)"
+      - "zircon/kernel/object/job_dispatcher.cc:347-377 (KillJobWithKillOnOOM walk)"
+      - "zircon/kernel/object/diagnostics.cc:378 (ZX_POL_* policy table)"
+      - "zircon/kernel/object/handle.cc:18 (kMaxHandleCount handle arena cap)"
+      default_state: >-
+        Resource governance is hung off the job hierarchy. (1) Job policy
+        (zx_job_set_policy) lets a parent deny object creation in a subtree —
+        ZX_POL_NEW_PROCESS, NEW_CHANNEL, NEW_VMO, NEW_EVENT, etc. — with
+        ALLOW/DENY/KILL actions, capping the kinds/quantity of kernel objects a
+        confined subtree can create; policy is inherited and immutable. (2)
+        ZX_PROP_JOB_KILL_ON_OOM marks a job whose subtree is killed first under
+        memory pressure; under kernel.oom.behavior=jobkill the OOM path walks
+        and kills the lowest kill-on-oom job to reclaim memory. (3) A system-
+        wide handle arena bounds total live handles (kMaxHandleCount = 262144).
+        (4) Per-VMO / per-task memory attribution feeds memory_monitor. There
+        is NO hard per-job memory CAP (a job cannot be given "max N bytes");
+        memory is governed by kill-on-oom + policy, not a hierarchical byte
+        quota like cgroup memory.max or FreeBSD RACCT memoryuse.
+    commits:
+    - hash: "e6e2db9ecd5357d81edfd72b0e7aa01e560a93a3"
+      date: "2017-07-26"
+      description: "[magenta][oom] Kernel OOM-killer thread (lowmem response that kills the least-important kill-on-oom job)"
+    discussions: []
+    rationale: >-
+      P=1: real quota/governance surface (object-creation policy, kill-on-oom
+      job subtrees, handle arena cap). D=2: job policy and the handle cap are
+      mandatory/always-on and kill-on-oom is the default memory-pressure
+      backstop in the evaluated build, matching linux/openbsd C5e.3 D=2.
+      S=1 (below the linux/openbsd S=2): the decisive
+      gap is that Zircon has no hard per-job memory quota — under exhaustion the
+      response is to KILL a job subtree or reboot, not to cap allocation, so a
+      single job can drive the whole system to OOM before any limit bites; this
+      is weaker than linux's hierarchical memcg memory.max/pids.max and
+      openbsd's flat RLIMIT_AS/RLIMIT_NPROC that bound consumption before
+      exhaustion. Object-creation policy is binary allow/deny rather than a
+      tunable numeric quota, and the handle cap is system-wide, not per-job.
+      Hence S=1 (weak/coarse, kill-based) rather than S=2. A=3 (above
+      linux/openbsd A=2): the job hierarchy as the unit of resource governance
+      is a core Zircon design property (every process lives in a job; policy is
+      inherited and immutable), not a bolt-on controller. T_age=3: the job
+      model / job policy / kill-on-oom have been core for >5y. T_maintained=3:
+      actively maintained (job_dispatcher touched 2025-01-29; handle.cc
+      2026-01-05). T=min(3,3)=3. Cross-ref C4.6 scores the isolation/policy-
+      enforcement facet of the same job model; this entry scores the
+      availability/quota facet only.
+  C7d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/lib/arch/include/lib/arch/arm64/feature.h:336 (ID_AA64PFR0_EL1.MPAM field decode only — no MPAM partitioning)"
+      default_state: >-
+        Zircon exposes no cache-partitioning or time-protection interface.
+        There is no resctrl / Intel CAT / MBA equivalent and no page- or
+        cache-colouring allocator on x86-64. On ARM64 only the
+        ID_AA64PFR0_EL1.MPAM feature-ID field is decoded; there is no MPAM
+        partition programming (no MPAMCFG / PARTID assignment). No flush-on-
+        switch microarchitectural-channel mitigation of the sel4 "time
+        protection" kind exists.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0, not na: the timing-channel surface DOES exist — x86-64 targets run
+      on hardware with a shared LLC (and Intel CAT is often available in
+      silicon), and ARM64 cores expose MPAM feature bits — but Zircon provides
+      no OS-level mechanism to partition those resources, so the mechanism is
+      absent rather than inapplicable. This mirrors the openbsd C7d.1 rationale
+      ("surface exists, so P=0 (absent), not null (N/A)") and the openbsd/
+      netbsd P=0 precedent, contrasting with linux P=1 (resctrl/CAT
+      opt-in). P=0 forces D=S=A=T=0.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/lib/arch/include/lib/arch/arm64/feature.h:336-339 (ID_AA64PFR0_EL1.MPAM field decode)"
+        default_state: >-
+          On arm64 the partitioning interface would be MPAM (Memory System
+          Resource Partitioning and Monitoring). Zircon only decodes the
+          ID_AA64PFR0_EL1.MPAM feature field; there is no MPAMCFG
+          programming, no PARTID assignment, no page/cache-colouring
+          allocator, and no flush-on-switch time-protection scheme.
+      rationale: >-
+        arm64: P=0 — same verdict as x86-64, with MPAM in place of
+        CAT/MBA: the shared-LLC timing-channel surface exists (big.LITTLE
+        SoCs share L2/L3) but Zircon provides no partitioning or
+        time-protection mechanism; the MPAM feature bits are decode-only.
+        P=0 forces D=S=A=T=0.

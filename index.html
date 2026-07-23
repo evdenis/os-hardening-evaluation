@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OS Hardening Viewer</title>
+    <!-- No favicon shipped — the empty data URI stops the browser's implicit
+         /favicon.ico request from 404ing in the console. -->
+    <link rel="icon" href="data:," />
+    <!-- Data preload links are injected at build/dev time by the
+         dataPreloadLinks plugin in vite.config.ts, generated from OS_IDS so
+         they can't drift from the runtime loader. commit-details.json is
+         deliberately absent: it loads in the background after first paint. -->
+    <script type="module" crossorigin src="./assets/index-PXKjBbCM.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-Br3C90i4.css">
+    <link rel="preload" href="./data/taxonomy.yaml" as="fetch" crossorigin>
+    <link rel="preload" href="./data/evaluation-linux.yaml" as="fetch" crossorigin>
+    <link rel="preload" href="./data/evaluation-openbsd.yaml" as="fetch" crossorigin>
+    <link rel="preload" href="./data/evaluation-netbsd.yaml" as="fetch" crossorigin>
+    <link rel="preload" href="./data/evaluation-fuchsia.yaml" as="fetch" crossorigin>
+    <link rel="preload" href="./data/evaluation-hurd.yaml" as="fetch" crossorigin>
+    <link rel="preload" href="./data/evaluation-sel4.yaml" as="fetch" crossorigin>
+    <link rel="preload" href="./data/evaluation-redox.yaml" as="fetch" crossorigin>
+    <link rel="preload" href="./data/evaluation-tock.yaml" as="fetch" crossorigin>
+    <link rel="preload" href="./data/evaluation-zephyr.yaml" as="fetch" crossorigin>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

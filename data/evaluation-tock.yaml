@@ -1,0 +1,1879 @@
+# yaml-language-server: $schema=schema/evaluation.schema.json
+# Tock OS kernel hardening evaluation.
+# Primary target: Tock 2.2 @ 9554639b17501a9f5940cef7a1770a0823e790c3
+# on nRF52840 (ARM Cortex-M4F +
+# ARMv7-M MPU; nrf52840dk / micro:bit v2 / nano33ble / clue), arm-none-eabi +
+# Rust (nightly pinned by rust-toolchain.toml); sources at sources/tock/.
+# Chosen as the representative Cortex-M + MPU peer of the FreeRTOS / Contiki-NG /
+# Zephyr / NuttX evaluations (the M4<->M33 delta is immaterial to Tock's scoring:
+# Tock 2.2 does not contain a TrustZone-M board port, and FEAT_PACBTI is absent
+# on the primary). Comparator: OpenTitan (RV32 + ePMP) as the upper bound.
+#
+# Architectural context: Tock has a three-tier trust model.
+#   1. A small TRUSTED core kernel written in Rust (scheduler, memory isolation,
+#      syscall layer, process loader). Memory safety is a core design property.
+#   2. CAPSULES — drivers/subsystems written in untrusted Rust, isolated from the
+#      trusted core by the Rust type system plus UNFORGEABLE capability traits
+#      (kernel/src/capabilities.rs): a capsule cannot call an isolation-sensitive
+#      kernel API without holding a capability token that only `unsafe` (trusted)
+#      code can mint. Capsules run at kernel privilege in one address space, so
+#      this is language-based isolation, not hardware crash isolation.
+#   3. PROCESSES (apps) — fully untrusted, each confined to its own MPU regions
+#      (ARMv7-M MPU / RISC-V ePMP), communicating through a fixed 8-class syscall
+#      ABI (kernel/src/syscall.rs; doc/reference/trd104-syscalls.md). Apps may be
+#      written in any language (C, Rust, asm) and are still safely contained.
+#
+# Decisive baseline facts:
+#  - The core kernel has NO general-purpose dynamic allocator (no global_allocator,
+#    no `extern crate alloc`). All kernel state is statically allocated or
+#    grant-allocated from a process's own RAM via the type-safe grant region
+#    (kernel/src/grant.rs). So classic heap-hardening mechanisms have no surface.
+#  - Rust provides the spatial (bounds-checked slices), temporal (ownership /
+#    borrow checking), initialization (init-before-use), and type-confusion
+#    guarantees as CORE PROPERTIES — so C1f.1 is the flagship, and the secondary
+#    defense-in-depth mitigations built for memory-unsafe C kernels (KCFI, shadow
+#    call stack, SSP canaries as a separate feature, FORTIFY, KASAN, refcount
+#    saturation, RANDSTRUCT, STACKLEAK, register scrubbing) are deliberately NOT
+#    layered on top — scored P=0 with an xref to C1f.1, not N/A.
+#  - MPU enforces W^X by default: process flash = ReadExecuteOnly, process RAM =
+#    ReadWriteOnly (execute-never); kernel .text is RO+X in flash (XIP).
+#  - Application binaries can be cryptographically verified at load time
+#    (kernel/src/process_checker.rs + TBF credential footers: RSA-3072/4096,
+#    ECDSA-NIST-P256, SHA-256/384/512) under a board-defined AppCredentialsPolicy.
+#  - Silicon baseline (Cortex-M4/M33 in-order, no SMT; RV32 Ibex) makes the entire
+#    Spectre/Meltdown/MDS class (C7), x86 CET/IBT and KPTI/SMAP, ARM MTE/BTI/PAC,
+#    the IOMMU, and any hypervisor-enforced integrity N/A — no such hardware.
+#  - Tock 2.2 has no TrustZone-M-capable board port, so secure-world key
+#    protection is N/A for this immutable baseline.
+os: tock
+schema_version: 1
+baseline_class: board-representative
+default_config: "Tock 2.2 @ 9554639b17501a9f5940cef7a1770a0823e790c3 on nRF52840 (ARM Cortex-M4F + ARMv7-M MPU; nrf52840dk / micro:bit v2 / nano33ble), arm-none-eabi + pinned-nightly Rust; entire kernel and all drivers (capsules) written in Rust, applications run as separate MPU-isolated unprivileged processes over a fixed 8-class syscall ABI; no general-purpose kernel heap (grant region allocated from process RAM). Selected as the representative Cortex-M + MPU peer of the FreeRTOS/Contiki-NG/Zephyr/NuttX evaluations."
+comparator_configs:
+- "OpenTitan (lowRISC Ibex RV32IMC + ePMP, boards/opentitan/earlgrey-cw310): EarlGreyEPMP with machine-mode lockdown gives privilege-differentiated execute (C1e.4 SMEP analogue) and execute-only memory (C1e.6) that the selected Cortex-M4 MPU cannot express, plus a silicon root-of-trust secure-boot chain — the upper bound for C1e/C5/C6."
+
+mechanisms:
+
+  # =========================================================================
+  # C1 — Memory Corruption Prevention
+  # =========================================================================
+
+  # --- C1a — Spatial Safety ---
+
+  C1a.1:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "MPU region permissions set per process (mpu::Permissions::ReadWriteOnly for RAM)"
+      source_files:
+      - "sources/tock/kernel/src/process_standard.rs:1696-1703 (allocate_app_memory_region, ReadWriteOnly RAM)"
+      - "sources/tock/arch/cortex-m/src/mpu.rs (ARMv7-M MPU RBAR/RASR region programming)"
+      - "sources/tock/kernel/src/process.rs:1027 (enum FaultAction)"
+      default_state: >-
+        Always on. Rust bounds-checking is unconditional in safe code; MPU
+        process confinement is mandatory for every loaded process. No canary
+        feature to toggle.
+    commits:
+    - hash: "4e6cd4ff503e7a0e54d4eaf6b63b2559d9e61496"
+      date: "2018"
+      description: "arch: cortex-m: shared MPU"
+    discussions:
+    - "https://github.com/tock/tock/pull/1212"
+    rationale: |
+      P=1: real spatial-safety enforcement exists — Rust bounds checks for the
+      kernel/capsules and MPU region confinement for process stacks. D=3:
+      unconditional; you cannot build Tock without Rust's checks or the per-process
+      MPU. S=2: strong for the Rust portion (no practical CWE-121 in safe code) but
+      only region-granular for processes (a process can still smash its own stack
+      into its own heap within its region, and `unsafe` blocks in arch/chip crates
+      are exempt), so moderate overall rather than absolute. A=3: a core design
+      property, not a bolt-on. T: Tock has enforced this since its inception (~2015,
+      T_age=3) and is actively maintained (T_maintained=3) → T=3.
+  C1a.2:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/process_standard.rs:1563-1570 (flash region ReadExecuteOnly), :1696-1703 (RAM region)"
+      - "sources/tock/kernel/src/platform/mpu.rs (allocate_region / allocate_app_memory_region HIL)"
+      - "sources/tock/arch/cortex-m/src/mpu.rs"
+      default_state: >-
+        Always on: every process is MPU-confined. No MMU guard pages; no
+        hardware stack-limit register on Cortex-M4.
+    commits:
+    - hash: "4e6cd4ff503e7a0e54d4eaf6b63b2559d9e61496"
+      date: "2018"
+      description: "arch: cortex-m: shared MPU"
+    discussions:
+    - "https://github.com/tock/tock/pull/1212"
+    rationale: |
+      P=1: the MPU region boundary functions as a coarse guard for process memory
+      (overflow past the region faults). D=3: mandatory for every process. S=2:
+      region-granular only — it catches escape from the region but not intra-region
+      stack/heap collision, and there is no dedicated guard band or M4 PSPLIM; the
+      kernel's single stack guard is board/linker dependent. A=3: structural. T=3
+      (long-standing, active).
+  C1a.3:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/processbuffer.rs (ReadableProcessBuffer / WriteableProcessBuffer / ProcessSlice)"
+      - "sources/tock/kernel/src/syscall.rs:131-133 (ReadWriteAllow / ReadOnlyAllow / UserspaceReadableAllow classes)"
+      - "sources/tock/kernel/src/grant.rs (allow buffers stored and bounds-tracked in the grant)"
+      default_state: >-
+        Mandatory. All kernel access to process memory goes through the
+        validated ProcessBuffer abstraction; there is no unchecked alternative
+        path.
+    commits:
+    - hash: "557b04cd2b033552cc06950d8458299973a02125"
+      date: "2015"
+      description: "Move AppPtr to it's own module and add AppSlice"
+    - hash: "88a0d36ba9bf4f05b61a727192160cdf7cbbb15f"
+      date: "2021"
+      description: "kernel: rename mem.rs to processbuffer.rs"
+    discussions: []
+    rationale: |
+      P=1: a genuine hardened user/kernel copy mechanism exists and is the only
+      path. D=3: there is no unvalidated alternative — it is structural. S=3: every
+      access is length-checked against the caller's region and lifetime-checked by
+      the type system; there is no known way for a process to induce an OOB kernel
+      read/write through it (a clear improvement over the NuttX PROTECTED case,
+      which derefs user pointers directly → P=0). A=3: core design. T=2
+      (T_maintained=2: 8 substantive commits on the cited
+      grant/processbuffer/syscall files in the 18-month window).
+  C1a.4:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — FORTIFY_SOURCE is a C-library compile-time mechanism (_FORTIFY_SOURCE
+      wrappers around memcpy/strcpy/etc.). The Tock kernel and all capsules are
+      Rust, which has no C string/mem builtins to fortify; the equivalent
+      guarantees come from Rust's own bounds checks (scored under C1a.5/C1f.1).
+      Userspace C apps may opt into _FORTIFY_SOURCE via their own toolchain, but
+      that is outside the kernel.
+  C1a.5:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/arch/cortex-m/src/syscall.rs:76-89 (safe slice access uses get/indexing with bounds checks)"
+      - "sources/tock/arch/cortex-m/src/syscall.rs:179-308 (validated but unsafe raw-pointer reads/writes at the process context-switch boundary)"
+      - "sources/tock/doc/CodeReview.md:229-234 (unsafe use must be justified and reviewed)"
+      - "sources/tock/doc/CodeReview.md:273-276 (core-kernel unsafe requires a documented Safety argument)"
+      default_state: >-
+        Always on for safe indexed access; bypass is possible only through an
+        unsafe/raw-pointer boundary, which the project requires reviewers to
+        document and audit.
+    commits:
+    - hash: "a14379b850bf47e89cd2945226cbf9bcbab5f43f"
+      date: "2015"
+      description: "Initial commit"
+    discussions: []
+    rationale: |
+      P=1: Rust's intrinsic runtime bounds checking is a genuine, always-on
+      spatial-safety mechanism for safe indexed access. D=3: unconditional for
+      that access class. S=2; decisive property: coverage is broad and
+      language-enforced, but there is no runtime temporal/UAF checker
+      and architecture/process boundaries necessarily use unsafe raw pointers
+      whose correctness rests on manual validation and review. A=3: a core
+      language property, not a bolt-on pass. T=2 (T_age=3 since inception, but
+      T_maintained=2: 2 substantive commits on the cited cortex-m syscall.rs in
+      the 18-month window).
+      Distinct from C1f.1, which scores the language choice as a whole; this
+      entry scores its runtime bounds checks.
+  C1a.6:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — ARM MTE (spatial allocation tagging) requires FEAT_MTE silicon, which
+      is ARMv9-A only; neither Cortex-M4/M33 nor the RV32 Ibex comparator has any
+      memory-tagging hardware to enable.
+  C1a.7:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/processbuffer.rs:860-914 (ReadableProcessSlice checked get/index accessors)"
+      - "sources/tock/kernel/src/processbuffer.rs:1010-1058 (length-checked process-buffer copy)"
+      - "sources/tock/kernel/src/capabilities.rs:7-25 (capabilities granularize selected sensitive operations, while unsafe itself is all-or-nothing)"
+      - "sources/tock/doc/CodeReview.md:229-234 (unsafe use requires explicit review and explanation)"
+      default_state: >-
+        Always on; cannot be disabled (it is the language's indexing model). No
+        UBSAN_BOUNDS knob because the check is unconditional.
+    commits: []
+    discussions: []
+    rationale: |
+      P=1: genuine array-index bounds checking exists and is the language default.
+      D=3: unconditional in every build (stronger than UBSAN_BOUNDS, which is a
+      build-time/debug option on the C kernels — cf. linux C1a.7 D=2, openbsd KUBSAN
+      D=1). S=2: safe indexing broadly covers the kernel and capsules, but
+      explicit unsafe/raw-pointer paths escape the language bounds
+      check and this mechanism supplies no comprehensive temporal protection.
+      Capabilities do not change that escape surface. A=3: a core design property,
+      not a bolt-on instrumentation pass. T: enforced since Tock's inception
+      (~2015, T_age=3) but only sporadically maintained (T_maintained=2: 5
+      substantive commits on the cited files in the 18-month window) → T=2.
+      T_age derived from feature history (the Rust language guarantee is intrinsic to
+      the kernel from day one; the shallow clone's flattened log precludes a single
+      anchor commit). This mirrors this file's C1a.5 (KASAN) precedent exactly in
+      spirit — C1a.5 scores the runtime-sanitizer facet of Rust's checks; C1a.7
+      scores the array-index-bounds facet specifically; C1f.1 scores the
+      language choice as a whole. No double-count: three distinct facets of one
+      property, each cross-referenced.
+  C1b.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/grant.rs (type-safe enter/leave; stale entry fails via ProcessId generation check)"
+      - "sources/tock/kernel/src/process_standard.rs (bump-only grant allocation; no free path)"
+      default_state: >-
+        No allocator exists whose hardening could be scored.
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — allocator hardening requires a general-purpose allocation and free
+      surface, and Tock has none after boot: no kernel heap and a bump-only,
+      never-freed grant region ("If no general-purpose
+      allocation or free surface exists after boot, allocator hardening is
+      N/A; do not score the absence as a strong allocator"). This aligns the
+      row with seL4 (na, whose rationale itself cites "Parallels Tock's
+      no-kernel-heap grant model") and FreeRTOS's boundary note ("na is
+      reserved for kernels with no heap at all (tock)"). The ownership/borrow
+      temporal-safety property is scored at C1f.1, and the ProcessId
+      generation check on process reset is credited in C4.6/C5d.2 — not
+      double-counted here.
+  C1b.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — there is no general-purpose kernel heap whose metadata could be
+      hardened. The only dynamic kernel allocation is the grant region, which is
+      bump-allocated from a process's own RAM and accessed through type-safe
+      handles; it has no inline free-list/boundary-tag metadata of the kind that
+      SLAB_FREELIST_HARDENED / pool canaries protect, so the attack surface this
+      mechanism targets does not exist.
+  C1b.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/grant.rs (typed process-owned grant lifetime model without reference counters)"
+      - "sources/tock/kernel/src/process.rs (process/object ownership interfaces contain no refcount lifecycle)"
+      default_state: "No refcount overflow surface exists in the release's kernel object model."
+    commits: []
+    discussions: []
+    rationale: |
+      N/A: source-wide review of Tock 2.2 found no Rc/Arc/refcount-based kernel
+      object lifetime. Rust ownership, static objects, and typed process grants
+      remove the counter-overflow surface rather than leaving an unprotected
+      counter. Ordinary resource counters are not reference counts.
+  C1b.4:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/collections/list.rs (type-safe intrusive List/ListLink)"
+      - "sources/tock/kernel/src/deferred_call.rs"
+      default_state: "Always on (language-enforced)."
+    commits:
+    - hash: "a14379b850bf47e89cd2945226cbf9bcbab5f43f"
+      date: "2015"
+      description: "Initial commit"
+    discussions: []
+    rationale: |
+      P=1: list integrity against pointer corruption is provided by Rust's type
+      system. D=3: unconditional. S=2: strong against memory-corruption-driven
+      list attacks, but there is no explicit poisoning / double-free-of-node
+      detection for logic errors, and `unsafe` intrusive code exists — so moderate
+      rather than absolute. A=3: structural. T=2 (T_maintained=2: 9 substantive
+      commits on the cited deferred_call/static_init files in the 18-month
+      window).
+  C1b.5:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — ARM MTE temporal-mode tagging requires FEAT_MTE (ARMv9-A) silicon,
+      absent on Cortex-M and the RV32 comparator. Tock's temporal safety comes from
+      Rust ownership (scored under C1b.1), not hardware tags.
+  C1c.1:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/ (safe Rust; MaybeUninit confined to audited unsafe)"
+      default_state: "Always on (compiler-enforced)."
+    commits:
+    - hash: "a14379b850bf47e89cd2945226cbf9bcbab5f43f"
+      date: "2015"
+      description: "Initial commit"
+    discussions: []
+    rationale: |
+      P=1: compiler-enforced initialization-before-use is a genuine, always-on
+      mitigation for uninitialized-memory disclosure/use. D=3: unconditional.
+      S=3: no practical bypass in safe code; matches Redox C1c.1 S=3, whose
+      basis is likewise compile-time rejection (same-primitive rule).
+      Unsafe accounting: MaybeUninit appears 26x in kernel/src,
+      concentrated in static_init.rs (paired with a used-flag that panics on
+      reuse), single_thread_value.rs (thread-id guarded), and
+      process_standard.rs (grant pointers written before assume_init); one
+      self-declared unsound site exists (process_standard.rs constructs
+      &mut ProcessStandard over raw uninitialized memory on the trusted
+      process-creation path, with an in-tree FIXME) — a single audited site
+      with all fields written before use, not a disclosure primitive, so it
+      does not break the S=3 band. A=3: core language property. T=3.
+  C1c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/process_standard.rs:839-873 (release-2.2 brk path updates the MPU region and app_break without zeroing newly exposed memory)"
+      - "sources/tock/kernel/src/memop.rs (brk/sbrk dispatch to the unzeroed release-2.2 path)"
+      default_state: >-
+        No general kernel heap exists, but process RAM growth can expose stale
+        bytes and is not cleared in release 2.2.
+    commits: []
+    discussions:
+    - "https://github.com/tock/tock/pull/4717"
+    rationale: |
+      P=0: the release-2.2 brk path makes additional process RAM accessible
+      without initializing it, so the stale-data disclosure surface exists and
+      no init-on-allocation mitigation is present. PR 4717 added zeroing after
+      this immutable baseline and therefore is evidence of the gap rather than
+      a baseline implementation. D=S=A=T=0.
+  C1d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/process_standard.rs (deterministic process memory/stack layout)"
+      - "sources/tock/boards/nordic/nrf52840dk/src/main.rs (statically composed XIP image and kernel stack)"
+      default_state: "All stack locations and entry offsets are deterministic."
+    commits: []
+    discussions: []
+    rationale: |
+      P=0: privileged and process stacks are applicable predictable-layout
+      surfaces even without an MMU. Tock 2.2 places them deterministically and
+      provides no per-entry offset randomization; D=S=A=T=0.
+  C1d.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — there is no general-purpose kernel heap whose allocation order or cache
+      placement could be randomized; the grant region is deterministically
+      bump-allocated from process RAM.
+  C1d.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/process_standard.rs (ordinary deterministic Rust struct layouts)"
+      - "sources/tock/Cargo.toml (no randomized-layout compiler integration)"
+      default_state: "No struct-layout randomization."
+    commits: []
+    discussions: []
+    rationale: |
+      P=0: the surface (known struct member offsets) exists and Tock deploys no
+      randomization against it. Rust's unspecified default field order is a
+      per-build constant, not a randomization mitigation, so it does not raise this
+      to P=1.
+  C1e.1:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "mpu::Permissions::ReadExecuteOnly (process flash), mpu::Permissions::ReadWriteOnly (process RAM)"
+      source_files:
+      - "sources/tock/kernel/src/platform/mpu.rs:11-16 (Permissions enum: ReadWriteExecute / ReadWriteOnly / ReadExecuteOnly / ReadOnly / ExecuteOnly)"
+      - "sources/tock/kernel/src/process_standard.rs:1563-1570 (flash ReadExecuteOnly), :1696-1703 (RAM ReadWriteOnly)"
+      - "sources/tock/arch/cortex-m/src/mpu.rs (RASR AP/XN encoding)"
+      default_state: >-
+        Default-on for every process and for kernel code (XIP RO flash + MPU).
+    commits:
+    - hash: "4e6cd4ff503e7a0e54d4eaf6b63b2559d9e61496"
+      date: "2018"
+      description: "arch: cortex-m: shared MPU"
+    discussions:
+    - "https://github.com/tock/tock/pull/1212"
+    rationale: |
+      P=1: explicit W^X via MPU + XIP. D=3: mandatory for every process; kernel
+      code is RO by image layout. S=2; decisive property: hardware MPU
+      permissions cover every process flash/RAM mapping, but
+      enforcement remains region-granular and privileged capsules share the
+      kernel domain. This matches the other Cortex-M MPU W^X implementations.
+      A=3: core design. T=3.
+  C1e.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/config.rs (compile-time constants only; no post-init permission transition)"
+      - "sources/tock/kernel/src/process_standard.rs (runtime mutable kernel state remains writable)"
+      default_state: "No post-init RO transition for runtime-initialized state."
+    commits: []
+    discussions: []
+    rationale: |
+      P=0: the surface (data that is written once at init then never again) exists,
+      but Tock has no mechanism that demotes such data to read-only after init.
+      Genuinely-constant data is already RO in flash (counted under C1e.3), so this
+      entry — the dynamic ro_after_init transition — is absent → P=0.
+  C1e.3:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/arch/cortex-m/src/mpu.rs (RO/RX region attributes)"
+      - "sources/tock/boards/ (board linker scripts place .text/.rodata in flash)"
+      default_state: >-
+        Default-on for code/rodata via XIP + MPU; no dynamic sealing API.
+    commits:
+    - hash: "4e6cd4ff503e7a0e54d4eaf6b63b2559d9e61496"
+      date: "2018"
+      description: "arch: cortex-m: shared MPU"
+    discussions:
+    - "https://github.com/tock/tock/pull/1212"
+    rationale: |
+      P=1: code/rodata are genuinely immutable regions at runtime. D=3: by image
+      layout, always. S=2: hardware-backed flash covers the principal static
+      code/rodata region but not runtime-designated state (no
+      securelevel/lockdown to seal more after boot). A=3: structural. T=3.
+  C1e.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/arch/cortex-m/src/mpu.rs (RASR XN is a single bit, not privilege-split)"
+      default_state: "No privileged-execute-never on Cortex-M."
+    commits: []
+    discussions: []
+    rationale: |
+      P=0: a user/kernel privilege boundary exists (so ret2usr is conceivable) but
+      the selected ARMv7-M Cortex-M4 MPU cannot express PXN, so no SMEP/PXN
+      mitigation is deployed on the primary target. Cortex-M33 Armv8.0-M peers
+      have the same result; Armv8.1-M adds PXN. The OpenTitan ePMP-MML
+      comparator achieves it (noted in comparator_configs).
+  C1e.5:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/process_standard.rs:456-494 (memory map: app_break vs kernel_memory_break; grant region privileged-only)"
+      - "sources/tock/kernel/src/grant.rs (grant table managed in the kernel-owned region)"
+      default_state: >-
+        Default-on: kernel metadata is always MPU-isolated from processes.
+    commits:
+    - hash: "d04103bb44f3dcd6bd7e84cf2801e7cb0f49b174"
+      date: "2016"
+      description: "Sketch of App container"
+    - hash: "4e6cd4ff503e7a0e54d4eaf6b63b2559d9e61496"
+      date: "2018"
+      description: "arch: cortex-m: shared MPU"
+    discussions:
+    - "https://github.com/tock/tock/pull/1212"
+    rationale: |
+      P=1: kernel control metadata is isolated from untrusted processes by the
+      MPU. D=3: mandatory. S=2: strong against process tampering, but within the
+      kernel privilege level the metadata is not further compartmentalized (a
+      compromised `unsafe` block in the kernel could reach it), so moderate. A=3:
+      structural. T=3.
+  C1e.6:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A on the Cortex-M primary — the ARMv7-M/ARMv8-M MPU has no execute-only
+      attribute (execute permission implies read). Tock's MPU HIL does define an
+      ExecuteOnly permission (kernel/src/platform/mpu.rs:16), but it can only be
+      realized on hardware that supports it, i.e. the OpenTitan RISC-V ePMP
+      comparator — where .text disclosure resistance becomes available. On the
+      scored M4 target the capability is absent.
+  C1e.7:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — there is no MMU/virtual-memory mapping model with mprotect/munmap to
+      seal (no mseal/mimmutable analogue). MPU regions are reconfigured by the
+      privileged kernel as processes are scheduled; there is no per-mapping
+      immutable-seal concept to apply.
+  C1e.8:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/boards/nordic/nrf52840dk/layout.ld (normal executable section layout without trap-fill policy)"
+      - "sources/tock/boards/nordic/nrf52840dk/.cargo/config.toml (no trapsled compiler/linker option)"
+      default_state: "No trapsled fill."
+    commits: []
+    discussions: []
+    rationale: |
+      P=0: the surface (executable padding usable as gadgets / fall-through)
+      exists, but no trap-fill mitigation is applied. Not N/A because executable
+      code with alignment padding exists; the architecture's lack of a clean trap
+      encoding is why it stays unimplemented.
+  C1f.1:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/lib.rs (Rust kernel crate root)"
+      - "sources/tock/capsules/core/src/lib.rs (Rust driver-capsule crate root)"
+      - "sources/tock/kernel/src/capabilities.rs:7-25 (scope and limits of capability gating)"
+      - "sources/tock/doc/CodeReview.md:229-234 (unsafe review requirement)"
+      - "sources/tock/doc/CodeReview.md:273-282 (Safety-comment and exported-capability policy)"
+      - "sources/tock/doc/ExternalDependencies.md:38-58 (dependency and unsafe-audit policy)"
+      default_state: >-
+        Mandatory — Rust is the implementation language of the whole kernel; it
+        cannot be disabled.
+    commits:
+    - hash: "a14379b850bf47e89cd2945226cbf9bcbab5f43f"
+      date: "2015"
+      description: "Initial commit"
+    - hash: "0aed07fd562232b4a0410e4de79e850825d88a52"
+      date: "2018"
+      description: "kernel: add capabilities"
+    discussions:
+    - "https://github.com/tock/tock/pull/975"
+    rationale: |
+      P=1: the kernel is a memory-safe-language kernel in the fullest sense. D=3:
+      it is the implementation language — not an opt-in. S=3: Rust's safe
+      subset covers the kernel and capsule architecture by
+      default, and explicit unsafe exceptions are subject to a mandatory written
+      safety rationale and review policy. This score does not claim that arbitrary
+      unsafe is capability-gated: capabilities apply only to selected sensitive
+      operations. A=3: the defining architectural property of Tock. T=3: Rust
+      kernel since ~2015, very actively maintained. This mechanism anchors why
+      several C-class defense-in-depth mitigations are scored P=0 below.
+  C2a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/platform/mod.rs (trait-object based platform dispatch without separate CFI instrumentation)"
+      - "sources/tock/Cargo.toml (no KCFI/CFI build option)"
+      default_state: "No KCFI; type safety is the substitute."
+    commits: []
+    discussions: []
+    rationale: |
+      P=0: the indirect-call surface exists (trait-object vtables, fn pointers),
+      and no dedicated forward-edge CFI mechanism is layered on top. Tock's
+      position is that Rust type safety (xref C1f.1) prevents the memory-corruption
+      that CFI is designed to contain, so the secondary mitigation is intentionally
+      absent → P=0 rather than P=1.
+  C2a.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — Intel IBT/CET is an x86 feature; the primary (Cortex-M) and comparator
+      (RV32) targets are not x86.
+  C2a.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — ARM BTI requires FEAT_PACBTI; the evaluated Cortex-M4 has no such
+      support and Tock 2.2 contains no ARMv8.1-M target. No
+      -mbranch-protection target is in use.
+  C2b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/arch/cortex-m/src/lib.rs (ordinary Cortex-M exception/call stack; no shadow stack)"
+      - "sources/tock/boards/nordic/nrf52840dk/.cargo/config.toml (no shadow-call-stack compiler option)"
+      default_state: "No shadow call stack."
+    commits: []
+    discussions: []
+    rationale: |
+      P=0: the surface (saved return addresses) exists; no SCS/RETGUARD is
+      deployed. As with C2a.1, this defense-in-depth control is intentionally
+      omitted in favor of Rust type safety (xref C1f.1).
+  C2b.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — Intel CET shadow stack is x86; the targets are Cortex-M / RV32.
+  C2b.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — ARM PAC requires FEAT_PACBTI silicon, absent on the evaluated
+      Cortex-M4 and on the RV32 Ibex comparator; Tock 2.2 contains no eligible
+      ARMv8.1-M target.
+  C2b.4:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — the ARM Guarded Control Stack requires FEAT_GCS, an ARMv9.4-A feature.
+      No Cortex-M4/M33 nor the RV32 Ibex comparator implements it, so there is no
+      hardware backward-edge facility to enable (parallel to C2b.3 PAC and C2a.3
+      BTI, which likewise need PACBTI silicon absent on these targets). Tock's
+      backward-edge posture is Rust type safety preventing the stack corruption that
+      ROP exploits (xref C1f.1 / C2b.1), not a hardware shadow stack.
+  C2c.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — Tock has no in-kernel JIT or bytecode VM; all executable code is
+      ahead-of-time compiled. There is no dynamically generated code to harden.
+  C3a.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — the kernel is an execute-in-place image at a fixed flash base with no
+      MMU to relocate it; there is no KASLR. (Processes can be position-independent
+      and loaded at varying flash offsets, but their placement is deterministic,
+      not randomized.)
+  C3a.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — there is no base KASLR to refine at function granularity.
+  C3b.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — Meltdown requires out-of-order speculative use of a faulting privileged
+      load; Cortex-M and the in-order RV32 Ibex raise faults synchronously and have
+      no such transient window, and there are no MMU page tables to split. KPTI is
+      not applicable.
+  C3b.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — there is no hardware SMAP/PAN on Cortex-M. The equivalent guarantee
+      (the privileged kernel not blindly dereferencing user pointers) is provided
+      structurally by the bounds-checked ProcessBuffer/allow mechanism, scored
+      under C1a.3.
+  C3c.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — there is no general kernel heap with a free path to zero. Reused
+      process-accessible memory is zeroed on (re)allocation/growth (scored under
+      C1c.2) rather than on free, so a zero-on-free mechanism has no surface here.
+  C3c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/arch/cortex-m/src/syscall.rs (SVC entry/return has no stack erasure)"
+      default_state: "No stack erasure on syscall return."
+    commits: []
+    discussions: []
+    rationale: |
+      P=0: a syscall entry/return boundary exists (the SVC/ecall path) but no
+      kernel-stack erasure mitigation is applied. Rust limits how readily that
+      stale data can be disclosed, but the scrubbing mechanism itself is absent.
+  C3c.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/arch/cortex-m/src/syscall.rs (normal syscall register return without scrubbing policy)"
+      - "sources/tock/boards/nordic/nrf52840dk/.cargo/config.toml (no register-zeroing compiler option)"
+      default_state: "No register scrubbing."
+    commits: []
+    discussions: []
+    rationale: |
+      P=0: the surface (residual register contents) exists and no register-clearing
+      mitigation is deployed.
+  C3d.1:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "kernel CONFIG.debug_panics / debug_load_processes / trace_syscalls (kernel/src/config.rs)"
+      source_files:
+      - "sources/tock/kernel/src/config.rs (compile-time debug gates)"
+      - "sources/tock/kernel/src/process_printer.rs (raw address output)"
+      - "sources/tock/kernel/src/debug.rs"
+      default_state: >-
+        Debug/panic output is opt-out at compile time; no runtime
+        pointer-hashing of leaked addresses.
+    commits:
+    - hash: "a5a573bcb4e68fdf031212f64ca19a7e568c908c"
+      date: "2019"
+      description: "Replace strace feature by a const configuration object."
+    discussions:
+    - "https://github.com/tock/tock/pull/1443"
+    rationale: |
+      P=1: there is a real (compile-time) control over diagnostic exposure. D=2:
+      typically present in development builds, removable for production (opt-out
+      rather than mandatory restriction). S=1: when enabled it leaks raw addresses
+      with no hashing/redaction, so weak. A=2: in-tree config option. T=3.
+  C3d.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/introspection.rs (KernelInfo; capability-gated)"
+      - "sources/tock/kernel/src/capabilities.rs (capability required to introspect)"
+      default_state: >-
+        No unrestricted diagnostic interface; introspection is capability-gated
+        and the console is opt-in.
+    commits:
+    - hash: "9b79f654ad2d9164c021e88170d1505019f87cdf"
+      date: "2018"
+      description: "kernel: add introspection"
+    discussions:
+    - "https://github.com/tock/tock/pull/1168"
+    rationale: |
+      P=1: diagnostic interfaces are restricted by construction (capability-gated
+      introspection, opt-in console, no procfs). D=2: depends on what the board
+      includes (the restriction is structural, but exposure varies by board build).
+      S=2: a process cannot reach kernel diagnostics without a capability, though
+      an included console capsule widens exposure. A=3: structural. T=2
+      (T_maintained=2: 1 substantive commit in the 18-month window, with
+      introspection.rs itself untouched).
+  C4.2:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/capabilities.rs (unforgeable capability traits: ProcessManagementCapability, MemoryAllocationCapability, ApplicationStorageCapability, ...)"
+      - "sources/tock/kernel/src/storage_permissions.rs (per-app storage read/modify permissions)"
+      - "sources/tock/kernel/src/process_checker.rs (AppID/ShortId binds policy to identity)"
+      default_state: >-
+        Mandatory and structural — the capability requirement is part of the
+        function signatures; it cannot be turned off.
+    commits:
+    - hash: "0aed07fd562232b4a0410e4de79e850825d88a52"
+      date: "2018"
+      description: "kernel: add capabilities"
+    discussions:
+    - "https://github.com/tock/tock/pull/975"
+    rationale: |
+      P=1: a genuine capability model exists. D=3: enforced
+      unconditionally by the type system (not a runtime opt-in). S=2:
+      unforgeability is compile-time-strong (a capsule cannot mint a token
+      without `unsafe`, and all capsule crates carry forbid(unsafe_code)),
+      but object mediation is incomplete: capabilities.rs defines 11
+      blanket marker traits with no per-object scoping, no rights masks,
+      no delegation control, and no revocation — one
+      ProcessManagementCapability grants authority over all processes
+      permanently — and only ~25 of 240+ kernel entry points are
+      capability-gated. The per-object storage-permission/AppID layer that
+      would carry fine-grained mediation is not wired in the evaluated
+      nRF52840dk baseline (D and S must describe the same variant).
+      Zephyr's per-object default-deny k_object_validate holds S=2 and
+      seL4's S=3 anchor has rights + Mint/Grant delegation + Revoke +
+      proof; Tock sits with the former. A=3: a core design property of
+      Tock. T=2 (T_maintained=2: 1 substantive commit on the cited files
+      in the 18-month window). Still one of the stronger capability
+      stories in the cohort, well beyond Linux POSIX
+      capabilities or unenforced uid/gid.
+  C4.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/syscall.rs:127-135 (SyscallClass enum: 8 classes)"
+      - "sources/tock/kernel/src/scheduler.rs (scheduler side of syscall dispatch)"
+      - "sources/tock/kernel/src/kernel.rs (kernel dispatch to per-driver handlers)"
+      - "sources/tock/doc/reference/trd104-syscalls.md (the ABI)"
+      default_state: >-
+        The 8-class ABI and board-composed driver set are inherent; per-app
+        AppID restriction is opt-in.
+    commits:
+    - hash: "f49f3b3bd08ba5e63e82fd0c2b52a7467dc56d91"
+      date: "2021"
+      description: "Refactor syscall.rs and update documentation"
+    discussions:
+    - "https://github.com/tock/tock/pull/2446"
+    rationale: |
+      P=1: real attack-surface reduction — a tiny fixed ABI plus board-determined
+      driver inclusion and optional AppID-based restriction. D=2: the small ABI is
+      mandatory, but there is no per-process syscall allowlist comparable to
+      seccomp/pledge by default (driver-level restriction is opt-in via policy), so
+      2 rather than 3. S=2: the surface is small and typed, but any app can invoke
+      any included driver's commands unless a policy restricts it. A=3: the syscall
+      model is foundational. T=3.
+  C4.5:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/process_checker.rs (AppCredentialsPolicy::require_credentials/check, AppUniqueness, ProcessCheckError)"
+      - "sources/tock/kernel/src/process_loading.rs:136-172 (legacy loader path)"
+      - "sources/tock/kernel/src/process_loading.rs:465-516 (checked asynchronous loader architecture)"
+      - "sources/tock/boards/nordic/nrf52840dk/src/main.rs:113-133 (baseline board invokes the legacy loader)"
+      - "sources/tock/doc/reference/trd-appid.md (application identity design)"
+      default_state: >-
+        Disabled on the primary nRF52840dk baseline. Enforcement requires a
+        board to wire the asynchronous checker/loader and a policy that requires
+        acceptable credentials.
+    commits:
+    - hash: "92d0ae345530e992a3d11e803e2b24bd57502c2a"
+      date: "2022"
+      description: "Moving credentials checkers to their own submodule, process_checker."
+    discussions:
+    - "https://github.com/tock/tock/pull/2809"
+    rationale: |
+      P=1: a real loading-restriction mechanism exists (credential-gated process
+      loading + AppID uniqueness). D=1: the evaluated board uses the unchecked
+      legacy loader, so enforcement needs explicit board wiring. S=2: a selected
+      cryptographic policy can restrict the checked path, but the legacy unsigned
+      path remains available (see C6.5). A=3: integrated with the loader
+      architecture. T=2: the AppID/credentials framework landed ~2021-2022
+      (T_age=2) and is actively maintained (T_maintained=3) → T=2.
+  C4.6:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/process_standard.rs (per-process MPU region allocation)"
+      - "sources/tock/kernel/src/storage_permissions.rs (per-app storage scoping)"
+      - "sources/tock/kernel/src/ipc.rs (explicit, mediated inter-process sharing)"
+      - "sources/tock/kernel/src/process_policies.rs (ProcessFaultPolicy)"
+      default_state: >-
+        Default-on: every loaded process is MPU-isolated into its own domain;
+        there is no shared-everything mode.
+    commits:
+    - hash: "4e6cd4ff503e7a0e54d4eaf6b63b2559d9e61496"
+      date: "2018"
+      description: "arch: cortex-m: shared MPU"
+    discussions:
+    - "https://github.com/tock/tock/pull/1212"
+    rationale: |
+      P=1: strong per-process isolation domains. D=3: mandatory for every process.
+      S=3: MPU-enforced separation of memory and explicit mediation of shared
+      resources, with per-process fault containment; no known in-design escape
+      from a process's regions. A=3: core design. T=2 (T_maintained=2: 9
+      substantive commits on the cited process_standard/ipc files in the
+      18-month window, with process_policies.rs and storage_permissions.rs
+      untouched). Notably stronger than the NuttX PROTECTED case (single shared
+      user region, no inter-task isolation):
+      Tock gives each process its own regions.
+  C4.7:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — Tock has no UNIX credential model (no uid/gid set-id chains) and no
+      ptrace/process-debug facility. Processes are MPU-isolated and cannot inspect
+      or attach to one another; AppID provides application identity but there is no
+      ptrace-style relationship surface (PTRACE_SCOPE/Yama) to harden.
+  C4.8:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - kernel/src/syscall.rs
+      - arch/cortex-m/src/syscall.rs
+      default_state: >-
+        The svc handler decodes the syscall class from the instruction and
+        process state without validating the PC of the svc instruction. XN RAM
+        under the MPU posture (C1e.1 W^X) blocks syscalls from injected RAM
+        code, but any instruction in application flash is an accepted origin.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no msyscall-style origin pinning; W^X narrows the injected-code
+      origin but flash-resident gadgets remain valid syscall origins, so the
+      pinning mechanism itself is absent.
+  C5a.1:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/capsules/ (drivers implemented as untrusted Rust capsules)"
+      - "sources/tock/kernel/src/capabilities.rs (capability gating of sensitive APIs)"
+      default_state: >-
+        Default-on: every driver is a type-isolated, capability-confined
+        capsule.
+    commits:
+    - hash: "0aed07fd562232b4a0410e4de79e850825d88a52"
+      date: "2018"
+      description: "kernel: add capabilities"
+    discussions:
+    - "https://github.com/tock/tock/pull/975"
+    rationale: |
+      P=1: real driver fault isolation exists (language + capability confinement).
+      D=3: structural for all drivers. S=2: strong against memory-corruption and
+      authority escalation by a driver, but no crash/liveness isolation (a capsule
+      panic/hang affects the kernel) and a capsule still operates within its
+      granted authority — so moderate, below Fuchsia's userspace-process driver
+      model. A=3: core design. T=3. Materially better than the in-kernel-privileged
+      C drivers of the other RTOSes (which scored P=0).
+  C5a.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/boards/nordic/nrf52840dk/Cargo.toml (capsules-core/-extra/-system are path dependencies, linked at build time)"
+      - "sources/tock/kernel/src/process_loading.rs (runtime loading = userspace TBF processes only)"
+      default_state: >-
+        The row's attack surface (loadable code executing in kernel
+        context) does not exist.
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — this row scores isolation of runtime-loadable kernel
+      extensions, and Tock has none: capsules are compile-time-linked and
+      the kernel exposes no loading surface. The applicability rule that
+      keeps NuttX (CONFIG_MODULE kernel modules) and Zephyr (LLEXT can run
+      privileged) scored is "runtime-loadable code can execute in kernel
+      context" — Tock, like Redox ("no loadable modules, nothing to
+      isolate"), Fuchsia ("no runtime-loadable kernel modules... vacuous"),
+      and seL4, fails it. Runtime-loaded userspace processes are isolated
+      by the MPU process model already scored at C4.6/C5d.2; crediting it
+      again here double-counted the same property.
+  C5a.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — Tock has no in-kernel bytecode VM / eBPF verifier+runtime to sandbox.
+  C5b.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — there is no hypervisor beneath Tock on the Cortex-M / RV32 targets to
+      enforce kernel integrity (HEKI/IKG); Tock is the lowest privileged software
+      layer above the SoC.
+  C5b.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state: "No secure-world hardware exists in the evaluated target set."
+    commits: []
+    discussions: []
+    rationale: |
+      N/A for Tock 2.2: the primary nRF52840 lacks TrustZone-M and the immutable
+      release contains no Cortex-M33/TrustZone board port. A later or external
+      TZ-capable port would require a separate score; it cannot be inferred
+      from post-release master.
+  C5c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/chips/sam4l/src/dma.rs (SAM4L Peripheral DMA Controller / PDCA — a bus master programmed with raw SRAM addresses; the MPU cannot constrain its accesses)"
+      - "sources/tock/chips/nrf52/src/uart.rs (nRF52 UARTE EasyDMA: txd.ptr/rxd.ptr + maxcnt program a peripheral that reads/writes SRAM directly, bypassing the CPU MPU; same pattern in adc.rs, ble_radio.rs)"
+      - "sources/tock/arch/rv32i/src/pmp.rs (PMP/ePMP implements kernel::platform::mpu — CPU-side kernel/process protection only; PMP does not gate bus masters)"
+      - "sources/tock/chips/earlgrey/src/epmp.rs (OpenTitan EarlGrey ePMP — CPU-side isolation; no RACL/IOPMP bus access-control in this snapshot)"
+      default_state: >-
+        Tock's targets (ARM Cortex-M4/M33, RISC-V RV32 Ibex/OpenTitan EarlGrey)
+        have no IOMMU/SMMU. CPU-issued accesses are confined by the Cortex-M MPU
+        or RISC-V PMP/ePMP, but DMA-capable peripherals are independent bus
+        masters: once a capsule programs a source/destination pointer (nRF52
+        EasyDMA ptr/maxcnt, SAM4L PDCA channel registers), the peripheral reads
+        or writes those physical addresses directly on the bus fabric,
+        unmediated by the MPU/PMP. Tock does not configure TrustZone-M SAU/IDAU
+        or any SoC peripheral firewall; the baseline has no TrustZone-capable
+        board (C5b.2 N/A), and the
+        EarlGrey port uses the ePMP for kernel/process isolation only. The
+        kernel exposes no IOMMU abstraction and no DMA-mapping API.
+    commits: []
+    discussions: []
+    rationale: |
+      P=0: the DMA-bypass attack surface demonstrably exists on Tock's
+      targets — every
+      supported chip ships DMA-capable bus masters (SAM4L PDCA, nRF52 EasyDMA
+      in the UARTE/ADC/BLE radio, OpenTitan USB DMA / rv_dm debug master) that
+      issue raw addresses directly onto the bus — so the framework requires a
+      Presence score rather than N/A. None of Tock's memory-protection
+      primitives bounds these masters: the MPU and PMP/ePMP constrain only
+      CPU-issued accesses (that is C5a process/kernel isolation, not
+      device-side bounding); the capsule/capability discipline gates the software programming
+      interface (who may write the DMA registers), not the bus master's reach
+      once programmed. The mechanism class is deliverable on this hardware
+      class — zephyr scores P=1 via in-tree nRF SPU partitioning, and
+      freertos is P=0 on the same grounds — so Tock's omission is
+      a recorded absence, not a non-existent surface. Matches the taxonomy
+      os_hint ("Tock does not use TrustZone-M peripheral firewalls; DMA
+      masters can bypass the MPU"). D=S=A=T=0 follow from P=0.
+  C5c.2:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/capabilities.rs (capability-bounded reach between core and capsules)"
+      - "sources/tock/capsules/ (compartmentalized subsystems)"
+      default_state: >-
+        Default-on (language-enforced); not hardware memory domains.
+    commits:
+    - hash: "0aed07fd562232b4a0410e4de79e850825d88a52"
+      date: "2018"
+      description: "kernel: add capabilities"
+    discussions:
+    - "https://github.com/tock/tock/pull/975"
+    rationale: |
+      P=1: a real intra-kernel compartmentalization primitive exists — language +
+      capability boundaries between the trusted core and untrusted capsules. D=3:
+      structural. S=2: it bounds authority and prevents memory corruption across
+      the boundary, but it is not a hardware memory-protection domain and an
+      `unsafe` block inside the kernel is outside it — so moderate. A=3: core
+      design. T=3. (Per-process MPU compartments are scored under C4.6/C5d.2.)
+  C5c.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — no ARM MTE on the targets; no memory-tag domain separation to score.
+  C5d.1:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/ (minimal trusted core: scheduler, loader, memory, syscall)"
+      - "sources/tock/capsules/ (services as separated capsules)"
+      - "sources/tock/README.md"
+      default_state: >-
+        Default-on: the core/capsule split is the standard architecture.
+    commits:
+    - hash: "0aed07fd562232b4a0410e4de79e850825d88a52"
+      date: "2018"
+      description: "kernel: add capabilities"
+    discussions:
+    - "https://github.com/tock/tock/pull/975"
+    rationale: |
+      P=1: genuine architectural separation of kernel services (small core + typed
+      capsules). D=3: structural. S=2: the separation bounds authority and memory
+      reach, but services share the kernel privilege level / address space (no
+      address-space separation), so weaker than a true microkernel — moderate.
+      A=3: core design. T=3.
+  C5d.2:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/process_standard.rs (per-process MPU compartments + privileged grant region)"
+      - "sources/tock/kernel/src/capabilities.rs (capsule authority bounding)"
+      - "sources/tock/kernel/src/ipc.rs (explicit mediated sharing)"
+      default_state: >-
+        Default-on at both the process (MPU) and capsule (type/capability)
+        boundaries.
+    commits:
+    - hash: "0aed07fd562232b4a0410e4de79e850825d88a52"
+      date: "2018"
+      description: "kernel: add capabilities"
+    - hash: "4e6cd4ff503e7a0e54d4eaf6b63b2559d9e61496"
+      date: "2018"
+      description: "arch: cortex-m: shared MPU"
+    discussions:
+    - "https://github.com/tock/tock/pull/975"
+    - "https://github.com/tock/tock/pull/1212"
+    rationale: |
+      P=1: strong internal compartmentalization against lateral movement. D=3:
+      mandatory. S=3: the app boundary is MPU-enforced with no in-design escape and
+      the capsule boundary is type/capability-enforced; sharing is explicit. A=3:
+      core design. T=2 (T_maintained=2: exactly 10 non-trivial commits on the
+      cited files in the 18-month window — the top of the sporadic band). Among
+      the strongest in the cohort for an MMU-less system.
+  C6.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/boards/nordic/nrf52840dk/src/main.rs (kernel startup assumes a preloaded image and performs no signature verification)"
+      - "sources/tock/boards/nordic/nrf52840dk/layout.ld (image layout only; no authenticated-boot metadata/policy)"
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      P=0: the boot-time tampering surface exists on every Tock deployment,
+      and the distribution ships no verified-boot mechanism for the kernel
+      image itself — verification is delegated to the SoC ROM / external
+      bootloader. Zephyr demonstrates an MCU OS can ship the mechanism
+      (CONFIG_BOOTLOADER_MCUBOOT, signed images), so delegation is an absence
+      of an OS-level mechanism, not inapplicability. Tock's contribution to
+      the trust chain is at the application layer (signed process loading —
+      see C6.5/C4.5), which is scored there, not here. D=S=A=T=0 follow from
+      P=0.
+  C6.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/boards/nordic/nrf52840dk/src/main.rs (startup emits no measurement/event log)"
+      - "sources/tock/kernel/src/process_checker.rs (application credential checking is not boot measurement or remote attestation)"
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      P=0: the measurement/attestation surface exists (firmware integrity
+      claims matter on any connected MCU) and Tock ships nothing for it — no
+      boot-time measurement, no event log, no attestation client. Zephyr
+      scores P=1 here via its TF-M PSA attestation integration, proving the
+      mechanism is deliverable by an MCU OS; relying on the SoC (OpenTitan)
+      to provide it is an absence at the OS layer, not inapplicability.
+      D=S=A=T=0 follow from P=0.
+  C6.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — there are no loadable KERNEL modules to sign: capsules are statically
+      compiled into the kernel image. (Application-binary signature enforcement is a
+      distinct mechanism, scored under C6.5/C4.5.)
+  C6.4:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/arch/cortex-m/src/mpu.rs (kernel code RO+X)"
+      - "sources/tock/capsules/ (watchdog driver, board-included)"
+      default_state: >-
+        Default-on for code immutability (XIP RO + MPU); watchdog opt-in per
+        board.
+    commits:
+    - hash: "4e6cd4ff503e7a0e54d4eaf6b63b2559d9e61496"
+      date: "2018"
+      description: "arch: cortex-m: shared MPU"
+    discussions:
+    - "https://github.com/tock/tock/pull/1212"
+    rationale: |
+      P=1: runtime kernel-code integrity is genuinely enforced (RO flash + MPU).
+      D=3: structural for code. S=2: protects code/rodata and blocks process
+      tampering, but offers no runtime lockdown of additional state and no defense
+      against a compromised `unsafe` path inside the kernel itself — moderate. A=3:
+      structural. T=3.
+  C6.5:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/libraries/tock-tbf/src/types.rs:254-266 (TbfFooterV2CredentialsType: RSA-3072/4096, ECDSA-NIST-P256, SHA-256/384/512)"
+      - "sources/tock/kernel/src/process_checker.rs (AppCredentialsPolicy verification, ProcessCheckError)"
+      - "sources/tock/capsules/system/src/process_checker/signature.rs:25-232 (generic digest-plus-signature credential policy)"
+      - "sources/tock/kernel/src/process_loading.rs:136-172 (legacy load_processes path explicitly performs no credential checking)"
+      - "sources/tock/boards/nordic/nrf52840dk/src/main.rs:113-133 (baseline board invokes legacy load_processes rather than ProcessCheckerMachine)"
+      - "sources/tock/doc/reference/trd-appid.md (application identity design)"
+      - "sources/tock/doc/reference/trd-public-private-keys.md (application-key design)"
+      - "sources/tock/doc/reference/trd-digest.md (application digest design)"
+      default_state: >-
+        Disabled on the primary nRF52840dk baseline: the board uses the legacy
+        unchecked loader. A board must explicitly wire ProcessCheckerMachine,
+        an asynchronous loader, and a credential-requiring policy.
+    commits:
+    - hash: "92d0ae345530e992a3d11e803e2b24bd57502c2a"
+      date: "2022"
+      description: "Moving credentials checkers to their own submodule, process_checker."
+    discussions:
+    - "https://github.com/tock/tock/pull/2809"
+    rationale: |
+      P=1: real executable-integrity verification (per-app cryptographic
+      credentials). D=1: the primary nRF52840dk board uses the legacy unchecked
+      loader; enforcement requires an explicitly wired checker and asynchronous
+      loading path. S=2: cryptographic appraisal can protect the selected
+      load path, but the baseline retains an unsigned loader path
+      and the framework supplies no anti-rollback or complete executable
+      lifecycle guarantee. A=3: the checked path is integrated with the core
+      loader architecture. T=2: AppID/credentials landed ~2021-2022 (T_age=2)
+      and is actively developed (T_maintained=3) → T=2. Dependency cap:
+      C6.1 is P=0 — the nRF52840dk baseline ships no verified boot chain, so
+      the credential-checking kernel itself is unauthenticated and an attacker
+      with flash-write access replaces the checker rather than defeating it.
+      S_eff=1.
+  C7a.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — Cortex-M and the in-order RV32 Ibex do not speculate past a bounds
+      check; there is no Spectre v1 transient window.
+  C7a.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — no indirect-branch speculation on the in-order targets; Spectre v2 /
+      BTI / Retbleed do not apply.
+  C7a.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — no speculative store bypass on the in-order targets (Spectre v4).
+  C7a.4:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — straight-line speculation is an A-profile concern; the in-order
+      Cortex-M / RV32 targets are not affected.
+  C7b.1:
+    status: xref
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: >-
+      xref → C3b.1: this entry records the cross-reference in the C7 (transient execution)
+      taxonomy and is excluded from scoring so that the mitigation is not counted twice.
+      Nothing is mitigated here, however: Meltdown requires out-of-order speculative use of
+      a faulting privileged load, and both scored Tock targets — Cortex-M and the in-order
+      RV32 Ibex — raise faults synchronously and have no MMU page tables to split, so the
+      xref target C3b.1 is itself N/A rather than a scored KPTI implementation.
+  C7b.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — L1TF/Foreshadow is an Intel speculative-L1-dereference issue; not
+      applicable to Cortex-M / RV32 Ibex.
+  C7c.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — no microarchitectural fill/store buffers subject to MDS/TAA/MMIO
+      stale-data sampling on the in-order targets.
+  C7c.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — the cores are single-threaded (no SMT/hyperthreading), so there is no
+      cross-thread speculative leakage to isolate (STIBP).
+  C5e.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "board-selected ProcessFaultPolicy (capsules/system/src/process_policies.rs); nRF52840DK uses PanicFaultPolicy"
+      - "optional hardware watchdog (kernel/src/platform/watchdog.rs WatchDog HIL)"
+      source_files:
+      - "sources/tock/capsules/system/src/process_policies.rs (PanicFaultPolicy/StopFaultPolicy/StopWithDebugFaultPolicy/RestartFaultPolicy/RestartWithDebugFaultPolicy/ThresholdRestartFaultPolicy/ThresholdRestartThenPanicFaultPolicy)"
+      - "sources/tock/kernel/src/process.rs:1027 (enum FaultAction: Panic/Stop/Restart)"
+      - "sources/tock/boards/nordic/nrf52840dk/src/main.rs:17-18 (FAULT_RESPONSE = PanicFaultPolicy), :121 (wired into the kernel)"
+      - "sources/tock/kernel/src/platform/watchdog.rs:12 (opt-in WatchDog HIL; per-chip drivers e.g. chips/rp2040/src/watchdog.rs)"
+      default_state: >-
+        Fault containment to the process is mandatory and always on. Recovery
+        action is board policy; the evaluated nRF52840DK default
+        (PanicFaultPolicy) panics/resets the whole system on a process fault
+        rather than restarting it. Watchdog is opt-in.
+    commits: []
+    discussions: []
+    rationale: |
+      P=1: a real fault detection/containment/recovery facility exists (per-process
+      ProcessFaultPolicy + optional watchdog). D=2 (not 3): although CONTAINMENT of a
+      process fault to that process is mandatory and structural, the D dimension
+      scores the deployed default behavior — and the evaluated nRF52840DK ships
+      PanicFaultPolicy, which on a process fault panics/resets the entire system
+      rather than isolating-and-continuing. So the recovery facet as configured is
+      not "default-on" for availability; a board must opt into a Restart/Threshold
+      policy to get fleet resilience. (Honest weighing per the scoring guidance:
+      containment D=3 vs. dev-board recovery D=1 → D=2 overall.) This lands at the
+      same D=2 as linux C5e.1 (detectors default-on, oops kills the task) and one
+      above openbsd C5e.1 (D=1, panic-reboot + opt-in watchdog) — Tock contains to
+      the process where openbsd/freertos contain only to a reboot. S=2: containment
+      is hardware-MPU-enforced and a process cannot escape it, and Restart policies
+      genuinely recover a component, but the kernel has no self-watchdog/liveness
+      detector of its own and a panic in the trusted core (or in `unsafe`) is fatal
+      — so significantly-raises-difficulty rather than no-practical-bypass (matches
+      linux/openbsd S range, below seL4's MCS timeout-fault model). A=3: process-as-
+      fault-domain is a core design property of Tock (xref C4.6/C5a.1/C5d.2 — those
+      score the isolation/sandbox facet; C5e.1 scores the availability/recovery
+      facet, no double-count). T=2: the process fault model and policy framework are
+      long-standing (process isolation since ~2015-2016, the policy menu predates the
+      evaluated tree by years; T_age=3) but maintenance is sporadic
+      (T_maintained=2: 3 substantive commits in the 18-month window, with
+      watchdog.rs untouched).
+      T_age derived from feature history — the shallow clone's flattened log
+      precludes a single anchor commit, so commits[] is left empty.
+  C5e.2:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "board scheduler: RoundRobinSched (DEFAULT_TIMESLICE_US=10000) on nRF52840DK; SchedulerTimer = cortexm4 SysTick"
+      source_files:
+      - "sources/tock/kernel/src/scheduler/round_robin.rs:62 (DEFAULT_TIMESLICE_US=10000; preemptive round-robin)"
+      - "sources/tock/kernel/src/kernel.rs:469-727 (do_process: arms scheduler timer, preempts on TimesliceExpired), :40 (MIN_QUANTA_THRESHOLD_US=500)"
+      - "sources/tock/boards/nordic/nrf52840dk/src/lib.rs:204 (RoundRobinComponentType), :283 (SchedulerTimer = cortexm4::systick::SysTick), :933 (RoundRobinComponent::new)"
+      - "sources/tock/kernel/src/syscall.rs:87-96 (8-class SyscallClass enum: Yield/Subscribe/Command/ReadWriteAllow/ReadOnlyAllow/Memop/Exit/UserspaceReadableAllow; no scheduling/priority syscall)"
+      default_state: >-
+        Preemptive per-process timeslicing is on by default (RoundRobinSched,
+        10ms quantum) and cannot be disabled by a process; no per-process
+        CPU-bandwidth cap.
+    commits: []
+    discussions: []
+    rationale: |
+      P=1: real temporal isolation exists (preemptive per-process timeslice quanta
+      enforced by the SysTick scheduler timer). D=3: mandatory and not disableable —
+      preemption is wired by the board's kernel loop and a process has NO syscall to
+      change its scheduling, so it cannot be turned off from userspace (stronger than
+      linux/openbsd C5e.2 D=2, where the budget controls are configurable/opt-in).
+      S=2: preemption robustly prevents a process from monopolizing the CPU across
+      slices and a compromised app cannot defeat it, but it is a fair-share
+      round-robin time-slice, NOT a (budget, period) bandwidth reservation — there is
+      no admission control or per-process CPU cap, and the kernel/capsule layer is
+      cooperative (a runaway capsule can starve everything; xref C5a.1). So
+      significantly-raises-difficulty, matching linux C5e.2 S=2 and above openbsd
+      S=1 (flat RLIMIT_CPU); below seL4's MCS scheduling-contexts (S=3). A=3:
+      mandatory preemptive scheduling with a userspace-inaccessible scheduler is a
+      core design property. T=3: the preemptive process scheduler and scheduler-timer
+      enforcement are long-standing (T_age=3, present since the early multi-process
+      kernel ~2016) and actively maintained (T_maintained=3). T_age derived from
+      feature history (shallow clone → empty commits[]).
+  C5e.3:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/tock/kernel/src/process_standard.rs:456-494 (memory map: grant region [kernel_memory_break..app_break] inside the process's own MPU-bounded RAM), :1209 (allocate_grant), :1274 (allocate_custom_grant)"
+      - "sources/tock/kernel/src/grant.rs:1146 (Error::OutOfMemory when the process's grant region is exhausted — self-confined, no spill)"
+      - "sources/tock/kernel/src/ipc.rs (inter-process sharing is explicit/mediated, not ambient)"
+      default_state: >-
+        Always on and structural: each process's dynamic kernel memory is drawn
+        from its own fixed RAM region; no overcommit; exhaustion is
+        self-confined. Cannot be disabled.
+    commits: []
+    discussions: []
+    rationale: |
+      P=1: a genuine, design-enforced memory-quota mechanism exists (per-process
+      fixed RAM region; all per-process kernel allocations charged to that region;
+      no kernel heap). D=3: unconditional and structural — there is no knob and no
+      way for a process to obtain memory outside its region. S=3: because there is
+      no overcommit and no shared kernel pool, memory exhaustion is self-confined BY
+      CONSTRUCTION — a process draining its own RAM cannot deny memory to the kernel
+      or to peers (Error::OutOfMemory is local), which is materially stronger than a
+      best-effort accounting limit; the only residuals are build-time-fixed
+      (capsule statics, kernel stack, process array) and not reachable by process
+      behavior. This is one of the strongest C5e.3 postures in the cohort — at the
+      level of seL4's Untyped-capability accounting design and above linux/openbsd
+      C5e.3 (S=2 hierarchical/flat rlimits, which are runtime limits on a shared
+      address space). A=3: the no-heap + grant-from-process-RAM design is a defining
+      architectural property of Tock. T=3: the grant model is long-standing (grants
+      since ~2016-2017, T_age=3) and actively maintained (T_maintained=3). T_age
+      derived from feature history (shallow clone → empty commits[]). Cross-
+      references C4.6/C1b.1/C1b.2 (grant-isolation and no-heap facets); C5e.3 scores
+      the availability/quota facet specifically — no double-count.
+  C7d.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: |
+      N/A — the Cortex-M4F and RV32 Ibex comparator have no shared
+      last-level cache across isolation domains: caches, where present, are small,
+      core-private, and not shared between mutually distrusting processes, so there
+      is no microarchitectural timing-channel surface (shared LLC / cache-set
+      contention) for cache partitioning or colouring to defend. The framework's
+      applicability rules explicitly list Tock (with FreeRTOS/Zephyr/Contiki-NG/
+      NuttX) under C7d.1 N/A for exactly this reason. This parallels the C7
+      speculative-execution entries above, which are N/A because the in-order cores
+      have no transient-execution window.

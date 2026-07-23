@@ -1,0 +1,3592 @@
+# yaml-language-server: $schema=schema/evaluation.schema.json
+os: linux
+schema_version: 1
+baseline_class: distribution
+default_config: Fedora 44 (kernel 7.1.4-200.fc44.x86_64, upstream stable source @ 7a5cef0db4795d9d453a12e0f61b5b7634fc4d40, see configs/kernel-x86_64-fedora-44.config); firmware baseline assumes UEFI Secure Boot enabled (Fedora ships a Microsoft-CA-signed shim and LOCK_DOWN_IN_EFI_SECURE_BOOT=y auto-enters lockdown=integrity), so Secure-Boot-conditional enforcement counts as default-active (C6.1/C6.3/C6.4)
+comparator_configs:
+- defconfig (lower bound)
+- kernel-hardening-checker recommended (upper bound)
+- Ubuntu LTS
+- Android GKI
+arm64_default_config: "Fedora 44 aarch64 (kernel 7.1.4-200.fc44.aarch64, upstream stable source @ 7a5cef0db4795d9d453a12e0f61b5b7634fc4d40, see configs/kernel-aarch64-fedora-44.config); supplementary AArch64 scoring column. Built with GCC, so the Clang-only kernel CFI features — Shadow Call Stack (C2b.1) and kernel-mode BTI (C2a.3, ARM64_BTI_KERNEL depends on !CC_IS_GCC) — are unavailable in this baseline; default-on kernel backward-edge protection is ARM PAC (C2b.3)."
+arm64_comparator_configs:
+- "Android GKI arm64 (Clang build: CONFIG_SHADOW_CALL_STACK=y + CONFIG_CFI_CLANG=y; MTE/BTI/PAC default-on — upper bound)"
+- "arm64 defconfig + KSPP hardening fragment (lower bound)"
+mechanisms:
+  C1a.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_STACKPROTECTOR
+      - CONFIG_STACKPROTECTOR_STRONG
+      source_files:
+      - arch/x86/include/asm/stackprotector.h
+      - include/linux/stackprotector.h
+      - arch/Kconfig
+      default_state: >-
+        Fedora: CONFIG_STACKPROTECTOR=y, CONFIG_STACKPROTECTOR_STRONG=y (both default
+        y). GCC inserts stack canary checks on functions with local arrays, address-taken
+        variables, or register locals.
+    commits:
+    - hash: b62a5c740df1e3d49a97349fce0c6a23f633d7fe
+      date: '2006-09-26'
+      description: '[PATCH] Add the Kconfig option for the stackprotector feature'
+    - hash: 8779657d29c0ebcc0c94ede4df2f497baf1b563f
+      date: '2013-12-19'
+      description: 'stackprotector: Introduce CONFIG_CC_STACKPROTECTOR_STRONG'
+    discussions:
+    - https://lore.kernel.org/all/1410527779-8133-1-git-send-email-atomlin@redhat.com/
+    rationale: >-
+      P=1: implemented upstream since 2.6.x (STACKPROTECTOR) and 4.18+ (STRONG by
+      default). D=2: default y in Kconfig and all major distros. S=2: canaries significantly
+      raise exploitation difficulty for linear stack overflows, but known bypasses
+      exist via info leaks or non-linear overwrites. A=2: in-tree option requiring
+      compiler support. T=3: GCC stack protector since ~2005, STRONG since 2014; widely
+      deployed for over a decade.
+  C1a.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_VMAP_STACK
+      source_files:
+      - kernel/fork.c
+      - arch/Kconfig
+      - mm/vmalloc.c
+      default_state: >-
+        Fedora: CONFIG_VMAP_STACK=y (default y). Kernel stacks allocated via vmalloc
+        with unmapped guard pages on both sides, causing immediate faults on overflow.
+    commits:
+    - hash: 320b2b8de12698082609ebbc1a17165727f4c893
+      date: '2010-08-12'
+      description: 'mm: keep a guard page below a grow-down stack segment'
+    - hash: 1be7107fbe18eed3e319a6c3e83c78254b693acb
+      date: '2017-06-19'
+      description: 'mm: larger stack guard gap, between vmas'
+    discussions:
+    - https://lore.kernel.org/all/cover.1466036668.git.luto@kernel.org/
+    rationale: >-
+      P=1: virtually-mapped kernel stacks with guard pages (Lutomirski, 2016) and
+      grow-down user stack guard pages (Torvalds, 2010; enlarged by Dickins, 2017).
+      D=2: default y in Kconfig and Fedora. S=2: catches sequential overflows via
+      page faults, but large stack frame allocations (stack clash) can skip the guard
+      page. A=2: in-tree option integrated into vmalloc subsystem. T=3: VMAP_STACK
+      since v4.9 (2016), user stack guard pages since 2010.
+  C1a.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_HARDENED_USERCOPY
+      - CONFIG_HARDENED_USERCOPY_DEFAULT_ON
+      source_files:
+      - mm/usercopy.c
+      - security/Kconfig.hardening
+      default_state: >-
+        Fedora: CONFIG_HARDENED_USERCOPY=y, CONFIG_HARDENED_USERCOPY_DEFAULT_ON=y.
+        Validates copy_to_user()/copy_from_user() calls, checking buffers do not span
+        multiple slab objects or cross page boundaries; _DEFAULT_ON makes the runtime
+        static key start enabled.
+    commits:
+    - hash: f5509cc18daa7f82bcc553be70df2117c8eedc16
+      date: '2016-06-07'
+      description: 'mm: Hardened usercopy'
+    discussions:
+    - https://lore.kernel.org/all/1469046427-12696-1-git-send-email-keescook@chromium.org/
+    - https://lore.kernel.org/all/1515636190-24061-1-git-send-email-keescook@chromium.org/
+    rationale: >-
+      P=1: implemented upstream based on PaX USERCOPY, ported by Kees Cook in 2016.
+      D=2: enabled by default in Fedora (HARDENED_USERCOPY=y plus HARDENED_USERCOPY_DEFAULT_ON=y)
+      and most distro configs. S=2: significantly limits heap overflow exploitation
+      via user-kernel copy paths, but cannot protect against intra-object overflows.
+      A=2: in-tree option. T=2: T_age=3 (upstream since v4.8, 2016), but
+      T_maintained=2 — only 4 substantive commits to mm/usercopy.c in the
+      2025-01-21..2026-07-21 maintenance window.
+  C1a.4:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_FORTIFY_SOURCE
+      source_files:
+      - include/linux/fortify-string.h
+      - security/Kconfig.hardening
+      default_state: >-
+        Fedora: CONFIG_FORTIFY_SOURCE=y. Wraps common string/memory functions (memcpy,
+        strcpy, memset) with compile-time and runtime size checks via __builtin_object_size.
+    commits:
+    - hash: 6974f0c4555e285ab217cee58b6e874f776ff409
+      date: '2017-07-12'
+      description: 'include/linux/string.h: add the option of fortified string.h functions'
+    discussions:
+    - https://lore.kernel.org/all/20170526095404.20439-1-danielmicay@gmail.com/
+    - https://lore.kernel.org/all/20211213223331.135412-1-keescook@chromium.org/
+    - https://lore.kernel.org/all/20220208225350.1331628-1-keescook@chromium.org/
+    rationale: >-
+      P=1: compile-time and runtime buffer overflow detection for common str/mem functions.
+      D=2: enabled by default in Fedora and all major distros. S=2: catches many common
+      buffer overflows, but effectiveness depends on compiler ability to determine
+      object sizes. A=2: in-tree option requiring compiler support. T=2: T_age=3
+      (kernel variant upstream since v4.13, 2017), but T_maintained=2 — only 2
+      substantive commits to include/linux/fortify-string.h in the
+      2025-01-21..2026-07-21 maintenance window.
+  C1a.5:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_KASAN
+      - CONFIG_KFENCE
+      source_files:
+      - mm/kasan/common.c
+      - mm/kasan/generic.c
+      - mm/kfence/core.c
+      - mm/kfence/report.c
+      default_state: >-
+        Fedora: CONFIG_KASAN=not set (too expensive for production), CONFIG_KFENCE=y
+        with sampling interval 100ms and 255 guard objects. KFENCE provides low-overhead
+        sampling-based detection of heap OOB, UAF, and invalid-free.
+    commits:
+    - hash: 0b24becc810dc3be6e3f94103a866f214c282394
+      date: '2015-02-13'
+      description: 'kasan: add kernel address sanitizer infrastructure'
+    - hash: 0ce20dd840897b12ae70869c69f1ba34d6d16965
+      date: '2021-02-25'
+      description: 'mm: add Kernel Electric-Fence infrastructure'
+    discussions:
+    - https://lore.kernel.org/all/20201103175841.3495947-1-elver@google.com/
+    rationale: >-
+      P=1: both KASAN (comprehensive, debug-only) and KFENCE (sampling, production)
+      upstream. D=2: KFENCE enabled by default in Fedora; KASAN available but disabled
+      due to ~2x overhead. S=1: KFENCE is sampling-based with low coverage (255 objects);
+      KASAN comprehensive but not deployed in production. A=2: in-tree options integrated
+      into slab allocator. T=3: T_age=3 (KASAN since v4.0, 2015; KFENCE since v5.12,
+      2021) and T_maintained=3 — 13 substantive commits to mm/kfence/core.c plus 8 to
+      mm/kasan/common.c in the 2025-01-21..2026-07-21 maintenance window.
+  C1a.6:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits:
+    - hash: 3b714d24ef173f81c78af16f73dcc9b40428c803
+      date: '2019-09-06'
+      description: 'arm64: mte: CPU feature detection and initial sysreg configuration'
+    - hash: 1c101da8b971a36695319dce7a24711dc567a0dd
+      date: '2019-11-27'
+      description: 'arm64: mte: Allow user control of the tag check mode via prctl()'
+    discussions:
+    - https://lore.kernel.org/all/20191211184027.20130-1-catalin.marinas@arm.com/
+    - https://lore.kernel.org/all/20200904103029.32083-1-catalin.marinas@arm.com/
+    rationale: >-
+      N/A: ARM MTE (spatial mode) is an ARM-only hardware feature with no
+      x86-64 analogue; it is N/A in the primary x86-64
+      evaluation and scored in the supplementary ARM64 column (see the arm64
+      overlay below). Consistent with the N/A treatment of C1b.5 / C2a.3 /
+      C2b.3 / C2b.4 / C5c.3 on x86-64.
+    arm64:
+      P: 1
+      D: 1
+      S: 2
+      A: 2
+      T_age: 2
+      T_maintained: 3
+      implementation:
+        config_options:
+        - CONFIG_ARM64_MTE
+        - CONFIG_KASAN_HW_TAGS
+        source_files:
+        - arch/arm64/kernel/mte.c
+        - arch/arm64/include/asm/mte.h
+        default_state: >-
+          Fedora aarch64: CONFIG_ARM64_MTE=y (default y, depends on ARMv8.5 MTE
+          assembler support). Userspace tag checking is opt-in per-process via
+          prctl(PR_SET_TAGGED_ADDR_CTRL); in-kernel spatial tagging is provided
+          through KASAN_HW_TAGS, a debug feature not enabled in the production
+          Fedora kernel. The hardware primitive is present but not protecting
+          kernel allocations by default.
+      commits:
+      - hash: 3b714d24ef173f81c78af16f73dcc9b40428c803
+        date: '2019-09-06'
+        description: 'arm64: mte: CPU feature detection and initial sysreg configuration'
+      - hash: 2e903b91479782b7dedd869603423d77e079d3de
+        date: '2020-12-22'
+        description: 'kasan, arm64: implement HW_TAGS runtime'
+      rationale: >-
+        arm64: P=1 — ARM MTE (spatial mode) is implemented for arm64 and compiled
+        in by default. D=1 — hardware support is present but in-kernel memory
+        tagging is opt-in (userspace prctl / KASAN_HW_TAGS debug), not default-on
+        for kernel allocations in the Fedora baseline. S=2 — 4-bit lock/key tags
+        give probabilistic spatial-overflow detection. A=2 — hardware feature with
+        MMU/allocator integration. T=2 — kernel MTE support since 2020 (~6 years).
+  C1a.7:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_UBSAN
+      - CONFIG_UBSAN_BOUNDS
+      - CONFIG_UBSAN_TRAP
+      source_files:
+      - lib/ubsan.c
+      - lib/Kconfig.ubsan
+      - include/linux/compiler_types.h
+      default_state: >-
+        Fedora 44: CONFIG_UBSAN=y, CONFIG_UBSAN_BOUNDS=y, CONFIG_UBSAN_BOUNDS_STRICT=y
+        (default-on), but CONFIG_UBSAN_TRAP is not set — out-of-bounds array indexing
+        is reported (warn), not trapped/fail-closed. KSPP hardening.config additionally
+        sets UBSAN_TRAP=y. __counted_by (CONFIG_CC_HAS_COUNTED_BY=y) extends checking
+        to annotated flexible-array members.
+    commits:
+    - hash: c6d308534aef6c99904bf5862066360ae067abc4
+      date: '2016-01-20'
+      description: 'UBSAN: run-time undefined behavior sanity checker'
+    - hash: 277a10850f9f4cb3429faf59293e2c89b1a320be
+      date: '2020-04-06'
+      description: 'ubsan: split "bounds" checker from other options'
+    - hash: 0887a7ebc97770c7870abf3075a2e8cd502a7f52
+      date: '2020-04-06'
+      description: 'ubsan: add trap instrumentation option'
+    - hash: dd06e72e68bcb4070ef211be100d2896e236c8fb
+      date: '2023-05-17'
+      description: 'Compiler Attributes: Add __counted_by macro'
+    discussions:
+    - https://lore.kernel.org/all/20200227193516.32566-1-keescook@chromium.org/
+    - https://lore.kernel.org/all/20230517190841.gonna.796-kees@kernel.org/
+    rationale: >-
+      P=1: UBSAN_BOUNDS array-index instrumentation upstream since v5.7 (2020), with
+      __counted_by flexible-array support since v6.5 (2023). D=2: CONFIG_UBSAN_BOUNDS=y
+      (and BOUNDS_STRICT) is default-on in Fedora 44, but CONFIG_UBSAN_TRAP is not set,
+      so violations are logged rather than fail-closed. S=1: in the default report mode
+      it detects out-of-bounds array indexing without preventing exploitation; trap mode
+      (KSPP) makes it fail-closed; scope is limited to compiler-sized arrays and
+      __counted_by-annotated flexible arrays (string/memory overflows are FORTIFY_SOURCE's
+      domain, C1a.4). A=2: in-tree, compiler-instrumented, integrated with FORTIFY via
+      the shared __counted_by mechanism. T=3: UBSAN since v4.0 (2016), bounds/trap split
+      since v5.7 (2020), __counted_by since v6.5 (2023) with an actively maintained
+      tree-wide annotation rollout.
+  C1b.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_SLAB_FREELIST_RANDOM
+      - CONFIG_SHUFFLE_PAGE_ALLOCATOR
+      source_files:
+      - mm/slub.c
+      - mm/shuffle.c
+      default_state: >-
+        Fedora: CONFIG_SLAB_FREELIST_RANDOM=y, CONFIG_SHUFFLE_PAGE_ALLOCATOR=y. Freelist
+        randomization shuffles object order within slab pages.
+    commits:
+    - hash: c7ce4f60ac199fb3521c5fcd64da21cee801ec2b
+      date: '2016-05-19'
+      description: 'mm: SLAB freelist randomization'
+    - hash: e900a918b0984ec8f2eb150b8477a47b75d17692
+      date: '2019-05-14'
+      description: 'mm: shuffle initial free memory to improve memory-side-cache utilization'
+    discussions:
+    - https://lore.kernel.org/all/1500309907-9357-1-git-send-email-alex.popov@linux.com/
+    rationale: >-
+      P=1: freelist and page allocator randomization implemented upstream. D=2: both
+      enabled by default in Fedora. S=2: makes heap layout significantly less predictable
+      but bounded entropy, defeatable by heap spraying. A=2: in-tree options in SLUB
+      and page allocator. T=3: T_age=3 (SLAB_FREELIST_RANDOM since v4.7, 2016;
+      SHUFFLE_PAGE_ALLOCATOR since v5.2, 2019) and T_maintained=3 — roughly 150
+      non-trivial commits to mm/slub.c in the 2025-01-21..2026-07-21 maintenance
+      window.
+  C1b.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_SLAB_FREELIST_HARDENED
+      - CONFIG_SLAB_BUCKETS
+      source_files:
+      - mm/slub.c
+      - mm/slab.h
+      default_state: >-
+        Fedora: CONFIG_SLAB_FREELIST_HARDENED=y, CONFIG_SLAB_BUCKETS=y. Freelist pointers
+        XOR-encoded with per-cache random value and pointer address.
+    commits:
+    - hash: 2482ddec670fb83717d129012bc558777cb159f7
+      date: '2017-09-06'
+      description: 'mm: add SLUB free list pointer obfuscation'
+    - hash: 67f2df3b82d091ed095d0e47e1f3a9d3e18e4e41
+      date: '2024-07-01'
+      description: 'mm/slab: Plumb kmem_buckets into __do_kmalloc_node()'
+    discussions:
+    - https://lore.kernel.org/all/20170802180609.GA66807@beast/
+    - https://lore.kernel.org/all/20240619192131.do.115-kees@kernel.org/
+    rationale: >-
+      P=1: freelist pointer obfuscation by Kees Cook (2017). D=2: enabled by default
+      in Fedora. S=2: XOR obfuscation significantly raises the bar for freelist forgery
+      but reversible with info leaks; SLAB_BUCKETS limits cross-cache attacks. A=2:
+      in-tree option in SLUB allocator. T=3: SLAB_FREELIST_HARDENED since v4.14 (2017),
+      SLAB_BUCKETS (2024); 7+ years.
+  C1b.3:
+    P: 1
+    D: 3
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - include/linux/refcount.h
+      - lib/refcount.c
+      default_state: >-
+        Always enabled; no config option. Since kernel 5.12, refcount_t unconditionally
+        uses saturating arithmetic (CONFIG_REFCOUNT_FULL removed). Counter saturates
+        at REFCOUNT_SATURATED.
+    commits:
+    - hash: f405df5de3170c00e5c54f8b7cf4766044a032ba
+      date: '2016-11-14'
+      description: 'refcount_t: Introduce a special purpose refcount type'
+    - hash: 29dee3c03abce04cd527878ef5f9e5f91b7b83f4
+      date: '2017-02-10'
+      description: 'locking/refcounts: Out-of-line everything'
+    discussions:
+    - https://lore.kernel.org/all/20170203132558.474916683@infradead.org/
+    - https://lore.kernel.org/all/20191121115902.2551-1-will@kernel.org/
+    - https://lore.kernel.org/all/20211210161618.645249719@infradead.org/
+    rationale: >-
+      P=1: refcount_t replaces raw atomic_t with overflow/underflow protection. D=3:
+      mandatory since v5.12 — saturating checks unconditional. S=2: prevents integer
+      overflow/underflow but does not address other UAF vectors (race conditions,
+      logic bugs). A=2: in-tree type adopted as standard reference counting API. T=2:
+      T_age=3 (introduced v4.11, 2017; unconditional since v5.12, 2021), but
+      T_maintained=2 — 2 real changes to include/linux/refcount.h and none to
+      lib/refcount.c in the 2025-01-21..2026-07-21 maintenance window.
+  C1b.4:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 2
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_LIST_HARDENED
+      - CONFIG_DEBUG_LIST
+      source_files:
+      - include/linux/list.h
+      - lib/list_debug.c
+      - security/Kconfig.hardening
+      default_state: >-
+        Fedora: CONFIG_LIST_HARDENED=y, CONFIG_DEBUG_LIST=y (DEBUG_LIST ``select``s
+        LIST_HARDENED in lib/Kconfig.debug). Adds integrity checks to list_add()/list_del()
+        validating prev/next pointer consistency.
+    commits:
+    - hash: 199a9afc3dbe98c35326f1d3907ab94dae953a6e
+      date: '2006-09-29'
+      description: '[PATCH] Debug variants of linked list macros'
+    - hash: aebc7b0d8d91bbc69e976909963046bc48bca4fd
+      date: '2023-08-11'
+      description: 'list: Introduce CONFIG_LIST_HARDENED'
+    discussions:
+    - https://lore.kernel.org/all/20230811151847.1594958-1-elver@google.com/
+    rationale: >-
+      P=1: lightweight linked list integrity validation. D=2: enabled by default in
+      Fedora via DEBUG_LIST=y (selects LIST_HARDENED). S=1: basic consistency checks
+      (prev->next == next) but only at manipulation time; cannot detect corruption
+      between operations. A=2: in-tree option hooked into core list.h API. T=2: LIST_HARDENED
+      split from DEBUG_LIST in v6.1 (2022); underlying code since 2006.
+  C1b.5:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits:
+    - hash: 3b714d24ef173f81c78af16f73dcc9b40428c803
+      date: '2019-09-06'
+      description: 'arm64: mte: CPU feature detection and initial sysreg configuration'
+    - hash: af5ce95282dc99d08a27a407a02c763dde1c5558
+      date: '2019-12-10'
+      description: 'arm64: mte: Allow user control of the generated random tags via prctl()'
+    discussions:
+    - https://lore.kernel.org/all/20191211184027.20130-1-catalin.marinas@arm.com/
+    - https://lore.kernel.org/all/20200904103029.32083-1-catalin.marinas@arm.com/
+    rationale: >-
+      N/A: ARM MTE (temporal mode) is an ARM-only hardware feature with no
+      x86-64 analogue; it is N/A in the primary x86-64
+      evaluation and scored in the supplementary ARM64 column (see the arm64
+      overlay below). Scored separately from C1a.6 because MTE can be
+      configured for spatial-only, temporal-only, or both modes.
+    arm64:
+      P: 1
+      D: 1
+      S: 2
+      A: 2
+      T_age: 2
+      T_maintained: 3
+      implementation:
+        config_options:
+        - CONFIG_ARM64_MTE
+        - CONFIG_KASAN_HW_TAGS
+        source_files:
+        - arch/arm64/kernel/mte.c
+        - mm/kasan/hw_tags.c
+        default_state: >-
+          Fedora aarch64: CONFIG_ARM64_MTE=y. Temporal (use-after-free) detection
+          via MTE relies on re-tagging memory on free; in the kernel this is
+          exercised only by KASAN_HW_TAGS (debug), and for userspace via opt-in
+          prctl. Not enabled for production kernel allocations by default.
+      commits:
+      - hash: 3b714d24ef173f81c78af16f73dcc9b40428c803
+        date: '2019-09-06'
+        description: 'arm64: mte: CPU feature detection and initial sysreg configuration'
+      - hash: af5ce95282dc99d08a27a407a02c763dde1c5558
+        date: '2019-12-10'
+        description: 'arm64: mte: Allow user control of the generated random tags via prctl()'
+      rationale: >-
+        arm64: P=1 — MTE temporal (UAF) mode is implemented for arm64. D=1 —
+        opt-in (prctl / KASAN_HW_TAGS debug), not default-on for the kernel. S=2 —
+        probabilistic detection of stale-tag accesses with 4-bit tags. A=2 —
+        hardware + allocator integration. T=2 — since 2020 (~6 years).
+  C1c.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_INIT_STACK_ALL_ZERO
+      - CONFIG_CC_HAS_AUTO_VAR_INIT_ZERO
+      source_files:
+      - security/Kconfig.hardening
+      - Makefile
+      - lib/tests/stackinit_kunit.c
+      default_state: >-
+        Fedora: CONFIG_INIT_STACK_ALL_ZERO=y. Adds -ftrivial-auto-var-init=zero to
+        KBUILD_CFLAGS, zeroing all stack variables including padding. Requires compiler
+        support (GCC 12+ or Clang).
+    commits:
+    - hash: c61f13eaa1ee17728c41370100d2d45c254ce76f
+      date: '2017-01-13'
+      description: 'gcc-plugins: Add structleak for more stack initialization'
+    - hash: 709a972efb01efaeb97cad1adc87fe400119c8ab
+      date: '2019-04-10'
+      description: 'security: Implement Clang''s stack initialization'
+    - hash: f0fe00d4972a8cd4b98cc2c29758615e4d51cdfe
+      date: '2020-06-16'
+      description: 'security: allow using Clang''s zero initialization for stack variables'
+    discussions:
+    - https://lore.kernel.org/kernel-hardening/20170113220256.GA57663@beast/
+    - https://lore.kernel.org/all/20190411180117.27704-4-keescook@chromium.org/
+    rationale: >-
+      P=1: all stack variables zero-initialized via compiler flag. D=2: enabled by
+      default in Fedora (CONFIG_INIT_STACK_ALL_ZERO=y). S=2: eliminates info leaks
+      from uninitialized stack variables and prevents use of uninitialized data as
+      exploit primitive; does not address heap or register state. A=2: in-tree option
+      with compiler integration. T=2: upstream since v5.9 (2020, ~5.5 years); preceded
+      by structleak plugin.
+  C1c.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_INIT_ON_ALLOC_DEFAULT_ON
+      source_files:
+      - security/Kconfig.hardening
+      - mm/page_alloc.c
+      - mm/slub.c
+      - include/linux/mm.h
+      default_state: >-
+        Fedora: CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y. Zeroes all page and slab memory
+        on allocation. Disablable via init_on_alloc=0 boot param.
+    commits:
+    - hash: 6471384af2a6530696fc0203bafe4de41a23c9ef
+      date: '2019-07-11'
+      description: 'mm: security: introduce init_on_alloc=1 and init_on_free=1 boot options'
+    discussions:
+    - https://lore.kernel.org/all/20190628093131.199499-2-glider@google.com/
+    rationale: >-
+      P=1: zeroes heap memory on allocation to prevent info leaks from recycled memory.
+      D=2: enabled by default in Fedora. S=2: eliminates info leaks from uninitialized
+      heap allocations; measurable performance overhead (~1-7% depending on workload).
+      A=2: in-tree option integrated into mm subsystem. T=3: T_age=3 (upstream since
+      v5.3, 2019, ~6.5 years) and T_maintained=3 — 129 non-trivial commits to
+      mm/page_alloc.c plus roughly 150 to mm/slub.c in the 2025-01-21..2026-07-21
+      maintenance window.
+  C1d.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 2
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_RANDOMIZE_KSTACK_OFFSET
+      - CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT
+      source_files:
+      - arch/Kconfig
+      - init/main.c
+      - include/linux/randomize_kstack.h
+      default_state: >-
+        Fedora: CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT=y. Adds ~5 bits of entropy
+        to kernel stack offset per syscall on x86-64, randomizing the base of each
+        kernel stack frame.
+    commits:
+    - hash: 39218ff4c625dbf2e68224024fe0acaa60bcd51a
+      date: '2021-04-01'
+      description: 'stack: Optionally randomize kernel stack offset each syscall'
+    - hash: 8cb37a5974a48569aab8a1736d21399fddbdbdb2
+      date: '2022-01-31'
+      description: 'stack: Introduce CONFIG_RANDOMIZE_KSTACK_OFFSET'
+    discussions:
+    - https://lore.kernel.org/all/20190410112103.15170-1-elena.reshetova@intel.com/
+    rationale: >-
+      P=1: randomizes kernel stack offset on each syscall entry. D=2: enabled by default
+      in Fedora (RANDOMIZE_KSTACK_OFFSET_DEFAULT=y). S=2: makes stack-based exploits
+      less reliable by randomizing layout, but limited entropy (~5 bits) allows brute-force
+      in some scenarios. A=2: in-tree option. T=2: upstream since v5.13 (2021, ~4.8
+      years).
+  C1d.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_SLAB_FREELIST_RANDOM
+      - CONFIG_RANDOM_KMALLOC_CACHES
+      source_files:
+      - mm/slub.c
+      - mm/slab_common.c
+      - include/linux/slab.h
+      default_state: >-
+        Fedora: both enabled. Fisher-Yates freelist shuffle randomizes object order
+        within slabs. RANDOM_KMALLOC_CACHES provides 16 per-size randomized kmalloc
+        cache variants.
+    commits:
+    - hash: c7ce4f60ac199fb3521c5fcd64da21cee801ec2b
+      date: '2016-05-19'
+      description: 'mm: SLAB freelist randomization'
+    discussions:
+    - https://lore.kernel.org/all/20230714064422.3305234-1-gongruiqi@huaweicloud.com/
+    rationale: >-
+      P=1: freelist and kmalloc cache randomization implemented. D=2: both enabled
+      by default in Fedora. S=2: significantly reduces heap determinism; RANDOM_KMALLOC_CACHES
+      adds substantial isolation between allocations. A=2: in-tree options in SLUB
+      allocator. T=3: T_age=3 (SLAB_FREELIST_RANDOM since v4.7, 2016;
+      RANDOM_KMALLOC_CACHES since v6.6, 2023) and T_maintained=3 — sustained
+      non-trivial commit flow on mm/slub.c and mm/slab_common.c in the
+      2025-01-21..2026-07-21 maintenance window.
+  C1d.3:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 2
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_RANDSTRUCT_FULL
+      - CONFIG_RANDSTRUCT_PERFORMANCE
+      source_files:
+      - security/Kconfig.hardening
+      - scripts/gcc-plugins/randomize_layout_plugin.c
+      - include/linux/compiler_types.h
+      default_state: >-
+        Fedora: CONFIG_RANDSTRUCT_NONE=y (not enabled). Incompatible with CONFIG_RUST=y
+        in current Fedora. ~33 header files use __randomize_layout annotation. Available
+        via GCC plugin or Clang built-in.
+    commits:
+    - hash: 313dd1b629219db50cad532dba6a3b3b22ffe622
+      date: '2017-05-05'
+      description: 'gcc-plugins: Add the randstruct plugin'
+    - hash: 035f7f87b7295a342577aebd7b5b451f1e2a353c
+      date: '2022-05-03'
+      description: 'randstruct: Enable Clang support'
+    discussions:
+    - https://lore.kernel.org/kernel-hardening/1491513513-84351-1-git-send-email-keescook@chromium.org/
+    rationale: >-
+      P=1: randomizes layout of structures annotated with __randomize_layout. D=1:
+      not enabled in Fedora due to incompatibility with Rust support; available as
+      opt-in. S=1: raises exploitation difficulty for structures with randomized layout
+      but only ~33 headers annotated; known information leak paths can reveal layout.
+      A=2: in-tree option with compiler plugin or built-in support. T=2: upstream
+      since v5.19 (2022, ~3.8 years) for Clang built-in; GCC plugin earlier.
+  C1e.1:
+    P: 1
+    D: 2
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_STRICT_KERNEL_RWX
+      - CONFIG_STRICT_MODULE_RWX
+      - CONFIG_DEBUG_WX
+      source_files:
+      - arch/Kconfig
+      - init/main.c
+      - kernel/module/strict_rwx.c
+      default_state: >-
+        Fedora: CONFIG_STRICT_KERNEL_RWX=y (mandatory on x86), CONFIG_STRICT_MODULE_RWX=y.
+        Hardware NX/RO page table enforcement; rodata=off is the only disable path.
+        mark_rodata_ro() called at boot.
+    commits:
+    - hash: 36bc33bac78f6bc08282c622138f4e432b62e7be
+      repo: linux_history
+      date: '2004-06-26'
+      description: NX (No eXecute) support for x86
+    discussions:
+    - https://lore.kernel.org/all/20200403171303.GK20760@hirez.programming.kicks-ass.net/
+    rationale: >-
+      P=1: W^X enforced via NX bit and page table permissions for kernel text and
+      data. D=2: STRICT_KERNEL_RWX is promptless default-y on x86 (Kconfig prompt only
+      under ARCH_OPTIONAL_KERNEL_RWX, which x86 does not select), but the documented
+      rodata=off boot parameter skips mark_rodata_ro() entirely (init/main.c
+      mark_readonly()), and the disable-path convention counts boot parameters, so not
+      D=3. S=3: hardware-enforced via NX bit in page tables, and Fedora's
+      CONFIG_DEBUG_WX=y runs a full ptdump W^X audit over the final page tables at
+      boot; no known bypass when enabled. A=2: in-tree, integral to kernel
+      memory layout. T=3: NX support since v2.6.8 (2004), STRICT_KERNEL_RWX formalized
+      later; 20+ years of NX enforcement.
+  C1e.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_STRICT_KERNEL_RWX
+      source_files:
+      - include/linux/cache.h
+      - include/asm-generic/vmlinux.lds.h
+      - init/main.c
+      default_state: >-
+        Fedora: enabled (part of STRICT_KERNEL_RWX). 500+ files use __ro_after_init
+        annotation. Data placed in .data..ro_after_init ELF section, marked read-only
+        by mark_rodata_ro() after kernel init.
+    commits:
+    - hash: c74ba8b3480da6ddaea17df2263ec09b869ac496
+      date: '2016-02-17'
+      description: 'arch: Introduce post-init read-only memory'
+    discussions:
+    - https://lore.kernel.org/all/1449098925-13085-1-git-send-email-keescook@chromium.org/
+    rationale: >-
+      P=1: __ro_after_init annotation marks data read-only after kernel initialization.
+      D=2: enabled by default as part of STRICT_KERNEL_RWX; widely adopted across
+      kernel (500+ files). S=2: prevents post-init modification of annotated data,
+      but data is writable during init phase and not all mutable data is annotated.
+      A=2: in-tree annotation integrated into linker script. T=3: __ro_after_init
+      since v4.6 (2016), 10+ years; widely adopted.
+  C1e.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_SECURITY_LOCKDOWN_LSM
+      - CONFIG_SECURITY_LOCKDOWN_LSM_EARLY
+      source_files:
+      - security/lockdown/lockdown.c
+      - security/lockdown/Kconfig
+      default_state: >-
+        Fedora: CONFIG_SECURITY_LOCKDOWN_LSM=y, LOCK_DOWN_KERNEL_FORCE_NONE=y (no
+        forced lockdown). Lockdown activated via lockdown=integrity boot param or
+        automatically by EFI Secure Boot shim. Provides integrity and confidentiality
+        lockdown levels.
+    commits:
+    - hash: 000d388ed3bbed745f366ce71b2bb7c2ee70f449
+      date: '2019-08-19'
+      description: 'security: Add a static lockdown policy LSM'
+    discussions:
+    - https://lore.kernel.org/lkml/20190809003033.4529-1-matthewgarrett@google.com/
+    rationale: >-
+      P=1: Lockdown LSM restricts kernel features that could compromise integrity/confidentiality.
+      D=2: compiled in and auto-activated with Secure Boot in Fedora; not enforced
+      without Secure Boot. S=2: integrity mode blocks writing to /dev/mem, kexec of
+      unsigned images, module parameter modification; confidentiality mode additionally
+      blocks /proc/kcore, eBPF. A=2: in-tree LSM. T=2: upstream since v5.4 (2019,
+      ~6.4 years).
+  C1e.4:
+    P: 1
+    D: 2
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - arch/x86/kernel/cpu/common.c
+      - arch/x86/mm/fault.c
+      - arch/x86/include/asm/cpufeatures.h
+      default_state: >-
+        SMEP auto-enabled on CPUs with X86_FEATURE_SMEP support. setup_smep() in cpu/common.c
+        unconditionally sets CR4.SMEP via cr4_set_bits(X86_CR4_SMEP) during CPU initialization.
+        No Kconfig option; CONFIG_X86_SMEP never existed as a separate option on x86.
+        The nosmep boot parameter was removed in Linux 5.18 (commit 385d2ae0a1b5).
+        CR4.SMEP bit is pinned via cr4_pinned_mask since 5.3 to prevent ROP-based
+        clearing. All modern x86-64 CPUs (Intel Ivy Bridge+ 2012, AMD Zen+ 2018) support
+        SMEP.
+    commits:
+    - date: '2011-05-17'
+      description: 'x86: Enable SMEP (Supervisor Mode Execution Protection)'
+      hash: de5397ad5b9ad22e2401c4dacdf1bb3b19c05679
+    - date: '2019-06-17'
+      description: 'x86/asm: Pin sensitive CR4 bits (SMEP, SMAP, UMIP)'
+      hash: 873d50d58f67ef15d2777b5e7f7a5268bb1fbae2
+    - date: '2022-04-04'
+      description: 'x86: Remove nosmep boot parameter'
+      hash: 385d2ae0a1b5efacb30e13a0f0e521490441d9bb
+    discussions:
+    - https://lore.kernel.org/all/1305683069-25394-1-git-send-email-fenghua.yu@intel.com/
+    - https://lore.kernel.org/all/20190618045503.39105-1-keescook@chromium.org/
+    - https://lore.kernel.org/all/20220127115626.14179-1-bp@alien8.de/
+    rationale: >-
+      P=1: SMEP implemented and unconditionally enabled on supporting hardware. D=2:
+      auto-enabled on CPUs with SMEP capability (not D=3 because older CPUs lack the
+      feature). S=3: hardware-enforced; CPU raises #PF on any kernel-mode instruction
+      fetch from user-mapped pages, no known practical bypass when enabled. A=2: in-tree,
+      integral to CPU setup path but relies on hardware feature bit. T=3: in kernel
+      since 2012 (14+ years), actively maintained in CPU initialization code.
+    arm64:
+      P: 1
+      D: 2
+      S: 3
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options:
+        - CONFIG_ARM64_EPAN
+        source_files:
+        - arch/arm64/include/asm/pgtable-prot.h
+        - arch/arm64/mm/mmu.c
+        default_state: >-
+          On arm64 the SMEP equivalent is PXN (Privileged eXecute Never): user
+          mappings carry the PXN attribute so the kernel (EL1) cannot fetch
+          instructions from EL0 pages. This is architectural in ARMv8 and applies
+          by default on all cores; Fedora aarch64 additionally sets
+          CONFIG_ARM64_EPAN=y (Enhanced PAN), extending Privileged Access Never to
+          execute-only mappings.
+      commits: []
+      rationale: >-
+        arm64: P=1 — PXN provides kernel execute-never over userspace mappings.
+        D=2 — applied by default on all ARMv8 cores (architectural, no opt-out).
+        S=3 — hardware-enforced; an EL1 instruction fetch from an EL0 page faults.
+        A=2 — MMU page-attribute integration. T=3 — present since the arm64 port
+        (10+ years).
+  C1e.5:
+    P: 1
+    D: 3
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_THREAD_INFO_IN_TASK
+      source_files:
+      - init/Kconfig
+      - arch/x86/Kconfig
+      - include/linux/sched.h
+      - include/linux/thread_info.h
+      default_state: >-
+        Mandatory on x86-64. arch/x86/Kconfig unconditionally selects THREAD_INFO_IN_TASK
+        (line 323). Moves thread_info out of the kernel stack into task_struct, so
+        stack buffer overflows cannot corrupt per-thread control flags (need_resched,
+        syscall_work, etc.). Cannot be disabled on x86.
+    commits:
+    - date: '2016-09-15'
+      description: 'sched/core: Allow putting thread_info into task_struct'
+      hash: c65eacbe290b8141554c71b2c94489e73ade8c8d
+    - date: '2016-09-15'
+      description: 'x86: Move thread_info into task_struct'
+      hash: 15f4eae70d365bba26854c90b6002aaabb18c8aa
+    discussions:
+    - https://lore.kernel.org/all/cover.1473801993.git.luto@kernel.org/
+    rationale: >-
+      P=1: thread_info moved into task_struct, preventing stack overflow corruption
+      of control metadata. D=3: mandatory on x86 via unconditional Kconfig select,
+      cannot be disabled. S=2: significantly raises exploitation difficulty since
+      stack overflows no longer corrupt thread flags, but does not prevent all metadata
+      corruption vectors. A=2: in-tree structural change to task/thread layout, upstream
+      since 4.9. T=3: in kernel since 2016 (10+ years), integral to task management,
+      actively maintained.
+  C1f.1:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 1
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_RUST
+      source_files:
+      - init/Kconfig
+      - Documentation/rust/quick-start.rst
+      - rust/kernel/lib.rs
+      - rust/Makefile
+      default_state: >-
+        Fedora: CONFIG_RUST=y (rustc 1.96.1, bindgen 0.72.1), confirmed against
+        /boot/config-7.1.6-201.fc44.x86_64 and the ~3000 v0-mangled Rust symbols in the
+        running kernel's kallsyms. 327 .rs files exist in the tree outside
+        tools/samples/scripts; the Fedora config compiles 159 of them, as 10 crates:
+        the kernel/pin_init/bindings/uapi/ffi support crates plus three drivers —
+        drm_panic_qr (CONFIG_DRM_PANIC_SCREEN_QR_CODE=y, builtin), rnull
+        (CONFIG_BLK_DEV_RUST_NULL=m) and ax88796b_rust (CONFIG_AX88796B_RUST_PHY=y,
+        selecting the Rust variant of the AX88796B_PHY=m module). Rust Binder exists
+        in-tree at this release but Fedora ships the C binder
+        (CONFIG_ANDROID_BINDER_IPC=y, no _RUST). That is 25,234 SLOC = 0.23% of the
+        shipped TCB (1.32% of vmlinux) — a tiny fraction of total kernel code.
+    commits:
+    - hash: 2f7ab1267dc9b2d1f29695aff3211c87483480f3
+      date: '2021-07-03'
+      description: 'Kbuild: add Rust support'
+    - hash: 247b365dc8dc442412c88fe02346cd2bddac7bd6
+      date: '2022-02-11'
+      description: 'rust: add `kernel` crate'
+    - hash: 094981352ce27bc36018c009d07ddf974c9725f5
+      date: '2022-08-04'
+      description: 'x86: enable initial Rust support'
+    discussions:
+    - https://lore.kernel.org/all/20220917052258.13659-1-ojeda@kernel.org/
+    rationale: >-
+      P=1: Rust language support in kernel providing memory safety guarantees for
+      Rust modules. D=1: available and compiled in Fedora but very few in-tree drivers
+      use Rust; vast majority of kernel remains C. S=1: Rust modules get strong memory
+      safety (no UAF, buffer overflow in safe code) but unsafe blocks still needed
+      for hardware interaction; overall kernel safety minimally impacted due to tiny
+      code fraction. A=2: in-tree language infrastructure. T_age=1: the evaluated
+      Fedora kernel is GCC-built, and upstream Linux 7.1 documentation describes
+      Rust-enabled GCC builds as very experimental. T_maintained=3: the Rust
+      subsystem is extremely actively developed. Therefore T=min(1,3)=1.
+  C2a.1:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 2
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_CFI
+      source_files:
+      - arch/x86/kernel/cfi.c
+      - kernel/cfi.c
+      - arch/x86/Kconfig
+      default_state: >-
+        CONFIG_CFI (formerly CONFIG_CFI_CLANG) requires Clang with -fsanitize=kcfi.
+        x86-64 has ARCH_SUPPORTS_CFI since 6.1. Fedora uses GCC (CONFIG_CC_IS_GCC=y),
+        so CFI cannot be enabled. Available only in Clang-built kernels.
+    commits:
+    - hash: cf68fffb66d60d96209446bfc4a15291dc5a5d41
+      date: '2021-04-08'
+      description: 'add support for Clang CFI'
+    - hash: 89245600941e4e0f87d77f60ee269b5e61ef4e49
+      date: '2022-09-08'
+      description: 'cfi: Switch to -fsanitize=kcfi'
+    discussions:
+    - https://lore.kernel.org/all/20210408182843.1754385-1-samitolvanen@google.com/
+    - https://lore.kernel.org/all/20211013181658.1020262-1-samitolvanen@google.com/
+    - https://lore.kernel.org/all/20220908215504.3686827-1-samitolvanen@google.com/
+    rationale: >-
+      P=1: kCFI implemented upstream for x86-64 since 6.1, providing type-based indirect
+      call validation. D=1: available but not enabled in Fedora (requires Clang; Fedora
+      uses GCC). S=2: significantly restricts indirect call targets to type-compatible
+      functions, but type confusion or same-signature gadgets can still be exploited.
+      A=2: in-tree option with compiler integration. T=2: x86 kCFI since v6.1 (2022,
+      ~3.5 years), actively maintained.
+  C2a.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_X86_KERNEL_IBT
+      source_files:
+      - arch/x86/include/asm/ibt.h
+      - arch/x86/kernel/alternative.c
+      - arch/x86/kernel/cet.c
+      default_state: >-
+        Fedora: CONFIG_X86_KERNEL_IBT=y (def_bool y when X86_64 + CC_HAS_IBT + HAVE_OBJTOOL).
+        ENDBR64 instrumentation at all indirect branch targets; objtool seals non-target
+        functions. Hardware enforces ENDBR presence at indirect call/jump targets.
+    commits:
+    - hash: 156ff4a544ae13c5fd6759a09ecb069f7059c1a1
+      date: '2022-03-08'
+      description: 'x86/ibt: Base IBT bits'
+    - hash: 931ab63664f02b17d2213ef36b83e1e50190a0aa
+      date: '2022-10-27'
+      description: 'x86/ibt: Implement FineIBT'
+    - hash: 4fd5f70ce14da230c6a29648c3d51a48ee0b4bfd
+      date: '2022-11-01'
+      description: 'x86/Kconfig: Enable kernel IBT by default'
+    - hash: 0c92385dc05ee9637c04372ea95a11bbf6e010ff
+      date: '2025-02-24'
+      description: 'x86/ibt: Implement FineIBT-BHI mitigation'
+    discussions:
+    - https://lore.kernel.org/all/20220308153011.021123062@infradead.org/
+    - https://lore.kernel.org/all/20221027092812.185993858@infradead.org/
+    - https://lore.kernel.org/all/20250224123703.843199044@infradead.org/
+    rationale: >-
+      P=1: Intel IBT (Indirect Branch Tracking) implemented upstream with ENDBR64
+      instrumentation. D=2: default y in Kconfig on x86-64 with capable compiler,
+      enabled in Fedora. S=2: hardware-enforced forward-edge CFI via ENDBR instructions,
+      but coarse-grained (any ENDBR is a valid target), so does not prevent same-type
+      gadget reuse. A=2: in-tree with compiler and objtool integration. T=2: T_age=2
+      (upstream since v5.18, 2022, ~4 years) caps the score, although T_maintained=3 —
+      97 non-trivial commits to arch/x86/kernel/alternative.c in the
+      2025-01-21..2026-07-21 maintenance window. FineIBT (CONFIG_FINEIBT =
+      KCFI+IBT) tightens targets to a per-prototype hash, and the FineIBT-BHI variant
+      (CONFIG_FINEIBT_BHI, 2025) additionally clears branch history at protected
+      indirect targets — hardening the forward edge against Branch History Injection
+      (synergy with C7a.2).
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - arch/arm64/kernel/cpufeature.c
+        - arch/arm64/include/asm/cpufeature.h
+        default_state: >-
+          Intel IBT (CONFIG_X86_KERNEL_IBT) is an x86 ISA feature. On arm64 the
+          forward-edge hardware mechanism is BTI (C2a.3); IBT is N/A.
+      rationale: >-
+        arm64: N/A — Indirect Branch Tracking is x86-only; x86-only
+        mechanisms receive N/A in the supplementary ARM64 column. arm64
+        forward-edge is scored under C2a.3 (BTI).
+  C2a.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits:
+    - hash: 8ef8f360cf30be12382f89ff48a57fbbd9b31c14
+      date: '2020-03-16'
+      description: 'arm64: Basic Branch Target Identification support'
+    - hash: 97fed779f2a68937d9590fbbe8ed31d6ebbce5a5
+      date: '2020-05-06'
+      description: 'arm64: bti: Provide Kconfig for kernel mode BTI'
+    discussions:
+    - https://lore.kernel.org/all/20200122212144.6409-1-broonie@kernel.org/
+    - https://lore.kernel.org/all/20200506195138.22086-1-broonie@kernel.org/
+    rationale: >-
+      N/A: ARM BTI is an ARMv8.5+ hardware feature with no x86-64 analogue in
+      this row (the x86 forward-edge counterpart, Intel IBT, is scored at
+      C2a.2); it is N/A in the primary x86-64 evaluation and
+      scored in the supplementary ARM64 column (see the arm64 overlay below).
+    arm64:
+      P: 1
+      D: 1
+      S: 2
+      A: 2
+      T_age: 2
+      T_maintained: 2
+      implementation:
+        config_options:
+        - CONFIG_ARM64_BTI
+        - CONFIG_ARM64_BTI_KERNEL
+        source_files:
+        - arch/arm64/kernel/cpufeature.c
+        - arch/arm64/include/asm/pgtable-prot.h
+        default_state: >-
+          Fedora aarch64: CONFIG_ARM64_BTI=y (userspace BTI), but
+          CONFIG_ARM64_BTI_KERNEL is NOT set — it `depends on !CC_IS_GCC` (GCC bug
+          106671), so kernel-mode BTI is only available on a Clang build. The GCC
+          Fedora baseline therefore has no hardware forward-edge in the kernel; it
+          is enabled in the Clang-built Android GKI comparator. BTI landing pads
+          (BTI c/j, via the PTE Guarded Page bit) guard indirect-branch targets
+          when active.
+      commits:
+      - hash: 8ef8f360cf30be12382f89ff48a57fbbd9b31c14
+        date: '2020-03-16'
+        description: 'arm64: Basic Branch Target Identification support'
+      - hash: 97fed779f2a68937d9590fbbe8ed31d6ebbce5a5
+        date: '2020-05-06'
+        description: 'arm64: bti: Provide Kconfig for kernel mode BTI'
+      rationale: >-
+        arm64: P=1 — ARM BTI (ARMv8.5) is implemented for kernel mode. D=1 —
+        kernel BTI (ARM64_BTI_KERNEL) is Clang-only (depends on !CC_IS_GCC, GCC bug
+        106671) and is NOT enabled in the GCC-built Fedora baseline; enabled in the
+        Clang Android GKI comparator. Same Clang-only situation as the kernel SCS
+        (C2b.1). S=2 — coarse-grained forward-edge (any landing pad is a valid
+        target), comparable to x86 IBT. A=2 — compiler + kernel integration. T=2 —
+        kernel BTI since 2020 (~6 years).
+  C2b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - CONFIG_SHADOW_CALL_STACK
+      source_files: []
+      default_state: >-
+        CONFIG_SHADOW_CALL_STACK depends on ARCH_SUPPORTS_SHADOW_CALL_STACK which
+        is only selected by arm64 and riscv. x86-64 does NOT select it. Entirely absent
+        on the x86-64 evaluation target.
+    commits:
+    - hash: d08b9f0ca6605e13dcb48f04e55a30545b3c71eb
+      date: '2020-04-27'
+      description: 'scs: Add support for Clang''s Shadow Call Stack (SCS)'
+    - hash: 5287569a790d2546a06db07e391bf84b8bd6cf51
+      date: '2020-04-27'
+      description: 'arm64: Implement Shadow Call Stack'
+    discussions:
+    - https://lore.kernel.org/all/20200427160018.243569-1-samitolvanen@google.com/
+    - https://lore.kernel.org/all/20201130233442.2562064-1-samitolvanen@google.com/
+    rationale: >-
+      P=0: software shadow call stack (CONFIG_SHADOW_CALL_STACK) is ARM64/RISC-V only.
+      x86-64 does not implement a software shadow call stack; backward-edge protection
+      on x86 relies on hardware CET shadow stack (C2b.2) instead.
+    arm64:
+      P: 1
+      D: 1
+      S: 2
+      A: 2
+      T_age: 2
+      T_maintained: 2
+      implementation:
+        config_options:
+        - CONFIG_SHADOW_CALL_STACK
+        source_files:
+        - kernel/scs.c
+        - include/linux/scs.h
+        default_state: >-
+          CONFIG_SHADOW_CALL_STACK is selected by arm64 only when the compiler
+          supports it (ARCH_SUPPORTS_SHADOW_CALL_STACK if CC_HAVE_SHADOW_CALL_STACK),
+          which in practice means a Clang build. The Fedora aarch64 kernel is built
+          with GCC, so SCS is unavailable in the default baseline; it is default-on
+          in the Clang-built Android GKI comparator. On the GCC baseline the
+          default kernel backward-edge protection is PAC (C2b.3).
+      commits:
+      - hash: d08b9f0ca6605e13dcb48f04e55a30545b3c71eb
+        date: '2020-04-27'
+        description: 'scs: Add support for Clang''s Shadow Call Stack (SCS)'
+      - hash: 5287569a790d2546a06db07e391bf84b8bd6cf51
+        date: '2020-04-27'
+        description: 'arm64: Implement Shadow Call Stack'
+      rationale: >-
+        arm64: P=1 — Linux implements a software shadow call stack for arm64. D=1 —
+        Clang-only; not available in the GCC-built Fedora baseline (enabled in the
+        Android GKI Clang comparator). S=2 — a separate, register-reserved return
+        stack gives strong backward-edge integrity when enabled. A=2 — compiler +
+        kernel integration. T=2 — since 2020 (~6 years).
+  C2b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - arch/x86/Kconfig
+      - arch/x86/kernel/Makefile
+      - arch/x86/kernel/shstk.c
+      default_state: >-
+        Linux upstream (master, v7.0) has no kernel-mode x86 hardware shadow stack.
+        arch/x86/Kconfig defines only CONFIG_X86_USER_SHADOW_STACK (userspace CET);
+        no CONFIG_X86_KERNEL_SHADOW_STACK or analogous option exists. KHC classifies
+        X86_USER_SHADOW_STACK as harden_userspace, not self_protection. Fedora 44
+        inherits upstream state.
+    commits: []
+    discussions:
+    - https://lore.kernel.org/all/20180710222639.8241-1-yu-cheng.yu@intel.com/
+    - https://lore.kernel.org/all/20230613001108.3040476-1-rick.p.edgecombe@intel.com/
+    rationale: >-
+      P=0: kernel-mode x86 hardware shadow stack (protecting kernel's own return addresses)
+      is not upstream as of Linux v7.0. Only userspace CET (CONFIG_X86_USER_SHADOW_STACK)
+      is available, which is out of scope for this mechanism (userspace hardening,
+      not kernel self-protection). D=S=A=T=0 follow from P=0. Peer mechanism C2b.1
+      covers the software backward-edge case (e.g., ARM64 SCS).
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - arch/arm64/kernel/cpufeature.c
+        - arch/arm64/include/asm/cpufeature.h
+        default_state: >-
+          x86 CET hardware shadow stack is an Intel ISA feature. On arm64 the
+          backward-edge analogues are the Shadow Call Stack (C2b.1) and the
+          userspace Guarded Control Stack (C2b.4); CET is N/A.
+      rationale: >-
+        arm64: N/A — Intel CET shadow stack is x86-only. arm64
+        kernel backward-edge is covered by C2b.1 (SCS) / C2b.3 (PAC); the
+        hardware analogue GCS (C2b.4) is userspace-only.
+  C2b.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits:
+    - hash: '7503197562567b57ec14feb3a9d5400ebc56812f'
+      date: '2018-12-07'
+      description: 'arm64: add basic pointer authentication support'
+    discussions:
+    - https://lore.kernel.org/all/20181207183931.4285-1-kristina.martsenko@arm.com/
+    - https://lore.kernel.org/all/1584090304-18043-1-git-send-email-amit.kachhap@arm.com/
+    rationale: >-
+      N/A: ARM pointer authentication (ARMv8.3 PAC) is an ARM-only hardware
+      feature with no x86-64 analogue in this row; it is N/A in
+      the primary x86-64 evaluation and scored in the supplementary ARM64
+      column (see the arm64 overlay below).
+    arm64:
+      P: 1
+      D: 2
+      S: 2
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options:
+        - CONFIG_ARM64_PTR_AUTH
+        - CONFIG_ARM64_PTR_AUTH_KERNEL
+        source_files:
+        - arch/arm64/kernel/pointer_auth.c
+        - arch/arm64/include/asm/pointer_auth.h
+        default_state: >-
+          Fedora aarch64: CONFIG_ARM64_PTR_AUTH_KERNEL=y (default y; built with
+          GCC -mbranch-protection=pac-ret). The kernel signs return addresses with
+          a PAC (ARMv8.3) and authenticates them before return, giving default-on
+          backward-edge integrity. This is the primary kernel return-address
+          protection on the GCC Fedora baseline (the Clang SCS, C2b.1, is
+          unavailable there).
+      commits:
+      - hash: '7503197562567b57ec14feb3a9d5400ebc56812f'
+        date: '2018-12-07'
+        description: 'arm64: add basic pointer authentication support'
+      rationale: >-
+        arm64: P=1 — ARM PAC for kernel pointers (CONFIG_ARM64_PTR_AUTH_KERNEL).
+        D=2 — default y, satisfiable with the Fedora GCC toolchain. S=2 — signs
+        return addresses (pac-ret); strong against ROP but bypassable via signing
+        gadgets or key disclosure, so capped at 2. A=2 — compiler + kernel
+        integration. T=3 — kernel PAC since 2018/2020 (well maintained).
+  C2b.4:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits:
+    - hash: 5d8b172e7005c6b42c16a0952c1d8873051d68ae
+      date: '2024-10-01'
+      description: 'arm64: Add Kconfig for Guarded Control Stack (GCS)'
+    - hash: 6487c963083c24ede289d4267ffa60a9db668cd4
+      date: '2024-10-01'
+      description: 'arm64/cpufeature: Runtime detection of Guarded Control Stack (GCS)'
+    - hash: 8f3e750673b21ff0613af8b02028200199f3144c
+      date: '2024-10-01'
+      description: 'arm64/mm: Implement map_shadow_stack()'
+    discussions:
+    - https://lore.kernel.org/all/20241001-arm64-gcs-v13-0-222b78d87eee@kernel.org/
+    - https://lore.kernel.org/all/20241005-arm64-gcs-v14-0-59060cd6092b@kernel.org/
+    rationale: >-
+      N/A: ARM Guarded Control Stack (FEAT_GCS, ARMv9.4) is an ARM-only
+      hardware feature; the x86 backward-edge analogue (Intel CET shadow
+      stack) is scored at C2b.2. It is N/A in the primary
+      x86-64 evaluation and scored in the supplementary ARM64 column (see the
+      arm64 overlay below, P=0 — upstream GCS is userspace-only).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - arch/arm64/include/asm/gcs.h
+        - arch/arm64/kernel/cpufeature.c
+        - arch/arm64/Kconfig
+        default_state: >-
+          Fedora aarch64: CONFIG_ARM64_GCS=y, but GCS (FEAT_GCS, ARMv9.4) is a
+          userspace (EL0) shadow stack only — there is no kernel-mode GCS. It
+          protects EL0 control flow, not the kernel's own return addresses
+          (that role is PAC/SCS). FEAT_GCS silicon is barely available.
+      commits:
+      - hash: 5d8b172e7005c6b42c16a0952c1d8873051d68ae
+        date: '2024-10-01'
+        description: 'arm64: Add Kconfig for Guarded Control Stack (GCS)'
+      - hash: 8f3e750673b21ff0613af8b02028200199f3144c
+        date: '2024-10-01'
+        description: 'arm64/mm: Implement map_shadow_stack()'
+      rationale: >-
+        arm64: P=0 — kernel-mode GCS (protecting the kernel's own return
+        addresses) is not upstream; CONFIG_ARM64_GCS implements only the
+        userspace (EL0) shadow stack, which is out of scope for this mechanism
+        (userspace hardening, not kernel self-protection) — same rubric as x86
+        C2b.2, where userspace-only CET also scores P=0. D=S=A=T=0 follow from
+        P=0. Kernel backward-edge on arm64 is PAC (C2b.3) / SCS (C2b.1).
+  C2c.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_BPF_JIT
+      - CONFIG_BPF_JIT_ALWAYS_ON
+      source_files:
+      - kernel/bpf/core.c
+      - arch/x86/net/bpf_jit_comp.c
+      default_state: >-
+        Fedora: CONFIG_BPF_JIT_ALWAYS_ON=y, CONFIG_BPF_UNPRIV_DEFAULT_OFF=y. Interpreter
+        removed; constant blinding in bpf_jit_blind_constants() (core.c) randomizes
+        immediate values in JIT output. bpf_jit_harden sysctl defaults to 0 but interpreter
+        removal is the primary hardening.
+    commits:
+    - hash: 4f3446bb809f20ad56cadf712e6006815ae7a8f9
+      date: '2016-05-13'
+      description: 'bpf: add generic constant blinding for use in jits'
+    - hash: 959a7579160349d222cc5da30db3b138139b6fbc
+      date: '2016-05-13'
+      description: 'bpf, x86: add support for constant blinding'
+    - hash: 290af86629b25ffd1ed6232c4e9107da031705cb
+      date: '2018-01-09'
+      description: "bpf: introduce BPF_JIT_ALWAYS_ON config (Spectre v2 mitigation)"
+    discussions:
+    - https://lore.kernel.org/all/cover.1463158442.git.daniel@iogearbox.net/
+    - https://lore.kernel.org/all/20180109180429.1115005-1-ast@kernel.org/
+    rationale: >-
+      P=1: BPF JIT hardening via constant blinding and interpreter removal. D=2: BPF_JIT_ALWAYS_ON=y
+      in Fedora removes the interpreter entirely (Spectre v2 mitigation). S=2: constant
+      blinding prevents JIT spraying of known immediate values, but JIT output still
+      contains potentially useful gadgets. A=2: in-tree core subsystem. T=3: T_age=3
+      (BPF JIT since v3.16, 2014; JIT_ALWAYS_ON since v4.15, 2018) and T_maintained=3
+      — 50 non-trivial commits to kernel/bpf/core.c plus 36 to
+      arch/x86/net/bpf_jit_comp.c in the 2025-01-21..2026-07-21 maintenance window.
+  C3a.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_RANDOMIZE_BASE
+      source_files:
+      - arch/x86/boot/compressed/kaslr.c
+      - arch/x86/mm/kaslr.c
+      default_state: >-
+        Fedora: CONFIG_RANDOMIZE_BASE=y (default y). 9 bits virtual address entropy
+        on x86-64. Kernel base address randomized at boot; physical and virtual offsets
+        independently randomized.
+    commits:
+    - hash: 6807c84652b0b7e2e198e50a9ad47ef41b236e59
+      date: '2017-04-18'
+      description: 'x86: Enable KASLR by default'
+    discussions:
+    - https://lore.kernel.org/all/1381450698-28710-3-git-send-email-keescook@chromium.org/
+    rationale: >-
+      P=1: KASLR implemented with base address randomization at boot. D=2: default
+      y in Kconfig, enabled in Fedora and all major distros. S=2: limited entropy
+      (9 bits virtual, ~512 positions) with known bypass techniques, but
+      KPTI (present, C3b.1) restores the S=2 baseline by mitigating page-table
+      side channels (Gruss et al., 2017). A=2: in-tree option integrated into boot
+      and memory layout. T=2: T_age=3 (upstream since v3.14, 2014; default-on since
+      v4.12, 2017; battle-tested for 12+ years), but T_maintained=2 — only 3
+      non-trivial KASLR commits in the 2025-01-21..2026-07-21 maintenance window.
+  C3a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - arch/x86/Kconfig
+      - arch/x86/boot/compressed/kaslr.c
+      - arch/x86/kernel/vmlinux.lds.S
+      default_state: >-
+        CONFIG_FG_KASLR (fine-grained function randomization) was proposed in multiple
+        RFC/patch series (v1-v10, 2020-2022) by Kristen Carlson Accardi and Alexander
+        Lobakin (Intel) but was never merged into mainline. Not present in Fedora
+        config. The feature does not
+        exist in mainline as of kernel 6.19.
+    commits: []
+    discussions:
+    - https://lwn.net/Articles/824307/
+    - https://lore.kernel.org/lkml/20220209185752.1226407-1-alexandr.lobakin@intel.com/
+    rationale: >-
+      P=0: CONFIG_FG_KASLR was proposed as a patch series (v1 through v10, 2020-2022)
+      but never merged into mainline Linux. Not present in kernel 6.19 Kconfig. OpenBSD
+      KARL achieves similar fine-grained randomization via full kernel relinking at
+      boot.
+  C3b.1:
+    P: 1
+    D: 2
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_MITIGATION_PAGE_TABLE_ISOLATION
+      source_files:
+      - arch/x86/mm/pti.c
+      - arch/x86/include/asm/pti.h
+      default_state: >-
+        Fedora: CONFIG_MITIGATION_PAGE_TABLE_ISOLATION=y (default y). Separate user/kernel
+        page tables with PCID for efficient TLB management. User-mode page tables
+        contain only minimal kernel mappings.
+    commits:
+    - hash: aa8c6248f8c75acfd610fe15d8cae23cf70d9d09
+      date: '2017-12-04'
+      description: 'x86/mm/pti: Add infrastructure for page table isolation'
+    - hash: 385ce0ea4c078517fa51c261882c4e72fba53005
+      date: '2017-12-04'
+      description: 'x86/mm/pti: Add Kconfig'
+    - hash: ea4654e0885348f0faa47f6d7b44a08d75ad16e9
+      date: '2023-11-21'
+      description: 'x86/bugs: Rename CONFIG_PAGE_TABLE_ISOLATION => CONFIG_MITIGATION_PAGE_TABLE_ISOLATION'
+    discussions:
+    - https://lore.kernel.org/all/20171123003438.48A0EEDE@viggo.jf.intel.com/
+    - https://lore.kernel.org/all/20171204140706.296109558@linutronix.de/
+    rationale: >-
+      P=1: KPTI (based on KAISER) provides separate page tables for user and kernel
+      mode. D=2: default y, enabled in Fedora; auto-disabled on CPUs not vulnerable
+      to Meltdown. S=3: effectively mitigates Meltdown (CVE-2017-5754) by removing
+      kernel mappings from user-accessible page tables; no known practical bypass.
+      A=2: in-tree with deep integration into x86 MMU subsystem. T=2: T_age=3
+      (upstream since v4.15, Jan 2018; battle-tested for 8+ years), but
+      T_maintained=2 — only 4 substantive commits to arch/x86/mm/pti.c in the
+      2025-01-21..2026-07-21 maintenance window.
+    arm64:
+      P: 1
+      D: 2
+      S: 3
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options:
+        - CONFIG_UNMAP_KERNEL_AT_EL0
+        - CONFIG_ARM64_E0PD
+        source_files:
+        - arch/arm64/mm/proc.S
+        - arch/arm64/kernel/entry.S
+        default_state: >-
+          Fedora aarch64: CONFIG_UNMAP_KERNEL_AT_EL0=y (default y) — the arm64 KPTI
+          equivalent (KAISER-style trampoline), enabled per-core on Meltdown-class
+          cores (e.g. Cortex-A75) and auto-skipped on unaffected cores, mirroring
+          x86 KPTI's auto-disable. CONFIG_ARM64_E0PD=y additionally faults EL0
+          accesses via TTBR1 in constant time, complementing KASLR.
+      commits: []
+      rationale: >-
+        arm64: P=1 — kernel/user page-table separation is implemented via
+        UNMAP_KERNEL_AT_EL0 (KPTI). D=2 — default y, applied per-core on vulnerable
+        CPUs (auto-skipped otherwise, like x86). S=3 — unmaps the kernel during EL0,
+        closing the Meltdown leak on affected cores; no known bypass. A=2 — deep
+        arm64 MMU/entry integration. T=3 — upstream since v4.16 (2018), 8+ years.
+  C3b.2:
+    P: 1
+    D: 2
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - arch/x86/kernel/cpu/common.c
+      - arch/x86/include/asm/smap.h
+      - arch/x86/mm/fault.c
+      default_state: >-
+        SMAP auto-enabled on CPUs with X86_FEATURE_SMAP support. setup_smap() in cpu/common.c
+        sets CR4.SMAP via cr4_set_bits(X86_CR4_SMAP). Kernel access to user pages
+        restricted to narrow STAC/CLAC windows (smap.h provides stac()/clac() inline
+        functions using ALTERNATIVE patching). Fault handler in fault.c detects SMAP
+        violations when X86_FEATURE_SMAP is set and access lacks X86_EFLAGS_AC. CONFIG_X86_SMAP
+        Kconfig option and nosmap boot parameter removed in Linux 5.18 (commit dbae0a934f09).
+        CR4.SMAP bit pinned since 5.3. All modern x86-64 CPUs (Intel Broadwell+ 2014,
+        AMD Zen+ 2018) support SMAP.
+    commits:
+    - date: '2012-09-21'
+      description: 'x86: Add STAC/CLAC instructions and enable SMAP'
+      hash: 63bcff2a307b9bcc712a8251eb27df8b2e117967
+    - date: '2019-06-17'
+      description: 'x86/asm: Pin sensitive CR4 bits (SMEP, SMAP, UMIP)'
+      hash: 873d50d58f67ef15d2777b5e7f7a5268bb1fbae2
+    - date: '2022-04-04'
+      description: 'x86: Remove CONFIG_X86_SMAP and nosmap boot parameter'
+      hash: dbae0a934f09208075ec3e73491bd0844e1397b3
+    discussions:
+    - https://lore.kernel.org/all/1348256595-29119-2-git-send-email-hpa@linux.intel.com/
+    - https://lore.kernel.org/all/20190220180934.GA46255@beast/
+    rationale: >-
+      P=1: SMAP implemented with STAC/CLAC instruction bracketing for controlled user
+      access. D=2: auto-enabled on supporting CPUs (not D=3 because older CPUs lack
+      the feature). S=3: hardware-enforced; CPU raises #PF on any kernel-mode read/write
+      to user pages outside STAC/CLAC windows, no known practical bypass. A=2: in-tree,
+      integral to CPU setup and uaccess paths. T=3: in kernel since 2012 (14+ years),
+      actively maintained.
+    arm64:
+      P: 1
+      D: 2
+      S: 3
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options:
+        - CONFIG_ARM64_SW_TTBR0_PAN
+        source_files:
+        - arch/arm64/include/asm/uaccess.h
+        - arch/arm64/mm/fault.c
+        default_state: >-
+          On arm64 the SMAP equivalent is PAN (Privileged Access Never, ARMv8.1):
+          when the CPU supports it the kernel runs with PSTATE.PAN set and toggles
+          it only around explicit uaccess windows (uaccess_enable/disable). On
+          cores without hardware PAN, CONFIG_ARM64_SW_TTBR0_PAN emulates it via
+          TTBR0 switching. Default-on and architectural.
+      commits: []
+      rationale: >-
+        arm64: P=1 — PAN restricts unintended kernel access to user pages. D=2 —
+        default on all PAN-capable ARMv8.1 cores (SW emulation otherwise). S=3 —
+        hardware-enforced; a kernel access to a user page outside a uaccess window
+        faults, no known bypass. A=2 — integral to the uaccess paths. T=3 — present
+        for 10+ years.
+  C3c.1:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_INIT_ON_FREE_DEFAULT_ON
+      source_files:
+      - mm/page_alloc.c
+      - mm/slub.c
+      - security/Kconfig.hardening
+      default_state: >-
+        Fedora: CONFIG_INIT_ON_FREE_DEFAULT_ON=not set. Can be enabled at boot via
+        init_on_free=1. want_init_on_free() static branch controls zeroing in page_alloc.c
+        and slub.c. Fedora does enable CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y (the alloc-side
+        complement).
+    commits:
+    - hash: 6471384af2a6530696fc0203bafe4de41a23c9ef
+      date: '2019-07-11'
+      description: 'mm: security: introduce init_on_alloc=1 and init_on_free=1 boot options'
+    discussions:
+    - https://lore.kernel.org/all/20190628093131.199499-2-glider@google.com/
+    - https://lore.kernel.org/all/20090303160103.GB5812@localhost.localdomain/
+    rationale: >-
+      P=1: init_on_free mechanism zeros memory on deallocation to prevent info leaks
+      from recycled memory. D=1: not enabled by default in Fedora or defconfig due
+      to measurable performance overhead; available via boot parameter. S=2: when
+      enabled, effectively prevents info leaks from freed memory and makes UAF exploitation
+      harder; complete zeroing covers both slab and page allocator. A=2: in-tree option
+      integrated into mm subsystem. T=3: T_age=3 (upstream since v5.3, 2019) and
+      T_maintained=3 — sustained non-trivial commit flow on mm/slub.c and
+      mm/page_alloc.c in the 2025-01-21..2026-07-21 maintenance window.
+  C3c.2:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_KSTACK_ERASE
+      - CONFIG_GCC_PLUGIN_STACKLEAK
+      source_files:
+      - kernel/kstack_erase.c
+      - arch/x86/entry/calling.h
+      default_state: >-
+        Fedora: CONFIG_KSTACK_ERASE not enabled (HAVE_ARCH_KSTACK_ERASE=y available
+        but not opted in). stackleak_erase() poisons kernel stack on syscall return
+        via STACKLEAK_ERASE macro in arch/x86/entry/calling.h. Renamed from GCC_PLUGIN_STACKLEAK
+        to KSTACK_ERASE.
+    commits:
+    - hash: 10e9ae9fabaf96c8e5227c1cd4827d58b3aa406d
+      date: '2018-08-17'
+      description: 'gcc-plugins: Add STACKLEAK plugin for tracking the kernel stack'
+    - hash: afaef01c001537fa97a25092d7f54d764dc7d8c1
+      date: '2018-08-17'
+      description: 'x86/entry: Add STACKLEAK erasing the kernel stack at the end of syscalls'
+    - hash: 57fbad15c2eee77276a541c616589b32976d2b8e
+      date: '2025-07-17'
+      description: 'stackleak: Rename STACKLEAK to KSTACK_ERASE'
+    discussions:
+    - https://lore.kernel.org/all/1526488097-20611-1-git-send-email-alex.popov@linux.com/
+    - https://lore.kernel.org/all/20200604134957.505389-1-alex.popov@linux.com/
+    - https://lore.kernel.org/all/20250717232519.2984886-1-kees@kernel.org/
+    rationale: >-
+      P=1: STACKLEAK erases the kernel stack after each syscall return, preventing
+      info leaks of leftover data. D=1: not enabled in Fedora default config due to
+      performance overhead; available as opt-in. S=2: effectively prevents stack-based
+      info leaks between syscalls and reduces useful data for stack-based exploits.
+      A=2: in-tree option, ported from grsecurity/PaX. T=2: merged as GCC_PLUGIN_STACKLEAK
+      in v4.20 (2018), renamed to KSTACK_ERASE; maintained by KSPP.
+  C3c.3:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 2
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_ZERO_CALL_USED_REGS
+      - CONFIG_CC_HAS_ZERO_CALL_USED_REGS
+      source_files:
+      - security/Kconfig.hardening
+      - Makefile
+      - arch/x86/include/asm/paravirt_types.h
+      default_state: >-
+        CONFIG_ZERO_CALL_USED_REGS not enabled in Fedora default config or defconfig.
+        KSPP recommends enabling it. When enabled, adds -fzero-call-used-regs=used-gpr
+        to KBUILD_CFLAGS (Makefile:977-978). Requires compiler support (GCC or Clang
+        15.0.6+). Measured overhead up to 8% on synthetic workloads per Kconfig help
+        text.
+    commits:
+    - date: '2021-04-12'
+      description: 'hardening: introduce CONFIG_ZERO_CALL_USED_REGS'
+      hash: a82adfd5c7cb4b8bb37ef439aed954f9972bb618
+    discussions:
+    - https://lore.kernel.org/all/20220902213750.1124421-1-morbo@google.com/
+    rationale: >-
+      P=1: CONFIG_ZERO_CALL_USED_REGS implemented via compiler flag. D=1: available
+      but not enabled in Fedora or defconfig due to measurable performance overhead
+      (~8%). S=2: reduces data lifetime and ROP gadget availability by zeroing caller-clobbered
+      GPRs on function return; does not zero FP/SIMD registers (used-gpr mode only).
+      A=2: in-tree Kconfig option with compiler integration. T=2: introduced in kernel
+      5.15 (late 2021, ~4.5 years), sporadic maintenance (compiler compatibility fixes).
+  C3d.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_KALLSYMS
+      source_files:
+      - lib/vsprintf.c
+      - kernel/printk/printk.c
+      - kernel/printk/sysctl.c
+      default_state: >-
+        Fedora: kptr_restrict=0 (hashed by default via %pK), dmesg_restrict=1 (CONFIG_SECURITY_DMESG_RESTRICT=y).
+        Kernel pointers printed via %pK are hashed for unprivileged users.
+    commits:
+    - hash: eaf06b241b091357e72b76863ba16e89610d31bd
+      date: '2010-11-11'
+      description: 'Restrict unprivileged access to kernel syslog'
+    - hash: 455cd5ab305c90ffc422dd2e0fb634730942b257
+      date: '2011-01-12'
+      description: 'kptr_restrict for hiding kernel pointers from unprivileged users'
+    discussions:
+    - https://lore.kernel.org/all/1293069792.9820.342.camel@dan/
+    rationale: >-
+      P=1: kptr_restrict and dmesg_restrict sysctls limit kernel address exposure.
+      D=2: Fedora enables dmesg_restrict=1 by default and %pK hashing; further lockable
+      via kptr_restrict=2. S=2: significantly reduces casual info leaks but determined
+      attackers can find kernel addresses via side channels or other /proc interfaces.
+      A=2: in-tree sysctl interface. T=3: kptr_restrict since v2.6.38 (2011), dmesg_restrict
+      since v2.6.37 (2010); 15+ years.
+  C3d.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_PROC_FS
+      - CONFIG_SYSFS
+      source_files:
+      - fs/proc/root.c
+      - fs/proc/base.c
+      default_state: >-
+        Fedora: /proc mounted with default options (hidepid=0). Sensitive /proc files
+        like /proc/kcore are restricted by Lockdown LSM when Secure Boot is active.
+        /proc/kallsyms restricted by kptr_restrict.
+    commits:
+    - hash: 0499680a42141d86417a8fbaa8c8db806bea1201
+      date: '2012-01-10'
+      description: 'procfs: add hidepid= and gid= mount options'
+    discussions:
+    - https://lore.kernel.org/all/1308163895-5963-1-git-send-email-segoon@openwall.com/
+    - https://lore.kernel.org/all/20200210150519.538333-10-gladkov.alexey@gmail.com/
+    rationale: >-
+      P=1: /proc and /sys expose diagnostic info with restriction mechanisms. D=2:
+      many restrictions active by default (kptr_restrict, dmesg_restrict); hidepid=0
+      but pid namespaces provide isolation. S=2: reduces diagnostic info exposure
+      but /proc still exposes considerable info to unprivileged users when hidepid
+      is not set. A=2: in-tree, integrated into VFS. T=3: procfs restrictions since
+      early 2.6.x era; actively maintained.
+  C4.2:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - kernel/capability.c
+      - security/commoncap.c
+      - include/uapi/linux/capability.h
+      default_state: >-
+        Always active, integral to kernel. 41 capabilities (CAP_LAST_CAP=40). Root
+        processes start with full capability set; dropping capabilities provides fine-grained
+        privilege reduction.
+    commits:
+    - hash: 1c0fe622c8847e1caab384a81cf96de2f1ac05d8
+      repo: linux_history
+      date: '2002-07-19'
+      description: 'LSM:  Enable the security framework.  This includes basic task control hooks.'
+    - hash: b53767719b6cd8789392ea3e7e2eb7b8906898f0
+      date: '2007-10-16'
+      description: 'Implement file posix capabilities'
+    discussions: []
+    rationale: >-
+      P=1: POSIX capabilities divide root privileges into distinct units. D=2: always
+      active and used by systemd, containers, and security-conscious applications.
+      S=1: capabilities provide useful privilege decomposition but CAP_SYS_ADMIN remains
+      overly broad (effectively root-equivalent); many privilege escalation paths
+      remain with common capability sets. A=2: core kernel subsystem. T=2: T_age=3
+      (capabilities since Linux 2.2, 1999, 27+ years), but T_maintained=2 — 1
+      non-trivial commit to kernel/capability.c and 5 to security/commoncap.c in the
+      2025-01-21..2026-07-21 maintenance window.
+  C4.3:
+    P: 1
+    D: 2
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_SECCOMP
+      - CONFIG_SECCOMP_FILTER
+      source_files:
+      - kernel/seccomp.c
+      default_state: >-
+        Fedora: CONFIG_SECCOMP=y, CONFIG_SECCOMP_FILTER=y. Infrastructure enabled;
+        applications must opt in. Widely used by systemd, Chrome/Firefox, containers,
+        Flatpak.
+    commits:
+    - hash: d949d0ec9c601f2b148bed3cdb5f87c052968554
+      repo: linux_history
+      date: '2005-03-07'
+      description: '[PATCH] seccomp: secure computing support'
+    - hash: e2cfabdfd075648216f99c2c03821cf3f47c1727
+      date: '2012-04-12'
+      description: 'seccomp: add system call filtering using BPF'
+    - hash: bb6ea4301a1109afdacaee576fedbfcd7152fc86
+      date: '2012-04-12'
+      description: 'seccomp: Add SECCOMP_RET_TRAP'
+    - hash: 6a21cc50f0c7f87dae5259f6cfefe024412313f6
+      date: '2018-12-09'
+      description: 'seccomp: add a return code to trap to userspace'
+    discussions:
+    - https://lore.kernel.org/all/20050121100606.GB8042@dualathlon.random/
+    rationale: >-
+      P=1: seccomp-bpf provides syscall filtering via BPF programs. D=2: infrastructure
+      compiled in and widely adopted by default in key services (systemd, browsers,
+      container runtimes). S=3: when properly configured, strictly enforces syscall
+      allow-lists with no known bypass of the seccomp filter itself. A=2: in-tree,
+      integrated into syscall entry path. T=2: T_age=3 (seccomp since v2.6.12, 2005;
+      seccomp-bpf since v3.5, 2012, 12+ years of BPF filtering), but T_maintained=2 —
+      only 7 substantive commits to kernel/seccomp.c in the 2025-01-21..2026-07-21
+      maintenance window.
+  C4.5:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_MODULE_SIG
+      - CONFIG_SECURITY_LOCKDOWN_LSM
+      - CONFIG_LOCK_DOWN_IN_EFI_SECURE_BOOT
+      source_files:
+      - kernel/module/main.c
+      - kernel/module/signing.c
+      - security/lockdown/lockdown.c
+      default_state: >-
+        Fedora: CONFIG_MODULE_SIG=y, MODULE_SIG_FORCE=n. Module signing on but unsigned
+        modules load with taint. modules_disabled=0 by default. Lockdown LSM (when
+        active via Secure Boot) prevents loading unsigned modules.
+    commits:
+    - hash: 3d43321b7015387cfebbe26436d0e9d299162ea1
+      date: '2009-04-02'
+      description: 'modules: sysctl to block module loading'
+    - hash: 106a4ee258d14818467829bf0e12aeae14c16cd7
+      date: '2012-09-26'
+      description: 'module: signature checking hook'
+    - hash: 000d388ed3bbed745f366ce71b2bb7c2ee70f449
+      date: '2019-08-19'
+      description: 'security: Add a static lockdown policy LSM'
+    discussions:
+    - https://lore.kernel.org/all/20120816013405.872.42381.stgit@warthog.procyon.org.uk/
+    - https://lore.kernel.org/all/20190820001805.241928-1-matthewgarrett@google.com/
+    rationale: >-
+      P=1: module loading can be restricted via MODULE_SIG, modules_disabled sysctl,
+      and Lockdown LSM. D=1: module signing enabled but not forced by default; full
+      enforcement only under Secure Boot with Lockdown. S=2: cryptographic module
+      signing provides strong verification when enforced; modules_disabled is an effective
+      one-way lock. A=2: in-tree subsystem. T=3: MODULE_SIG since v3.7 (2012), 14+
+      years; actively maintained.
+  C4.6:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_NAMESPACES
+      - CONFIG_USER_NS
+      - CONFIG_CGROUPS
+      - CONFIG_CGROUP_BPF
+      - CONFIG_CGROUP_DEVICE
+      - CONFIG_CGROUP_FREEZER
+      - CONFIG_CGROUP_HUGETLB
+      - CONFIG_CGROUP_PIDS
+      - CONFIG_CGROUP_SCHED
+      source_files:
+      - kernel/nsproxy.c
+      - kernel/user_namespace.c
+      - kernel/pid_namespace.c
+      - net/core/net_namespace.c
+      default_state: >-
+        Fedora: CONFIG_NAMESPACES=y with all namespace types (pid, net, mount, user,
+        ipc, uts, cgroup, time) enabled; CONFIG_USER_NS=y (unprivileged user namespaces
+        enabled). Cgroup v2 with the full controller set compiled in: CGROUPS=y plus
+        CGROUP_BPF, CGROUP_CPUACCT, CGROUP_DEVICE, CGROUP_DMEM, CGROUP_FREEZER, CGROUP_HUGETLB,
+        CGROUP_MISC, CGROUP_NET_CLASSID, CGROUP_NET_PRIO, CGROUP_PERF, CGROUP_PIDS,
+        CGROUP_RDMA, CGROUP_SCHED all =y. Used pervasively by systemd-unit delegation
+        and container runtimes.
+    commits:
+    - hash: ab516013ad9ca47f1d3a936fa81303bfbf734d52
+      date: '2006-10-02'
+      description: '[PATCH] namespaces: add nsproxy'
+    - hash: acce292c82d4d82d35553b928df2b0597c3a9c78
+      date: '2007-07-15'
+      description: 'user namespace: add the framework'
+    - hash: 5f256becd868bf63b70da8f2769033d6734670e9
+      date: '2007-09-12'
+      description: '[NET]: Basic network namespace infrastructure.'
+    - hash: 4c3f2ead5a3dff9069a45560ba4d007c8ae2e2ee
+      date: '2007-10-18'
+      description: 'pid namespaces: introduce struct upid'
+    discussions:
+    - https://lore.kernel.org/all/20060510021121.GA32523@sergelap.austin.ibm.com/
+    - https://lore.kernel.org/all/20110111064342.GA27515@mail.hallyn.com/
+    rationale: >-
+      P=1: Linux namespaces provide 7 isolation domains (pid, net, mount, user, ipc,
+      uts, cgroup). D=2: all namespace types and cgroup v2 controllers enabled by
+      default in Fedora; widely used by containers and systemd. S=2: provides strong
+      process-level isolation but user namespaces expand attack surface and have been
+      a frequent source of privilege escalation bugs. A=2: core kernel subsystem.
+      T=3: namespaces since v2.6.24 (2008), 18+ years; actively maintained.
+  C4.7:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_SECURITY_YAMA
+      source_files:
+      - security/yama/yama_lsm.c
+      default_state: >-
+        Fedora: CONFIG_SECURITY_YAMA=y. Active in LSM stack. ptrace_scope=0 in Fedora
+        (upstream default is 1); symlink/hardlink protections enabled by default.
+    commits:
+    - hash: 2d514487faf188938a4ee4fb3464eeecfbdcf8eb
+      date: '2011-12-21'
+      description: 'security: Yama LSM'
+    - hash: 389da25f93eea8ff64181ae7e3e87da68acaef2e
+      date: '2012-04-16'
+      description: 'Yama: add additional ptrace scopes'
+    - hash: 800179c9b8a1e796e441674776d11cd4c05d61d7
+      date: '2012-07-25'
+      description: 'fs: add link restrictions'
+    discussions:
+    - https://lore.kernel.org/all/1324498624-31868-1-git-send-email-keescook@chromium.org/
+    - https://lore.kernel.org/all/20120107185548.GA30748@outflux.net/
+    - https://lore.kernel.org/all/20120221215800.GA26721@www.outflux.net/
+    - https://lore.kernel.org/all/20120416185645.GA13667@www.outflux.net/
+    rationale: >-
+      P=1: Yama LSM provides ptrace scope restriction and symlink/hardlink protections.
+      D=2: compiled in and active in Fedora with symlink/hardlink protections enforced
+      by default; ptrace_scope configurable. S=2: effectively prevents unauthorized
+      ptrace attachment and symlink-based attacks in /tmp; but ptrace_scope=0 on Fedora
+      allows same-uid ptrace. A=2: in-tree LSM. T=2: T_age=3 (Yama since v3.4, 2012,
+      14+ years), but T_maintained=2 — a single substantive fix to
+      security/yama/yama_lsm.c in the 2025-01-21..2026-07-21 maintenance window.
+  C5a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - drivers/base/dd.c
+      - include/linux/device/driver.h
+      - drivers/Makefile
+      default_state: >-
+        Linux is a monolithic kernel; all in-tree device drivers execute in ring 0
+        with full kernel privileges and share the kernel address space. There is no
+        driver fault-isolation framework (no sandbox, no separate address space, no
+        capability restriction). A bug in any loaded driver can corrupt arbitrary
+        kernel memory or cause a kernel panic. User-space driver frameworks (UIO,
+        VFIO) exist for specific I/O passthrough use cases but are not a general-purpose
+        driver isolation mechanism.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: Linux is a monolithic kernel where all device drivers run in the same address
+      space and privilege level as the core kernel. No mainline mechanism isolates
+      a faulting driver from the rest of the kernel. This is a fundamental architectural
+      property shared by all monolithic Unix kernels. User-space driver frameworks
+      (UIO, VFIO) exist but serve specific I/O passthrough use cases, not general
+      driver isolation.
+  C5a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - CONFIG_MODULE_SIG_FORCE
+      source_files:
+      - kernel/module/main.c
+      - kernel/module/signing.c
+      default_state: >-
+        Linux kernel modules run with full kernel privileges once loaded. No sandbox
+        or fault-isolation mechanism exists for loaded modules. CONFIG_MODULE_SIG_FORCE
+        gates module *loading* integrity (C6.3) but does not provide runtime isolation.
+        Modules share the same address space and privilege level as the rest of the
+        kernel.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: Linux does not isolate loaded kernel modules from the rest of the kernel.
+      Modules execute with full ring-0 privileges and share the kernel address space.
+      Module signing (CONFIG_MODULE_SIG_FORCE) prevents loading tampered modules but
+      provides no sandbox property once loaded. This is the fundamental monolithic
+      kernel limitation.
+  C5a.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_BPF_SYSCALL
+      - CONFIG_BPF_JIT
+      - CONFIG_BPF_JIT_ALWAYS_ON
+      - CONFIG_BPF_UNPRIV_DEFAULT_OFF
+      source_files:
+      - kernel/bpf/verifier.c
+      - kernel/bpf/syscall.c
+      - kernel/bpf/Kconfig
+      default_state: >-
+        eBPF verifier validates all BPF programs before execution (verifier.c, 23000+
+        lines). CONFIG_BPF_UNPRIV_DEFAULT_OFF is default y, setting sysctl_unprivileged_bpf_disabled=2
+        (syscall.c:68-69), which blocks unprivileged BPF by default. CONFIG_BPF_JIT_ALWAYS_ON
+        removes the BPF interpreter to prevent speculative execution of BPF bytecode.
+        LSM hooks gate BPF program loading. Fedora enables BPF_JIT and BPF_UNPRIV_DEFAULT_OFF.
+        Fedora carries an additional out-of-tree patch setting unprivileged_bpf_disabled=1
+        (permanently disabled without reboot), stricter than upstream default of 2.
+    commits:
+    - date: '2014-09-26'
+      description: 'bpf: introduce extended BPF (eBPF) verifier and instruction set'
+      hash: 51580e798cb61b0fc63fa3aa6c5c975375aa0550
+    - date: '2018-01-09'
+      description: 'bpf: introduce BPF_JIT_ALWAYS_ON config (Spectre v2 mitigation)'
+      hash: 290af86629b25ffd1ed6232c4e9107da031705cb
+    - date: '2021-05-11'
+      description: 'bpf: Add CONFIG_BPF_UNPRIV_DEFAULT_OFF'
+      hash: 08389d888287c3823f80b0216766b71e17f0aba5
+    discussions:
+    - https://lore.kernel.org/all/1411344411-3824-1-git-send-email-ast@plumgrid.com/
+    - https://lore.kernel.org/all/20180109180429.1115005-1-ast@kernel.org/
+    - https://lore.kernel.org/all/0ace9ce3f97656d5f62d11093ad7ee81190c3c25.1635535215.git.pawan.kumar.gupta@linux.intel.com/
+    rationale: >-
+      P=1: comprehensive eBPF verifier subsystem validates all BPF programs for memory
+      safety, type safety, and termination before execution. D=2: unprivileged BPF
+      disabled by default (CONFIG_BPF_UNPRIV_DEFAULT_OFF=y), BPF JIT enabled by default.
+      S=2: verifier is sophisticated but has had multiple CVEs allowing sandbox escape
+      (ALU bounds tracking, branch miscounting); ongoing cat-and-mouse with vulnerability
+      researchers. A=2: in-tree core subsystem, deeply integrated into kernel networking,
+      tracing, and security (LSM). T=3: eBPF verifier since 2014 (11+ years), one
+      of the most actively maintained kernel subsystems.
+  C5b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - arch/x86/kvm/Kconfig
+      - security/lockdown/lockdown.c
+      - virt/kvm/kvm_main.c
+      default_state: >-
+        HEKI (Hypervisor-Enforced Kernel Integrity) was proposed as an RFC patch series
+        for Linux but has not been merged into mainline as of kernel 6.19. The concept
+        uses a hypervisor to enforce read-only and no-execute permissions on kernel
+        text and critical data from outside the kernel trust boundary. Microsoft HVCI
+        is the reference implementation in the Windows ecosystem (out of scope). No
+        equivalent mainline mechanism exists.
+    commits: []
+    discussions:
+    - https://lore.kernel.org/linux-security-module/6412bf27-4d05-eab8-3db1-d4efa44af3aa@digikod.net/T/
+    - https://www.mail-archive.com/linux-hardening@vger.kernel.org/msg04279.html
+    - https://lwn.net/Articles/931087/
+    rationale: >-
+      P=0: HEKI remains an unmerged RFC proposal. No hypervisor-enforced kernel integrity
+      mechanism exists in mainline Linux. The kernel relies on self-imposed restrictions
+      (Lockdown LSM, C6.4) rather than external enforcement from a hypervisor layer.
+  C5b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - CONFIG_TRUSTED_KEYS
+      - CONFIG_TRUSTED_KEYS_TPM
+      source_files:
+      - security/keys/trusted-keys/trusted_core.c
+      - security/keys/trusted-keys/trusted_tpm2.c
+      default_state: >-
+        Linux has trusted_keys subsystem (security/keys/trusted-keys/) supporting
+        TPM-sealed keys, TEE-backed keys, and CAAM/DCP/PKWM backends. Keys are sealed
+        by the TPM and only unsealed when boot PCRs match. However, once unsealed,
+        key material resides in kernel memory without hardware enclave-style runtime
+        isolation. SEV-SNP protects guest memory from the hypervisor but does not
+        isolate key material from a compromised kernel within the same trust domain.
+    commits: []
+    discussions:
+    - https://lore.kernel.org/all/1290552635-3356-1-git-send-email-zohar@linux.vnet.ibm.com/
+    - https://lore.kernel.org/all/20220128171804.569796-1-brijesh.singh@amd.com/
+    rationale: >-
+      P=0: while trusted_keys (TPM sealing) and SEV-SNP (confidential VM) exist, neither
+      provides enclave-style runtime protection of kernel key material from a compromised
+      kernel. TPM-sealed keys protect at rest but are plaintext in kernel memory when
+      in use. SEV-SNP protects from the hypervisor but not from kernel-internal compromise.
+      The scored property is runtime isolation of keys from a kernel-level attacker,
+      which is absent. Consistent with P=0 for all other evaluated OSes.
+  C5c.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_IOMMU_SUPPORT
+      - CONFIG_IOMMU_DMA
+      - CONFIG_IOMMU_DEFAULT_DMA_LAZY
+      - CONFIG_INTEL_IOMMU
+      - CONFIG_INTEL_IOMMU_SVM
+      - CONFIG_INTEL_IOMMU_SCALABLE_MODE_DEFAULT_ON
+      - CONFIG_AMD_IOMMU
+      - CONFIG_IOMMU_SVA
+      source_files:
+      - drivers/iommu/iommu.c
+      - drivers/iommu/intel/iommu.c
+      - drivers/iommu/amd/init.c
+      - drivers/iommu/Kconfig
+      default_state: >-
+        IOMMU support enabled on Fedora for both Intel VT-d (CONFIG_INTEL_IOMMU=y)
+        and AMD-Vi (CONFIG_AMD_IOMMU=y), via CONFIG_IOMMU_SUPPORT=y. CONFIG_IOMMU_DMA=y
+        (def_bool on ARM64 || X86 || S390, drivers/iommu/Kconfig:154) and CONFIG_IOMMU_SVA=y
+        (silent bool selected by INTEL_IOMMU_SVM and AMD_IOMMU, drivers/iommu/intel/Kconfig:57,
+        drivers/iommu/amd/Kconfig:14). Default domain type is DMA_LAZY (CONFIG_IOMMU_DEFAULT_DMA_LAZY=y
+        on x86), which translates DMA addresses but uses batched (lazy) TLB invalidation
+        for performance. NOT strict mode -- lazy mode provides weaker isolation since
+        devices may access recently unmapped memory until the next TLB flush. Strict
+        mode (iommu.strict=1) available via kernel cmdline but not default. Split default
+        by vendor: AMD-Vi is unconditionally default-on (amd_iommu=off is the only
+        disable), while Intel VT-d is default-OFF in this config (CONFIG_INTEL_IOMMU_DEFAULT_ON
+        is not set; drivers/iommu/intel/iommu.c initializes dmar_disabled=1) and
+        activates only via intel_iommu=on, the firmware DMA-protection opt-in bit
+        combined with external-facing PCI (platform_optin_force_iommu), or tboot.
+        Untrusted devices (e.g., Thunderbolt) always use strict mode with bounce
+        buffering when the IOMMU is active.
+    commits:
+    - hash: ba39592764ed20cee09aae5352e603a27bf56b0d
+      date: '2007-10-21'
+      description: 'Intel IOMMU: Intel IOMMU driver'
+    - hash: 2b188723ee1707ca902ddb98ce1decdeafb5190a
+      date: '2008-06-26'
+      description: 'x86, AMD IOMMU: add Kconfig entry'
+    - hash: 4a77a6cf6d9bf9f5c74b27f62bd2bfe6dcc88392
+      date: '2008-11-26'
+      description: 'introcude linux/iommu.h for an iommu api'
+    - hash: 0db2e5d18f76a66ca945447d9f610bed0a94ca5a
+      date: '2015-10-01'
+      description: 'iommu: Implement common IOMMU ops for DMA mapping'
+    discussions:
+    - https://lore.kernel.org/all/cover.1626888444.git.robin.murphy@arm.com/
+    rationale: >-
+      P=1: comprehensive IOMMU framework supporting Intel VT-d, AMD-Vi, and ARM SMMU
+      with per-device DMA address translation. D=2: hardware/vendor-conditional default
+      -- AMD-Vi is unconditionally on under the pinned config, and Intel VT-d
+      auto-activates on firmware DMA-protection opt-in with external-facing PCI
+      (Thunderbolt/USB4) or tboot, but is otherwise default-off (INTEL_IOMMU_DEFAULT_ON
+      unset -> dmar_disabled=1, requiring intel_iommu=on); scored D=2 per the corpus
+      convention for hardware/firmware-conditional activation (cf. FreeBSD C3b.1 KPTI
+      disabled on AMD, NetBSD C7c.1 microcode-dependent), and both-vendors-off peers
+      (FreeBSD/OpenBSD C5c.1) hold D=1; also lazy TLB invalidation mode
+      (CONFIG_IOMMU_DEFAULT_DMA_LAZY), not strict. S=2:
+      provides hardware-enforced DMA address translation preventing devices from accessing
+      arbitrary physical memory, but lazy mode leaves a window where stale mappings
+      remain accessible; ACS (Access Control Services) support varies by hardware.
+      A=2: in-tree kernel subsystem in drivers/iommu/, deeply integrated with the
+      DMA API and PCI subsystem. T=3: Intel IOMMU driver since 2.6.26 (2008), AMD
+      IOMMU since 2.6.28 (2008); mature but the default switched from passthrough
+      to lazy only in 5.15 (2021), so effective-by-default DMA isolation is relatively
+      recent.
+  C5c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - arch/x86/mm/pkeys.c
+      - arch/x86/include/asm/shared/tdx.h
+      - arch/x86/mm/init.c
+      default_state: >-
+        No intra-kernel memory-protection domains in mainline Linux. PKS (Protection
+        Keys for Supervisor mode) hardware support exists in Intel CPUs and is referenced
+        in TDX code (arch/x86/include/asm/shared/tdx.h), but no mainline kernel compartmentalization
+        framework uses PKS for intra-kernel isolation. BULKHEAD (Guo et al., NDSS
+        2025) demonstrated PKS+ASID-based compartment isolation with 224-cycle switches
+        at <3% overhead, but remains a research prototype. LXDs (Light-Kernel Domains)
+        are a related research direction, also not upstream.
+    commits: []
+    discussions:
+    - https://lore.kernel.org/all/20201106232908.364581-1-ira.weiny@intel.com/
+    rationale: >-
+      P=0: no mainline intra-kernel memory-protection domain mechanism. PKS hardware
+      is available but unused for compartmentalization in upstream Linux. Research
+      prototypes (BULKHEAD, LXDs) demonstrate feasibility but are not merged. The
+      kernel remains a single shared address space with no hardware-enforced internal
+      memory boundaries between subsystems.
+  C5c.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - CONFIG_ARM64_MTE
+      source_files: []
+      default_state: >-
+        ARM MTE (Memory Tagging Extension) is implemented in Linux for arm64 only
+        (arch/arm64/, CONFIG_ARM64_MTE). MTE tag-based isolation domains are not available
+        on x86-64 hardware. Per the evaluation framework's applicability rules,
+        this mechanism is N/A for the x86-64 primary evaluation across all
+        target OSes.
+    commits:
+    - hash: 3b714d24ef173f81c78af16f73dcc9b40428c803
+      date: '2019-09-06'
+      description: 'arm64: mte: CPU feature detection and initial sysreg configuration'
+    - hash: 2e903b91479782b7dedd869603423d77e079d3de
+      date: '2020-12-22'
+      description: 'kasan, arm64: implement HW_TAGS runtime'
+    discussions:
+    - https://lore.kernel.org/all/20200904103029.32083-1-catalin.marinas@arm.com/
+    rationale: >-
+      N/A: ARM MTE hardware feature not present on x86-64. Memory tagging for isolation
+      requires MTE-capable ARM processors. Linux does implement CONFIG_ARM64_MTE for
+      arm64 targets, but this is outside the scope of the x86-64 primary evaluation.
+      Consistent with N/A status for all other evaluated OSes on x86-64.
+    arm64:
+      P: 1
+      D: 1
+      S: 1
+      A: 1
+      T_age: 2
+      T_maintained: 2
+      implementation:
+        config_options:
+        - CONFIG_ARM64_MTE
+        source_files:
+        - arch/arm64/kernel/mte.c
+        default_state: >-
+          ARM MTE (CONFIG_ARM64_MTE=y) can in principle assign distinct tags to
+          separate trust domains, but mainline Linux does not use MTE tag domains
+          as a default in-kernel isolation primitive. The capability exists; the
+          isolation use is not deployed by default.
+      rationale: >-
+        arm64: P=1 — MTE tagging can be used as an isolation primitive on arm64.
+        D=1/S=1/A=1 — partial: not a deployed default kernel isolation mechanism,
+        and 4-bit tags give only probabilistic separation. T=2 — MTE since 2020.
+        Cross-reference: C1a.6/C1b.5 score MTE as a memory-safety primitive.
+  C5d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - init/main.c
+      - arch/x86/kernel/vmlinux.lds.S
+      - drivers/Makefile
+      default_state: >-
+        Linux uses a monolithic kernel architecture. All kernel services (file systems,
+        networking, device drivers, scheduling, memory management) execute in a single
+        address space at ring 0. There is no message-passing or IPC-based separation
+        between kernel subsystems as found in microkernel designs (Fuchsia/Zircon,
+        seL4, QNX). The kernel provides ~400+ system calls as the sole boundary between
+        user space and kernel space.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: Linux is a monolithic kernel by design. All kernel services share a single
+      address space and privilege level with no architectural separation into isolated
+      components with defined IPC interfaces. This is the fundamental trade-off of
+      the monolithic architecture: performance (no IPC overhead) at the cost of a
+      single fault domain.
+  C5d.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - kernel/module/main.c
+      - kernel/kallsyms.c
+      - arch/x86/mm/init.c
+      default_state: >-
+        Linux has no internal compartmentalization mechanism in mainline. All kernel
+        subsystems share the same address space and can access each other's data structures
+        directly via pointers. There are no hardware-enforced boundaries between subsystems
+        (e.g., no PKS-based isolation, no intra-kernel capabilities). The kernel relies
+        on software conventions (API boundaries, locking) rather than hardware enforcement.
+        Research prototypes like BULKHEAD (PKS-based) and LXDs exist but are not upstream
+        (see C5c.2).
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no mainline internal compartmentalization. The kernel is a single trust
+      domain where any subsystem can access any kernel memory. Lateral movement after
+      a vulnerability in one subsystem is unrestricted. This differs from Fuchsia/Zircon
+      which isolates drivers as user-space processes with restricted capabilities.
+  C6.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_EFI_STUB=y
+      - CONFIG_SIGNED_PE_FILE_VERIFICATION=y
+      - CONFIG_SECURITY_LOCKDOWN_LSM=y
+      - CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y
+      - CONFIG_LOCK_DOWN_IN_EFI_SECURE_BOOT=y
+      - CONFIG_KEXEC_SIG=y
+      source_files:
+      - drivers/firmware/efi/libstub/secureboot.c
+      - drivers/firmware/efi/libstub/x86-stub.c
+      - security/lockdown/lockdown.c
+      - security/lockdown/Kconfig
+      default_state: >-
+        Fedora kernel is signed with a certificate enrolled in the UEFI Secure Boot
+        db (via Microsoft UEFI CA shim chain). CONFIG_EFI_STUB=y embeds the kernel
+        as a PE/COFF binary verifiable by UEFI firmware. When UEFI Secure Boot is
+        active, CONFIG_LOCK_DOWN_IN_EFI_SECURE_BOOT=y (Fedora downstream patch) triggers
+        lockdown=integrity mode automatically. CONFIG_KEXEC_SIG=y requires kexec targets
+        to be signed (but CONFIG_KEXEC_SIG_FORCE is not set). CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y
+        means lockdown is NOT forced without Secure Boot; it depends on firmware state.
+    commits:
+    - hash: 291f36325f9f252bd76ef5f603995f37e453fc60
+      date: '2011-12-12'
+      description: 'x86, efi: EFI boot stub support'
+    - hash: de8cb458625c164bb3f93c4e415e479afce8fa9d
+      date: '2017-02-06'
+      description: 'efi: Get and store the secure boot status'
+    - hash: 26d1164be37f1145a96af15f294122876d8e5c77
+      date: '2014-07-01'
+      description: 'pefile: Parse a PE binary to find a key and a signature contained therein'
+    - hash: 000d388ed3bbed745f366ce71b2bb7c2ee70f449
+      date: '2019-08-19'
+      description: 'security: Add a static lockdown policy LSM'
+    discussions:
+    - https://lore.kernel.org/all/1318848017-12301-1-git-send-email-matt@console-pimps.org/
+    - https://lore.kernel.org/all/tip-de8cb458625c164bb3f93c4e415e479afce8fa9d@git.kernel.org/
+    - https://lore.kernel.org/all/20190820001805.241928-1-matthewgarrett@google.com/
+    rationale: >-
+      P=1: UEFI Secure Boot chain supported via EFI stub, signed bootloader (shim),
+      and signed kernel. Lockdown LSM ties kernel runtime restrictions to Secure Boot
+      state. D=2: Secure Boot is enabled by default on modern UEFI systems with Fedora;
+      Lockdown triggers automatically when detected. However, depends on firmware
+      configuration (user can disable Secure Boot in BIOS). S=2: strong cryptographic
+      chain (RSA/ECDSA PE signatures verified by firmware and shim) but shim trust
+      model relies on Microsoft UEFI CA; known BootHole-class vulnerabilities have
+      required revocations. A=2: spans firmware (UEFI), bootloader (shim/GRUB), and
+      kernel (EFI stub + Lockdown LSM). T=2: T_age=3 (UEFI Secure Boot support since
+      3.7, 2012; shim since 2012; Lockdown LSM merged in 5.4, 2019), but
+      T_maintained=2 — no commits to drivers/firmware/efi/libstub/secureboot.c in the
+      2025-01-21..2026-07-21 maintenance window, the x86-stub churn there being
+      unrelated to secure boot.
+  C6.2:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_IMA=y
+      - CONFIG_IMA_MEASURE_PCR_IDX=10
+      - CONFIG_IMA_NG_TEMPLATE=y
+      - CONFIG_IMA_DEFAULT_HASH_SHA256=y
+      - CONFIG_IMA_KEXEC=y
+      - CONFIG_IMA_ARCH_POLICY=y
+      - CONFIG_INTEGRITY=y
+      - CONFIG_INTEGRITY_AUDIT=y
+      source_files:
+      - security/integrity/ima/ima_main.c
+      - security/integrity/ima/ima_policy.c
+      - security/integrity/ima/ima_crypto.c
+      - security/integrity/ima/ima_efi.c
+      - security/integrity/ima/Kconfig
+      default_state: >-
+        CONFIG_IMA=y on Fedora with SHA-256 as the default hash, but
+        ima_policy.c loads no generic default measurement rules. With
+        CONFIG_IMA_ARCH_POLICY=y and Secure Boot active, ima_efi.c adds
+        rules for kernel modules and kexec images. Broader file or
+        executable measurement requires an explicit IMA policy.
+        Appraisal requires explicit policy/enforcement configuration.
+        Remote attestation via TPM 2.0 PCR quotes also requires external
+        attestation infrastructure.
+    commits:
+    - hash: 3323eec921efd815178a23107ab63588c605c0b2
+      date: '2009-02-04'
+      description: 'integrity: IMA as an integrity service provider'
+    - hash: 66dbc325afcef909043c30e90930a36823fc734c
+      date: '2011-03-15'
+      description: 'evm: re-release'
+    - hash: 9e2b4be377f0d715d9d910507890f9620cc22a9d
+      date: '2020-03-08'
+      description: 'ima: add a new CONFIG for loading arch-specific policies'
+    discussions:
+    - https://lore.kernel.org/all/cover.1233750611.git.zohar@linux.vnet.ibm.com/
+    - https://lore.kernel.org/all/20181009173037.32630-1-nayna@linux.vnet.ibm.com/
+    rationale: >-
+      P=1: IMA provides policy-driven kernel-level measurement into TPM
+      PCRs for later attestation. D=1: the infrastructure is compiled
+      into Fedora, while Secure Boot adds only module and kexec rules;
+      broader measurement and full attestation require explicit policy
+      and external infrastructure (attestation server, TPM quote
+      verification). S=2: cryptographic hashes (SHA-256)
+      extended into hardware TPM PCRs providing tamper-evident log; TPM-based quotes
+      are cryptographically strong. A=2: in-tree integrity subsystem (security/integrity/ima/)
+      integrated with LSM hooks, TPM subsystem, and EFI Secure Boot. T=3: T_age=3 (IMA
+      since 2.6.30, 2009, 16+ years) and T_maintained=3 — 13 non-trivial commits to
+      security/integrity/ima/ima_main.c plus 9 to ima_policy.c in the
+      2025-01-21..2026-07-21 maintenance window; the wider remote-attestation
+      ecosystem remains immature for general Linux deployments, but that is a
+      deployment gap rather than a code-maturity one.
+  C6.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_MODULE_SIG
+      - CONFIG_MODULE_SIG_FORCE
+      - CONFIG_MODULE_SIG_ALL
+      - CONFIG_KEXEC_SIG
+      - CONFIG_KEXEC_BZIMAGE_VERIFY_SIG
+      source_files:
+      - kernel/module/signing.c
+      - kernel/module/Kconfig
+      - kernel/kexec_file.c
+      - arch/x86/kernel/kexec-bzimage64.c
+      default_state: >-
+        CONFIG_MODULE_SIG=y in Fedora (modules are signed at build time with CONFIG_MODULE_SIG_ALL=y,
+        using SHA-512 with RSA key: CONFIG_MODULE_SIG_SHA512=y, CONFIG_MODULE_SIG_KEY_TYPE_RSA=y).
+        CONFIG_MODULE_SIG_FORCE=n (not forced; unsigned modules taint the kernel but
+        are still loaded). However, when UEFI Secure Boot is active, the Lockdown
+        LSM (CONFIG_SECURITY_LOCKDOWN_LSM=y, CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y)
+        prevents loading unsigned modules via LOCKDOWN_MODULE_SIGNATURE check. IMA
+        arch policy (ima_efi.c) also enforces module signature appraisal when Secure
+        Boot is detected. Effective enforcement depends on Secure Boot state. The same
+        signing model extends to the kexec crash/boot path: CONFIG_KEXEC_SIG=y (Fedora,
+        KEXEC_SIG_FORCE not set) makes kexec_file_load() verify a PKCS#7 signature over
+        the PE-format bzImage (CONFIG_KEXEC_BZIMAGE_VERIFY_SIG), and lockdown forces
+        signed kexec images under Secure Boot.
+    commits:
+    - hash: 106a4ee258d14818467829bf0e12aeae14c16cd7
+      date: '2012-09-26'
+      description: 'module: signature checking hook'
+    - hash: ea0b6dcf71d216dc11733ac19b26df0f5d0fd6c2
+      date: '2012-09-26'
+      description: 'MODSIGN: Provide Kconfig options'
+    - hash: 48ba2462ace6072741fd8d0058207d630ce93bf1
+      date: '2012-09-26'
+      description: 'MODSIGN: Implement module signature checking'
+    - hash: 8e7d838103feac320baf9e68d73f954840ac1eea
+      date: '2014-08-08'
+      description: 'kexec: verify the signature of signed PE bzImage'
+    discussions:
+    - https://lore.kernel.org/all/20120816013405.872.42381.stgit@warthog.procyon.org.uk/
+    - https://lore.kernel.org/all/20150805134323.9984.4454.stgit@warthog.procyon.org.uk/
+    - https://lore.kernel.org/all/1403814824-7587-1-git-send-email-vgoyal@redhat.com/
+    - https://lore.kernel.org/all/1404930247-7546-1-git-send-email-vgoyal@redhat.com/
+    rationale: >-
+      P=1: CONFIG_MODULE_SIG provides cryptographic verification of kernel module
+      signatures, and CONFIG_KEXEC_SIG extends the same PKCS#7 model to the bzImage
+      loaded by kexec_file_load(). D=2: signing infrastructure enabled by default
+      (MODULE_SIG=y, MODULE_SIG_ALL=y, KEXEC_SIG=y); the mechanism-local force knobs
+      (MODULE_SIG_FORCE / KEXEC_SIG_FORCE) are unset, but under the declared firmware
+      baseline (Secure Boot on) Lockdown auto-enters integrity mode and enforces both
+      module and kexec signatures with no administrator action — the pin alone
+      activates enforcement, consistent with C6.1/C6.4 reading the same
+      LOCK_DOWN_IN_EFI_SECURE_BOOT gate as default-active. S=2: cryptographically
+      strong when enforced (RSA/SHA-512 signatures verified against built-in and secondary
+      keyrings). A=2: in-tree kernel subsystems (kernel/module/signing.c, kernel/kexec_file.c).
+      T=3: module signing since kernel 3.7 (Dec 2012, 13+ years), signed-PE kexec since
+      v3.17 (2014); actively maintained.
+  C6.4:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_SECURITY_LOCKDOWN_LSM=y
+      - CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y
+      - CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y
+      - CONFIG_LOCK_DOWN_IN_EFI_SECURE_BOOT=y
+      source_files:
+      - security/lockdown/lockdown.c
+      - security/lockdown/Kconfig
+      - include/linux/security.h
+      default_state: >-
+        CONFIG_SECURITY_LOCKDOWN_LSM=y with CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y on
+        Fedora. Default mode is NONE (CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y); lockdown
+        activates automatically to integrity level when UEFI Secure Boot is detected
+        (CONFIG_LOCK_DOWN_IN_EFI_SECURE_BOOT=y, Fedora patch). Two levels: integrity
+        (blocks /dev/mem, kexec of unsigned images, module params, ACPI table overrides,
+        debugfs, etc.) and confidentiality (additionally blocks /proc/kcore, kprobes,
+        perf, tracefs, BPF kernel reads). Can be escalated but not de-escalated at
+        runtime via /sys/kernel/security/lockdown. Without Secure Boot, lockdown is
+        inactive unless set via kernel cmdline (lockdown=integrity|confidentiality).
+    commits:
+    - hash: 000d388ed3bbed745f366ce71b2bb7c2ee70f449
+      date: '2019-08-19'
+      description: 'security: Add a static lockdown policy LSM'
+    - hash: 49fcf732bdae0550721ef73af7c45109ce26b2a9
+      date: '2019-08-19'
+      description: 'lockdown: Enforce module signatures if the kernel is locked down'
+    - hash: 99d5cadfde2b1acb7650021df5abaa5ec447dd10
+      date: '2019-08-19'
+      description: 'kexec_file: split KEXEC_VERIFY_SIG into KEXEC_SIG and KEXEC_SIG_FORCE'
+    discussions:
+    - https://lore.kernel.org/linux-security-module/20190820001805.241928-4-matthewgarrett@google.com/
+    - https://lore.kernel.org/all/20221111231636.3748636-1-evgreen@chromium.org/
+    rationale: >-
+      P=1: Lockdown LSM restricts kernel self-modification capabilities at runtime,
+      blocking access to /dev/mem, unsigned kexec, module parameters, ACPI table injection,
+      etc. D=2: compiled in on Fedora with LOCK_DOWN_IN_EFI_SECURE_BOOT=y; under the
+      declared firmware baseline (Secure Boot on) lockdown auto-enters integrity mode
+      with no administrator action — the same gate C6.1 credits as default-active, so
+      the two rows must read it consistently. Without Secure Boot it would be opt-in
+      via cmdline. S=2: comprehensive list of restricted
+      operations (20+ lockdown reasons in integrity + confidentiality levels) but
+      self-imposed from within the kernel; a kernel exploit that can execute arbitrary
+      code can bypass lockdown. No external enforcement (cf. HEKI, C5b.1). A=2: in-tree
+      LSM with early init support, integrated with module loading, /dev/mem, kexec,
+      debugfs, perf, BPF. T=3: T_age=3 — Lockdown LSM merged in 5.4 (Nov 2019, 6+
+      years), with the concept existing earlier as Fedora patches — and
+      T_maintained=3, on 18 new LSM hooks landing in include/linux/security.h during
+      the 2025-01-21..2026-07-21 maintenance window. Note:
+      hibernation (S4) is one of the operations lockdown blocks, because the kernel
+      cannot verify the integrity of a resumed snapshot; authenticated/signed-snapshot
+      support that would let lockdown permit S4 remains out-of-tree (repeated RFCs).
+  C6.5:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_IMA
+      - CONFIG_IMA_APPRAISE
+      - CONFIG_IMA_APPRAISE_BOOTPARAM
+      - CONFIG_IMA_APPRAISE_MODSIG
+      - CONFIG_IMA_ARCH_POLICY
+      - CONFIG_EVM
+      - CONFIG_EVM_ATTR_FSUUID
+      - CONFIG_INTEGRITY
+      - CONFIG_INTEGRITY_SIGNATURE
+      - CONFIG_INTEGRITY_ASYMMETRIC_KEYS
+      - CONFIG_SECURITY_IPE
+      source_files:
+      - security/integrity/ima/ima_appraise.c
+      - security/integrity/ima/ima_policy.c
+      - security/integrity/ima/ima_main.c
+      - security/integrity/evm/evm_main.c
+      - security/ipe/eval.c
+      - security/ipe/hooks.c
+      default_state: >-
+        CONFIG_IMA_APPRAISE=y on Fedora enables IMA file appraisal infrastructure.
+        CONFIG_IMA_ARCH_POLICY=y automatically enforces module and kexec signature
+        appraisal when Secure Boot is detected (ima_efi.c:arch_get_ima_policy sets
+        appraise rules for MODULE_CHECK and KEXEC_KERNEL_CHECK). CONFIG_IMA_APPRAISE_BOOTPARAM=y
+        allows overriding via ima_appraise= cmdline. EVM (CONFIG_EVM=y) protects file
+        metadata (security xattrs, ACLs) via HMAC or digital signatures, preventing
+        silent xattr tampering -- including the portable & immutable digital-signature
+        format (security.evm type 0x05), which excludes the inode/fsuuid so a single
+        signature is valid across filesystems and surviving file copies. IPE (Integrity
+        Policy Enforcement) is compiled in
+        (CONFIG_SECURITY_IPE=y) with IPE_POLICY_SIG_PLATFORM_KEYRING=y and IPE_POLICY_SIG_SECONDARY_KEYRING=y,
+        but CONFIG_IPE_BOOT_POLICY="" (no boot policy shipped) and the dm-verity/fs-verity
+        property evaluators (CONFIG_IPE_PROP_DM_VERITY / CONFIG_IPE_PROP_FS_VERITY)
+        are not enabled in Fedora -- IPE is present but effectively inert by default.
+        Full appraisal enforcement requires explicit policy (ima_appraise=enforce)
+        or depends on Secure Boot + IMA_ARCH_POLICY.
+    commits:
+    - hash: 2fe5d6def1672ae6635dd71867bf36dcfaa7434b
+      date: '2012-02-13'
+      description: 'ima: integrity appraisal extension'
+    - hash: 66dbc325afcef909043c30e90930a36823fc734c
+      date: '2011-03-15'
+      description: 'evm: re-release'
+    - hash: 671e67b47e9fffd12c8f69eda853a202cb5b3fc5
+      date: '2019-07-22'
+      description: 'fs-verity: add Kconfig and the helper functions for hashing'
+    - hash: 0311507792b54069ac72e0a6c6b35c5d40aadad8
+      date: '2024-08-02'
+      description: 'lsm: add IPE lsm'
+    - hash: 50b977481fce90aa5fbda55e330b9d722733e358
+      date: '2017-11-07'
+      description: 'EVM: Add support for portable signature format'
+    - hash: 8c7a703ec9787a1b45b024e9acd253328422dcbd
+      date: '2021-05-28'
+      description: 'evm: Verify portable signatures against all protected xattrs'
+    discussions:
+    - https://lore.kernel.org/lkml/1461192388-13900-1-git-send-email-keescook@chromium.org/
+    - https://lore.kernel.org/all/1722665314-21156-1-git-send-email-wufan@linux.microsoft.com/
+    - https://lore.kernel.org/all/1309377038-4550-1-git-send-email-zohar@linux.vnet.ibm.com/
+    - https://lore.kernel.org/all/20210514152753.982958-1-roberto.sassu@huawei.com/
+    rationale: >-
+      P=1: IMA appraisal verifies file signatures/hashes before execution; EVM protects
+      file metadata integrity (HMAC, and portable+immutable digital signatures that
+      survive file copies and cross-filesystem moves); IPE provides policy-based
+      integrity enforcement for dm-verity/fs-verity backed files. D=1: infrastructure
+      compiled in (IMA_APPRAISE=y,
+      EVM=y, SECURITY_IPE=y) but full enforcement requires explicit policy configuration;
+      IMA_ARCH_POLICY provides automatic appraisal for modules and kexec under Secure
+      Boot, but general file appraisal is not default. IPE ships with no boot policy
+      and no verity property evaluators in Fedora, so it contributes nothing to the
+      default posture. S=2: cryptographically strong (RSA/ECDSA signatures verified
+      against keyrings, SHA-256 hashes) but IMA appraisal can be disabled via boot
+      param (ima_appraise=off) unless Secure Boot forces it; EVM requires explicit
+      key setup. A=2: in-tree integrity subsystem (security/integrity/) with LSM hooks
+      at file open, mmap, bprm_check. T=3: T_age=3 (IMA since 2.6.30, 2009; EVM since
+      3.2, 2012; IPE, merged in 6.12, 2024, is the one young component) and
+      T_maintained=3 — 22 substantive commits across the cited ima/evm/ipe files in
+      the 2025-01-21..2026-07-21 maintenance window.
+  C7a.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_MITIGATION_SPECTRE_V1
+      source_files:
+      - arch/x86/kernel/cpu/bugs.c
+      - arch/x86/include/asm/barrier.h
+      - include/linux/nospec.h
+      default_state: >-
+        Fedora: CONFIG_MITIGATION_SPECTRE_V1=y (default y). Uses array_index_nospec()
+        (branchless cmp+sbb mask) and LFENCE barriers for swapgs entry paths.
+    commits:
+    - hash: f3804203306e098dae9ca51540fcd5eb700d7f40
+      date: '2018-01-29'
+      description: 'array_index_nospec: Sanitize speculative array de-references'
+    - hash: 99c6fa2511d8a683e61468be91b83f85452115fa
+      date: '2018-01-06'
+      description: 'x86/cpufeatures: Add X86_BUG_SPECTRE_V[12]'
+    - hash: ca01c0d8d03089f81c713aec0c63d359bc0f6796
+      date: '2024-07-29'
+      description: 'x86/bugs: Add a separate config for Spectre v1'
+    discussions:
+    - https://lore.kernel.org/all/151632009605.21271.11304291057104672116.stgit@dwillia2-desk3.amr.corp.intel.com/
+    rationale: >-
+      P=1: Spectre v1 mitigated via array_index_nospec() bounds clamping and LFENCE
+      barriers. D=2: default y upstream, enabled in Fedora. S=2: a kernel-wide
+      mitigation framework (300+ array_index_nospec sites, barrier_nospec,
+      nospec.h helpers, eBPF-verifier nospec sanitization) distinguishes Linux from
+      the ad-hoc single-site lfence of S=1 peers, but coverage relies on manual
+      annotation and gadget discovery is incomplete (see bypass_references), so not
+      S=3. A=2: in-tree, compiler-assisted
+      with nospec.h helpers. T=3: upstream since v4.15 (Jan 2018), 8+ years; CVE-2017-5753.
+    arm64:
+      P: 1
+      D: 2
+      S: 2
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options: []
+        source_files:
+        - arch/arm64/include/asm/barrier.h
+        - include/linux/nospec.h
+        default_state: >-
+          arm64 mitigates Spectre v1 with the architecture-neutral
+          array_index_nospec() masking plus arm64 CSDB speculation barriers
+          (csdb()); these are always compiled in (no dedicated Kconfig).
+      commits: []
+      rationale: >-
+        arm64: P=1 — Spectre v1 mitigated via array_index_nospec() + CSDB barriers.
+        D=2 — always-on. S=2 — covers annotated paths; requires manual annotation.
+        A=2 — compiler-assisted. T=3 — since 2018 (8+ years); CVE-2017-5753.
+  C7a.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_MITIGATION_SPECTRE_V2
+      - CONFIG_MITIGATION_RETPOLINE
+      - CONFIG_MITIGATION_IBPB_ENTRY
+      - CONFIG_MITIGATION_IBRS_ENTRY
+      - CONFIG_MITIGATION_RETHUNK
+      - CONFIG_MITIGATION_UNRET_ENTRY
+      - CONFIG_MITIGATION_RETBLEED
+      - CONFIG_MITIGATION_SPECTRE_BHI
+      - CONFIG_MITIGATION_SRSO
+      - CONFIG_MITIGATION_ITS
+      - CONFIG_MITIGATION_CALL_DEPTH_TRACKING
+      - CONFIG_MITIGATION_VMSCAPE
+      source_files:
+      - arch/x86/kernel/cpu/bugs.c
+      - arch/x86/include/asm/nospec-branch.h
+      - arch/x86/lib/retpoline.S
+      default_state: >-
+        Fedora 44 (7.1.4): the original four CONFIG_MITIGATION_ options =y, plus the
+        post-2022 branch-prediction family now default y -- RETHUNK/UNRET_ENTRY and
+        RETBLEED (CVE-2022-29900/29901), SPECTRE_BHI (BHB injection, selectable via
+        spectre_bhi=), SRSO (AMD speculative RAS overflow, CVE-2023-20569), and ITS
+        (Indirect Target Selection). Retbleed call-depth tracking
+        (CONFIG_MITIGATION_CALL_DEPTH_TRACKING, opt-in via retbleed=stuff) and the
+        VMSCAPE guest->host mitigation (CONFIG_MITIGATION_VMSCAPE, vmscape=,
+        CVE-2025-40300) are also =y. Auto-selects eIBRS/retpoline/IBRS at boot via
+        spectre_v2_select_mitigation(); includes IBPB on context switch and RSB filling.
+    commits:
+    - hash: 76b043848fd22dbf7f8bf3a1452f8c70d557b860
+      date: '2018-01-11'
+      description: 'x86/retpoline: Add initial retpoline support'
+    - hash: da285121560e769cc31797bba6422eea71d473e0
+      date: '2018-01-11'
+      description: 'x86/spectre: Add boot time option to select Spectre v2 mitigation'
+    - hash: 20ffa1caecca4db8f79fe665acdeaa5af815a24d
+      date: '2018-01-25'
+      description: 'x86/speculation: Add basic IBPB (Indirect Branch Prediction Barrier) support'
+    - hash: 80e4c1cd42fff110bfdae8fce7ac4f22465f9664
+      date: '2022-09-15'
+      description: 'x86/retbleed: Add X86_FEATURE_CALL_DEPTH'
+    - hash: ec9404e40e8f36421a2b66ecb76dc2209fe7f3ef
+      date: '2024-03-11'
+      description: 'x86/bhi: Add BHI mitigation knob'
+    - hash: 556c1ad666ad90c50ec8fccb930dd5046cfbecfb
+      date: '2025-08-14'
+      description: 'x86/vmscape: Enable the mitigation'
+    discussions:
+    - https://lore.kernel.org/all/1515707194-20531-1-git-send-email-dwmw@amazon.co.uk/
+    - https://lore.kernel.org/all/20220915111039.092790446@infradead.org/
+    - https://lore.kernel.org/all/cover.1712813475.git.jpoimboe@kernel.org/
+    - https://lore.kernel.org/all/cover.1719381528.git.jpoimboe@kernel.org/
+    rationale: >-
+      P=1: comprehensive Spectre v2 defense with retpoline, eIBRS, IBPB, and RSB filling,
+      now extended by the RETHUNK/RETBLEED, SPECTRE_BHI, SRSO and ITS mitigations that
+      became default-on across the 6.x-7.0 series. D=2: default y, all mitigations enabled
+      in Fedora with auto-selection based on CPU capabilities. S=2: significantly reduces
+      indirect branch prediction attack surface; the kernel now tracks each new
+      branch-prediction variant (BHI, SRSO, ITS) -- adding the spectre_bhi= BHI knob,
+      Retbleed call-depth tracking (an opt-in software return-thunk alternative to IBRS
+      on Skylake), and the VMSCAPE guest->host BHB/IBPB mitigation (CVE-2025-40300) --
+      but residual risk from future microarchitectural discoveries remains. A=2: in-tree
+      with deep integration into CPU setup, entry/exit paths, and context switching. T=3:
+      upstream since v4.15 (Jan 2018), 8+ years; CVE-2017-5715.
+    arm64:
+      P: 1
+      D: 2
+      S: 2
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options:
+        - CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY
+        source_files:
+        - arch/arm64/kernel/proton-pack.c
+        default_state: >-
+          Fedora aarch64: CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY=y (Spectre-BHB,
+          CVE-2022-23960) plus firmware/CSV2-based branch-predictor hardening and
+          KVM workarounds, selected per-core at boot in proton-pack.c. The x86
+          retpoline/IBRS/Retbleed/SRSO family does not apply.
+      commits: []
+      rationale: >-
+        arm64: P=1 — Spectre v2 / branch-history injection mitigated via
+        Spectre-BHB (branch-history clearing on EL0 exception), CSV2 detection and
+        firmware workarounds. D=2 — default-on, auto-selected per-core. S=2 —
+        substantially reduces the indirect-branch surface; residual risk from new
+        variants. A=2 — deep entry/KVM integration. T=3 — since 2018 (8+ years).
+  C7a.3:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_MITIGATION_SSB
+      source_files:
+      - arch/x86/kernel/cpu/bugs.c
+      - arch/x86/include/asm/spec-ctrl.h
+      default_state: >-
+        Fedora: CONFIG_MITIGATION_SSB=y (infrastructure compiled in). Runtime default
+        is PRCTL mode (SPEC_STORE_BYPASS_PRCTL): per-process opt-in via prctl(PR_SET_SPECULATION_CTRL).
+        No process has SSBD enabled by default; each must explicitly request it.
+    commits:
+    - hash: 24f7fc83b9204d20f878c57cb77d261ae825e033
+      date: '2018-04-25'
+      description: 'x86/bugs: Provide boot parameters for the spec_store_bypass_disable mitigation'
+    - hash: a73ec77ee17ec556fe7f165d00314cb7c047b1ac
+      date: '2018-04-29'
+      description: 'x86/speculation: Add prctl for Speculative Store Bypass mitigation'
+    discussions:
+    - https://lore.kernel.org/all/20180529121121.24927-1-marc.zyngier@arm.com/
+    rationale: >-
+      P=1: Spectre v4/SSB mitigated via SSBD MSR control. D=1: CONFIG_MITIGATION_SSB=y
+      compiles in the infrastructure, but runtime default is PRCTL mode (per-process
+      opt-in via prctl); no global SSBD enforcement without explicit request. Consistent
+      with FreeBSD/NetBSD/Fuchsia D=1 scoring. S=2: SSBD effectively prevents speculative
+      store bypass when enabled for a process, but default PRCTL mode means most processes
+      are not protected unless they opt in. A=2: in-tree with MSR-based CPU control.
+      T=3: upstream since v4.17 (2018), 8+ years; CVE-2018-3639.
+    arm64:
+      P: 1
+      D: 1
+      S: 2
+      A: 2
+      T_age: 3
+      T_maintained: 3
+      implementation:
+        config_options: []
+        source_files:
+        - arch/arm64/kernel/proton-pack.c
+        default_state: >-
+          arm64 mitigates Spectre v4/SSB via PSTATE.SSBS (ARMv8.5, hardware) and,
+          where needed, firmware SSBD. Runtime default is prctl-controlled
+          (early_param "ssbd"); no process is SSBD-protected unless it opts in,
+          matching the x86 PRCTL default.
+      commits: []
+      rationale: >-
+        arm64: P=1 — Spectre v4 mitigated via SSBS/SSBD. D=1 — per-process opt-in
+        (prctl) by default. S=2 — effective when enabled. A=2 — proton-pack
+        integration. T=3 — since 2018 (8+ years); CVE-2018-3639.
+  C7a.4:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 2
+    T_maintained: 2
+    implementation:
+      config_options:
+      - CONFIG_MITIGATION_SLS
+      - CONFIG_CC_HAS_SLS
+      source_files:
+      - arch/x86/Kconfig
+      - arch/x86/Makefile
+      - arch/x86/include/asm/linkage.h
+      - arch/x86/kernel/ftrace.c
+      default_state: >-
+        CONFIG_MITIGATION_SLS is default n in upstream Kconfig but enabled by Fedora
+        (CONFIG_MITIGATION_SLS=y). Requires compiler support for -mharden-sls=all
+        (CC_HAS_SLS). When enabled, adds -mharden-sls=all to KBUILD_CFLAGS (arch/x86/Makefile:228-229).
+        In assembly, when CONFIG_MITIGATION_SLS is set without CONFIG_MITIGATION_RETPOLINE,
+        RET is defined as "ret; int3" (linkage.h:47), inserting INT3 after RET to
+        block straight-line speculative execution. When retpoline is active, SLS is
+        implicitly handled by the return thunk. Depends on X86_64.
+    commits:
+    - date: '2021-12-04'
+      description: 'x86/speculation: Add CONFIG_SLS (straight-line speculation mitigation)'
+      hash: e463a09af2f0677b9485a7e8e4e70b396b2ffb6f
+    - date: '2022-06-14'
+      description: 'x86/bugs: Rename CONFIG_SLS to CONFIG_MITIGATION_SLS'
+      hash: e8ec1b6e08a2102d8755ccb06fa26d540f26a2fa
+    discussions:
+    - https://lore.kernel.org/all/170488139109.398.14392416950988911381.tip-bot2@tip-bot2/
+    rationale: >-
+      P=1: CONFIG_MITIGATION_SLS provides compiler and assembly-level barriers against
+      straight-line speculation past unconditional branches. D=2: enabled by default
+      in Fedora (CONFIG_MITIGATION_SLS=y verified in kernel 7.1.4-200.fc44). S=2:
+      effective at blocking speculative execution past RET/JMP via INT3 barriers;
+      however, retpoline (when active) already mitigates most SLS vectors, making
+      standalone SLS primarily useful on CPUs using IBRS instead of retpoline. A=2:
+      in-tree Kconfig option with compiler and assembly integration. T=2: introduced
+      in kernel 5.17 (Feb 2022, ~4 years), renamed in 6.8; sporadic maintenance.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - arch/arm64/Kconfig
+        - arch/arm64/Makefile
+        default_state: >-
+          There is no arm64 kernel straight-line-speculation build option (no
+          CONFIG_MITIGATION_SLS for arm64; the kernel is not built with
+          -mharden-sls). The scored x86 case targets AMD CVE-2021-26341, which does
+          not apply to arm64; arm64 relies on BTI and the absence of that erratum.
+      commits: []
+      rationale: >-
+        arm64: P=0 — the kernel adds no dedicated straight-line-speculation
+        mitigation on arm64 (no -mharden-sls build, no Kconfig), and the scored
+        AMD erratum is x86-only. Not N/A, because the SLS concept does apply to Arm
+        cores; the OS simply ships no kernel build mitigation. D=S=A=T=0.
+  C7b.1:
+    status: xref
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: >-
+      xref → C3b.1: Meltdown is mitigated by KPTI (CONFIG_PAGE_TABLE_ISOLATION).
+      Scored once at C3b.1 to avoid double-counting; this entry exists only to
+      record the cross-reference in the C7 (transient execution) taxonomy.
+  C7b.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_MITIGATION_L1TF
+      source_files:
+      - arch/x86/kernel/cpu/bugs.c
+      - arch/x86/include/asm/pgtable-invert.h
+      - arch/x86/include/asm/pgtable.h
+      default_state: >-
+        Fedora: CONFIG_MITIGATION_L1TF=y (default y, depends CPU_SUP_INTEL). PTE inversion
+        (protnone_mask/flip_protnone_guard) prevents speculative L1D reads of non-present
+        pages. L1D flushed on VM entry. The AUTO boot path selects L1TF_MITIGATION_FLUSH
+        (not FLUSH_NOSMT): smt_mitigations defaults to AUTO, so SMT stays enabled unless
+        mitigations=auto,nosmt or l1tf=full is passed; on hosts with more than MAX_PA/2
+        memory PTE inversion is skipped entirely (bugs.c warns "L1TF mitigation not
+        effective").
+    commits:
+    - hash: 50896e180c6aa3a9c61a26ced99e15d602666a4c
+      date: '2018-06-13'
+      description: 'x86/speculation/l1tf: Increase 32bit PAE __PHYSICAL_PAGE_SHIFT'
+    - hash: 6b28baca9b1f0d4a42b865da7a05b1c81424bd5c
+      date: '2018-06-13'
+      description: 'x86/speculation/l1tf: Protect PROT_NONE PTEs against speculation'
+    - hash: d90a7a0ec83fb86622cd7dae23255d3c50a99ec8
+      date: '2018-07-13'
+      description: 'x86/bugs, kvm: Introduce boot-time control of L1TF mitigations'
+    discussions:
+    - https://lore.kernel.org/all/20180814171337.116023102@linuxfoundation.org/
+    rationale: >-
+      P=1: L1TF mitigated via PTE inversion and conditional L1D flush on VM entry.
+      D=2: default y, enabled in Fedora. S=2: PTE inversion fully covers the
+      host-side non-present-PTE vector, but the default configuration retains
+      sibling-thread exposure — the AUTO path selects L1D flush with SMT left
+      enabled (Documentation/admin-guide/hw-vuln/l1tf.rst: "L1D flush does not
+      prevent the SMT problem"), and PTE inversion is skipped on >MAX_PA/2-memory
+      hosts; removing the sharing primitive (nosmt / l1tf=full) is an opt-in
+      variant, and D and S must describe the same variant (cf. C7c.1 S=2 on the
+      identical SMT reasoning). A=2: in-tree with deep MMU integration. T=3:
+      upstream since v4.19 (Oct 2018), 7+ years; CVE-2018-3615/3620.
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - arch/arm64/kernel/proton-pack.c
+        - arch/arm64/kernel/cpufeature.c
+        default_state: >-
+          L1 Terminal Fault (Foreshadow) is an Intel-specific microarchitectural
+          vulnerability (CONFIG_MITIGATION_L1TF depends on CPU_SUP_INTEL). arm64
+          cores are not affected.
+      rationale: >-
+        arm64: N/A — L1TF/Foreshadow is an Intel uarch bug; arm64 is unaffected, so
+        there is no attack surface to mitigate.
+  C7c.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_MITIGATION_MDS
+      - CONFIG_MITIGATION_TAA
+      - CONFIG_MITIGATION_MMIO_STALE_DATA
+      - CONFIG_MITIGATION_SRBDS
+      - CONFIG_MITIGATION_GDS
+      - CONFIG_MITIGATION_RFDS
+      - CONFIG_MITIGATION_TSA
+      - CONFIG_X86_INTEL_TSX_MODE_OFF
+      source_files:
+      - arch/x86/kernel/cpu/bugs.c
+      - arch/x86/include/asm/nospec-branch.h
+      - arch/x86/entry/entry_64.S
+      - arch/x86/kernel/cpu/tsx.c
+      default_state: >-
+        Fedora 44 (7.1.4): the original three =y, plus the later sampling-class bugs now
+        default y -- SRBDS (special-register buffer), GDS (Gather Data Sampling,
+        CVE-2022-40982), RFDS (Register File Data Sampling, CVE-2023-28746) and TSA
+        (AMD Transient Scheduler Attacks). VERW instruction on kernel exit
+        (CLEAR_CPU_BUFFERS macro) clears CPU internal buffers; shared VERW infrastructure
+        covers MDS, TAA, MMIO stale data and RFDS. CONFIG_X86_INTEL_TSX_MODE_OFF=y
+        disables Intel TSX by default (tsx= override), shrinking the TAA buffer-sampling
+        surface; on CPUs with TSX_FORCE_ABORT the CPUID bits are cleared accordingly.
+    commits:
+    - hash: ed5194c2732c8084af9fd159c146ea92bf137128
+      date: '2019-01-18'
+      description: 'x86/speculation/mds: Add basic bug infrastructure for MDS'
+    - hash: 6a9e529272517755904b7afa639f6db59ddb793e
+      date: '2019-02-18'
+      description: 'x86/speculation/mds: Add mds_clear_cpu_buffers()'
+    - hash: 1b42f017415b46c317e71d41c34ec088417a1883
+      date: '2019-10-23'
+      description: 'x86/speculation/taa: Add mitigation for TSX Async Abort'
+    - hash: 8cb861e9e3c9a55099ad3d08e1a3b653d29c33ca
+      date: '2022-05-19'
+      description: 'x86/speculation/mmio: Add mitigation for Processor MMIO Stale Data'
+    - hash: 95c5824f75f3ba4c9e8e5a4b1a623c95390ac266
+      date: '2019-10-23'
+      description: 'x86/cpu: Add a "tsx=" cmdline option with TSX disabled by default'
+    - hash: 293649307ef9abcd4f83f6dac4d4400dfd97c936
+      date: '2021-06-14'
+      description: 'x86/tsx: Clear CPUID bits when TSX always force aborts'
+    discussions:
+    - https://lore.kernel.org/all/20190515090730.783711447@linuxfoundation.org/
+    - https://lore.kernel.org/all/lsq.1573602477.356392985@decadent.org.uk/
+    - https://lore.kernel.org/all/20220614183725.181834522@linuxfoundation.org/
+    - https://lore.kernel.org/all/cover.2d906c322f72ec1420955136ebaa7a4c5073917c.1623272033.git-series.pawan.kumar.gupta@linux.intel.com/
+    rationale: >-
+      P=1: MDS family mitigated via VERW-based CPU buffer clearing on kernel/user
+      transitions, with the same infrastructure extended to the later sampling bugs
+      (SRBDS, GDS, RFDS, TSA) that became default-on across the 6.x-7.0 series. D=2:
+      default y, enabled in Fedora; VERW automatically inserted at exit paths. S=2: VERW
+      effectively clears microarchitectural buffers but requires SMT-aware scheduling for
+      full protection; SMT not disabled by default. Disabling Intel TSX by default
+      (CONFIG_X86_INTEL_TSX_MODE_OFF / tsx=, plus TSX_FORCE_ABORT CPUID clearing) removes
+      the TAA transactional-abort sampling vector at its source. A=2: in-tree with
+      entry/exit path integration. T=3: upstream since v5.1 (May 2019), 7+ years;
+      CVE-2018-12126/12127/12130.
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - arch/arm64/kernel/proton-pack.c
+        - arch/arm64/kernel/cpufeature.c
+        default_state: >-
+          MDS / TAA / MMIO Stale Data are Intel-specific sampling vulnerabilities
+          (VERW-based buffer clearing, Intel TSX). arm64 cores are not affected.
+      rationale: >-
+        arm64: N/A — microarchitectural data sampling (MDS/TAA/MMIO) is Intel-only;
+        arm64 has no equivalent buffer-sampling surface.
+  C7c.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_MITIGATION_SPECTRE_V2
+      source_files:
+      - arch/x86/kernel/cpu/bugs.c
+      - arch/x86/kernel/process.c
+      - arch/x86/include/asm/spec-ctrl.h
+      default_state: >-
+        Fedora: CONFIG_MITIGATION_SPECTRE_V2=y. STIBP has no separate Kconfig; controlled
+        via spectre_v2_user subsystem. Default auto mode sets STIBP to prctl (per-process
+        opt-in). eIBRS makes STIBP redundant on modern Intel CPUs.
+    commits:
+    - hash: fa1202ef224391b6f5b26cdd44cc50495e8fab54
+      date: '2018-11-25'
+      description: 'x86/speculation: Add command line control for indirect branch speculation'
+    - hash: 7cc765a67d8e04ef7d772425ca5a2a1e2b894c15
+      date: '2018-11-25'
+      description: 'x86/speculation: Enable prctl mode for spectre_v2_user'
+    discussions:
+    - https://lore.kernel.org/all/20181125183328.318175777@linutronix.de/
+    rationale: >-
+      P=1: STIBP (Single Thread Indirect Branch Predictors) restricts cross-thread
+      branch prediction sharing. D=2: infrastructure enabled by default in Fedora;
+      STIBP auto-mode applies per-process control via prctl. S=2: effectively isolates
+      branch prediction state between threads when enabled, but default prctl mode
+      requires application opt-in; eIBRS provides equivalent protection on newer Intel
+      CPUs. A=2: in-tree, integrated into Spectre v2 mitigation framework. T=3: upstream
+      since v4.20 (Dec 2018), 7+ years.
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - arch/arm64/kernel/proton-pack.c
+        - arch/arm64/kernel/cpufeature.c
+        default_state: >-
+          STIBP restricts cross-SMT-thread branch-predictor sharing on x86. The
+          arm64 baseline cores (mobile/embedded and general Fedora aarch64 targets)
+          are single-threaded with no SMT and no STIBP control, so there is no
+          cross-thread surface to isolate.
+      rationale: >-
+        arm64: N/A — STIBP / SMT cross-thread isolation does not apply: the arm64
+        baseline cores have no simultaneous multithreading (a few server arm64
+        parts do have SMT, recorded as a caveat).
+  C1e.6:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "CONFIG_X86_INTEL_MEMORY_PROTECTION_KEYS=y"
+      source_files:
+      - "arch/x86/mm/pkeys.c"
+      - "mm/mprotect.c"
+      - "mm/mmap.c"
+      default_state: >-
+        On MPK-capable x86-64, mmap(PROT_EXEC) and plain
+        mprotect(PROT_EXEC) automatically allocate the mm's execute-only
+        protection key and program PKRU with PKEY_DISABLE_ACCESS. Fedora
+        enables X86_INTEL_MEMORY_PROTECTION_KEYS, but normal ELF loaders map
+        text RX rather than X-only, so applications must request this posture.
+    commits:
+    - hash: 62b5f7d013fc455b8db26cf01e421f4c0d264b92
+      date: '2016-02-12'
+      description: 'mm/core, x86/mm/pkeys: Add execute-only protection keys support'
+    discussions: []
+    rationale: >-
+      P=1: Linux has an automatic MPK-backed execute-only implementation for
+      mappings requested as PROT_EXEC. D=1 because ordinary Fedora ELF text is
+      RX and applications must opt in to an X-only mapping. S=1;
+      decisive property: PKRU denies data reads in hardware,
+      but untrusted userspace can execute WRPKRU to restore read access and the
+      mechanism only operates on MPK-capable CPUs. A=2: integrated into the
+      generic mmap/mprotect path through the x86 pkey override. T_age=3 (2016);
+      T_maintained=3 because the mapping path carried 34 non-trivial commits in
+      mm/mmap.c and 30 in mm/mprotect.c over the 2025-01-21..2026-07-21 review
+      window, so T=3.
+    arm64:
+      P: 1
+      D: 1
+      S: 2
+      A: 2
+      T_age: 3
+      T_maintained: 2
+      implementation:
+        config_options:
+        - "CONFIG_ARM64_EPAN=y"
+        source_files:
+        - "arch/arm64/Kconfig"
+        - "arch/arm64/include/asm/pgtable-prot.h"
+        - "arch/arm64/mm/mmap.c"
+        - "arch/arm64/mm/fault.c"
+        default_state: >-
+          Fedora enables ARM64_EPAN; on CPUs implementing Enhanced PAN, a
+          PROT_EXEC-without-PROT_READ mapping is hardware execute-only. Normal
+          ELF loaders still request RX mappings, so coverage is caller-selected.
+      commits:
+      - hash: 18107f8a2df6bf1c6cac8d0713f757f866d5af51
+        date: '2021-03-12'
+        description: 'arm64: Support execute-only permissions with Enhanced PAN'
+      discussions:
+      - https://lore.kernel.org/all/20210312173811.58284-1-vladimir.murzin@arm.com/
+      rationale: >-
+        P=1: ARM64_EPAN implements hardware execute-only user mappings on
+        eligible CPUs. D=1 because Fedora enables the feature but applications
+        must request X without R and the CPU capability is detected at runtime.
+        S=2; decisive property: page permissions and EPAN
+        enforce X-only mappings in hardware, with gaps on CPUs lacking EPAN and
+        for the ordinary RX loader path. A=2: integrated in arm64 page-table and
+        fault handling. T_age=3 (2021); T_maintained=2 because EPAN permission
+        encoding and virtualization sanitization had sporadic maintenance in
+        the 18-month review window, so T=2.
+  C1e.7:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 1
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "CONFIG_64BIT=y (required)"
+      source_files:
+      - "mm/mseal.c"
+      - "include/uapi/asm-generic/unistd.h"
+      default_state: >-
+        mseal(2) (syscall 462 on x86-64) makes the listed VMAs
+        immutable: subsequent munmap, mprotect, mremap and
+        madvise(MADV_DONTNEED/MADV_FREE/MADV_DONTFORK) on a sealed
+        range return -EPERM. The seal is per-VMA and inherits across
+        fork. Unlike OpenBSD mimmutable, the kernel does NOT auto-seal
+        ELF PT_LOAD segments on execve; sealing is opt-in via the
+        syscall. As of Fedora 41/42, glibc's dynamic loader does not
+        seal text or RELRO segments by default, so the mechanism
+        ships present-but-unused for typical programs. Chrome,
+        Firefox and a few hardening-focused programs call it
+        directly.
+    commits:
+    - hash: "8be7258aad44b5e25977a98db136f677fa6f4370"
+      date: "2024-04-15"
+      description: "mseal: add mseal syscall (introduces sys_mseal in 6.10)"
+    - hash: "44f65d900698278a8451988abe0d5ca37fd46882"
+      date: "2024-08-06"
+      description: "binfmt_elf: mseal address zero (first kernel-side caller)"
+    discussions:
+    - "https://lore.kernel.org/linux-mm/20240415163527.2624553-1-jeffxu@chromium.org/"
+    rationale: >-
+      P=1 (syscall present in upstream 6.10+, Fedora ships it).
+      D=1 because the syscall is available but applications must explicitly
+      opt in; no default Fedora component seals mappings on a typical login.
+      glibc/ld.so, systemd, openssh and the shells do not call mseal. S=2 reflects
+      the strong semantics when invoked (immutable mapping, no
+      remap/munmap/mprotect). A=2 (in-tree syscall, well-integrated
+      with the VMA layer, but no kernel-driven application). T_age=1
+      (~2 years upstream). T_maintained=3 (active patches in
+      2026-03). T = min(T_age, T_maintained) = 1.
+  C1e.8:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - arch/x86/kernel/vmlinux.lds.S
+      - arch/x86/Makefile
+      default_state: >-
+        Linux x86-64 builds (kernel and userspace) do not pad inter-
+        function gaps with int3/ud2 trapsleds. The compiler may
+        emit int3 inside individual function bodies for unreachable
+        slots (clang -fpatchable-function-entry, ENDBR64 with -fcf-
+        protection), but there is no linker-driven trapsled fill
+        between symbols. CONFIG_FINEIBT inserts ENDBR64 markers at
+        function entries; that is scored under C2a.1 (forward-edge
+        CFI), not here.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no equivalent of OpenBSD's link-time trapsled fill.
+      Linker scripts emit zero-byte alignment padding, which
+      decodes as add %al,(%rax) — not a trap.
+  C4.8:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - arch/x86/entry/entry_64.S
+      - arch/x86/entry/syscall_64.c
+      - kernel/seccomp.c
+      - mm/mseal.c
+      default_state: >-
+        The syscall instruction is accepted from any executable user mapping:
+        the entry path (entry_64.S -> do_syscall_64) dispatches on the syscall
+        number without validating the caller PC. seccomp-BPF filters which
+        syscalls with what arguments may be issued, not from where in process
+        memory; mseal(2) seals mappings and pkeys protect data, and neither
+        gates syscall entry by origin. No msyscall(2)/pinsyscalls(2)
+        equivalent exists upstream.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no syscall-origin pinning. A ROP/JOP chain may issue any
+      seccomp-permitted syscall directly from gadgets anywhere in executable
+      memory; the libc-only-entry restriction OpenBSD enforces with
+      pinsyscalls(2) has no upstream Linux counterpart.
+  C5e.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_SOFTLOCKUP_DETECTOR=y (Fedora 44; kernel.softlockup_panic=0 — warn only)
+      - CONFIG_HARDLOCKUP_DETECTOR=y + CONFIG_HARDLOCKUP_DETECTOR_PERF=y (Fedora 44, both x86-64 and aarch64)
+      - CONFIG_DETECT_HUNG_TASK (not set in Fedora 44)
+      - CONFIG_WATCHDOG=y + CONFIG_WATCHDOG_CORE=y (/dev/watchdog framework; needs hardware + watchdogd)
+      - CONFIG_KEXEC=y + CONFIG_CRASH_DUMP=y (kdump infrastructure; crashkernel reservation + service opt-in)
+      - CONFIG_PANIC_ON_OOPS not set; CONFIG_PANIC_TIMEOUT=0 (oops kills task and continues; panic halts, no auto-reboot)
+      source_files:
+      - kernel/watchdog.c
+      - kernel/watchdog_perf.c
+      - kernel/hung_task.c
+      - kernel/panic.c
+      - drivers/watchdog/watchdog_core.c
+      default_state: >-
+        Fedora 44 (kernel 7.0): soft- and hard-lockup detectors run by
+        default on every CPU (perf-NMI backend on both x86-64 and aarch64)
+        but only warn (softlockup_panic=0, hardlockup_panic off); RCU stall
+        warnings are default-on. The hung-task detector is compiled out.
+        An oops kills the offending task and the system continues
+        (panic_on_oops=0); panic_timeout=0 means no automatic reboot on
+        panic. Recovery facets are opt-in: kdump (KEXEC+CRASH_DUMP built,
+        but crashkernel= reservation and the kdump service must be
+        enabled), /dev/watchdog hardware watchdog needs watchdogd, and
+        panic/softlockup/hardlockup auto-reboot need sysctl opt-in.
+    commits:
+    - hash: dc009d92435f99498cbc579ce76bf28e837e2c14
+      date: '2005-06-25'
+      description: '[PATCH] kexec: add kexec syscalls (kdump foundation)'
+    - hash: 8446f1d391f3d27e6bf9c43d4cbcdac0ca720417
+      date: '2005-09-06'
+      description: '[PATCH] detect soft lockups'
+    - hash: e162b39a368f0401e41b558f430c354d12a85b37
+      date: '2009-01-15'
+      description: 'softlockup: decouple hung tasks check from softlockup detection'
+    - hash: 58687acba59266735adb8ccd9b5b9aa2c7cd205b
+      date: '2010-05-07'
+      description: 'lockup_detector: Combine nmi_watchdog and softlockup detectors'
+    - hash: 1f423c905a6b43b493df1b259e6e6267e5624e62
+      date: '2023-05-19'
+      description: 'watchdog/hardlockup: detect hard lockups using secondary (buddy) CPUs'
+    discussions:
+    - https://lkml.kernel.org/r/20230519101840.v5.14.I6bf789d21d0c3d75d382e7e51a804a7a51315f2c@changeid
+    rationale: >-
+      P=1: rich availability primitives — per-CPU soft/hard-lockup
+      detectors, hung-task detector (option), /dev/watchdog framework,
+      kdump crash capture, panic auto-reboot knobs. D=2: the detection
+      facet is enabled by default in Fedora (lockup detectors + RCU stall
+      warnings on every boot), while recovery facets (kdump, watchdogd,
+      panic_timeout/panic_on_oops) require opt-in — detection-on-by-default
+      clears the D=2 bar that OpenBSD's opt-in watchdog (D=1) does not.
+      S=2: stronger than bare reboot-on-panic — lockups are detected
+      per-CPU, an oops kills only the offending task (rough containment,
+      though unsound: held locks/state may be corrupted), and kdump gives
+      forensic capture plus automatic reboot when configured; still no
+      principled per-fault containment in a monolithic kernel (cf.
+      microkernel component restart). A=2: in-tree, well-integrated
+      monitoring/recovery infrastructure, but bolt-on self-monitoring, not
+      an architectural fault-isolation design. T_age=3 (softlockup
+      detector and kexec/kdump 2005, perf-NMI unification 2010);
+      T_maintained=3 (watchdog.c/hung_task.c actively developed through
+      2025-2026, e.g. buddy hardlockup detector 2023, hung-task blocker
+      tracking 2025).
+  C5e.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_CFS_BANDWIDTH=y (Fedora 44; cgroup v2 cpu.max quota/period)
+      - CONFIG_CGROUP_SCHED=y + CONFIG_FAIR_GROUP_SCHED=y (cpu.weight proportional shares)
+      - CONFIG_RT_GROUP_SCHED not set (no per-cgroup RT budgets)
+      - kernel.sched_rt_runtime_us=950000 default (RT class capped at 95% per second)
+      - SCHED_DEADLINE EDF + admission control (unconditional, no Kconfig)
+      - RLIMIT_CPU per-process CPU-seconds cap (unconditional)
+      source_files:
+      - kernel/sched/fair.c
+      - kernel/sched/core.c
+      - kernel/sched/deadline.c
+      - kernel/sched/rt.c
+      default_state: >-
+        Fedora 44 mounts cgroup v2 with the cpu controller delegated by
+        systemd: every service/user session is a cgroup that can be capped
+        with cpu.max (CFS bandwidth: quota/period, hierarchical) and
+        weighted with cpu.weight; no caps are imposed by default (cpu.max
+        = max). The RT class has a real default-on starvation guard:
+        SCHED_FIFO/RR tasks are collectively capped at
+        sched_rt_runtime_us/sched_rt_period_us = 950ms/1s (since ~6.12
+        implemented via the deadline-server (fair_server) mechanism, which
+        guarantees the remaining 5% to SCHED_OTHER). SCHED_DEADLINE
+        performs EDF admission control, rejecting reservations that would
+        oversubscribe the CPU. RLIMIT_CPU (default unlimited) delivers
+        SIGXCPU/SIGKILL on CPU-seconds overrun.
+    commits:
+    - hash: fa85ae2418e6843953107cd6a06f645752829bc0
+      date: '2008-01-25'
+      description: 'sched: rt time limit (RT throttling, default 950ms/1s)'
+    - hash: ab84d31e15502fb626169ba2663381e34bf965b2
+      date: '2011-07-21'
+      description: 'sched: Introduce primitives to account for CFS bandwidth tracking'
+    - hash: aab03e05e8f7e26f51dee792beddcb5cca9215a5
+      date: '2013-11-28'
+      description: 'sched/deadline: Add SCHED_DEADLINE structures & implementation'
+    - hash: 0d5936344f30aba0f6ddb92b030cb6a05168efe6
+      date: '2017-09-25'
+      description: 'sched: Implement interface for cgroup unified hierarchy (cpu.max/cpu.weight)'
+    discussions: []
+    rationale: >-
+      P=1: genuine in-kernel CPU-budget enforcement on three levels —
+      hierarchical cgroup v2 cpu.max bandwidth caps, the default-on RT
+      starvation guard (95%/s cap on the entire RT class, enforced via
+      deadline servers), and SCHED_DEADLINE EDF admission control that
+      rejects infeasible reservations; plus ancestral RLIMIT_CPU. D=2: all
+      machinery is compiled in and active in the Fedora default boot
+      (systemd manages the cpu controller; the RT guard has a real
+      default-on budget), though per-workload caps are admin/systemd
+      policy. S=2: bandwidth control significantly raises the bar against
+      CPU-starvation DoS; known gaps — cpu.max enforces at period
+      granularity (bursts within a period), kernel/softirq time done on a
+      task's behalf is not fully charged to it, and with RT_GROUP_SCHED
+      off the RT class has no per-cgroup subdivision (any rtprio-capable
+      user can consume the full 95% RT budget). A=2: in-tree, config-gated
+      scheduler features (same machinery as C4.6, which also scores A=2);
+      not a temporal-isolation architecture like seL4 MCS. T_age=3 (RT
+      throttling 2008, CFS bandwidth 2011, SCHED_DEADLINE 2014);
+      T_maintained=3 (EEVDF/deadline-server rework landed 2024-2025;
+      fair.c/deadline.c among the most active scheduler files).
+  C5e.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_MEMCG=y (Fedora 44; memory.max/memory.high + per-cgroup OOM control)
+      - CONFIG_CGROUP_PIDS=y (pids.max fork-bomb cap)
+      - CONFIG_CGROUPS=y (v2 unified hierarchy, systemd-managed)
+      - RLIMIT_NPROC/NOFILE/AS/MEMLOCK per-process rlimits (unconditional; pam/systemd set defaults)
+      - kernel.threads-max, ucounts per-user-namespace caps (unconditional)
+      source_files:
+      - mm/memcontrol.c
+      - kernel/cgroup/pids.c
+      - kernel/sys.c
+      - kernel/ucount.c
+      default_state: >-
+        Fedora 44: cgroup v2 is the only hierarchy; systemd places every
+        service/scope in a cgroup with memory and pids controllers
+        enabled. memory.max/memory.high give hierarchical byte-granular
+        caps with kernel-memory (slab/sock) accounting included in v2;
+        per-cgroup OOM killing contains memory exhaustion to the
+        offending group. pids.max bounds task counts (systemd sets
+        TasksMax=80% of kernel.pid_max for the system slice and 10240 per
+        user slice by default — a real default-on fork-bomb cap).
+        Per-process RLIMIT_* (NOFILE soft 1024, NPROC from systemd
+        defaults, MEMLOCK 8 MiB) and per-user-namespace ucounts
+        (max_user_namespaces etc.) are enforced unconditionally. Disk
+        quotas (VFS quota) are available but opt-in.
+    commits:
+    - hash: 8cdea7c05454260c0d4d83503949c358eb131d17
+      date: '2008-02-07'
+      description: 'Memory controller: cgroups setup (memcg)'
+    - hash: 241994ed8649f7300667be8b13a9e04ae04e05a1
+      date: '2015-02-11'
+      description: 'mm: memcontrol: default hierarchy interface for memory (memory.max/high/low)'
+    - hash: 49b786ea146f69c371df18e81ce0a2d5839f865c
+      date: '2015-06-09'
+      description: 'cgroup: implement the PIDs subsystem (pids.max)'
+    discussions: []
+    rationale: >-
+      P=1: layered resource-exhaustion enforcement — hierarchical memcg
+      byte caps with v2 kernel-memory accounting and per-cgroup OOM,
+      pids.max against fork bombs, per-process rlimits, per-user-namespace
+      ucounts, and global thresholds (threads-max, pipe-user-pages).
+      D=2: enabled and actively used by default — every Fedora
+      service/user session runs under systemd-managed memory and pids
+      controllers with real default TasksMax caps; byte-granular memory
+      caps per workload remain admin policy. S=2: hierarchical,
+      kmem-accounted quotas substantially raise the DoS bar over flat
+      per-process rlimits (cf. OpenBSD S=2 with flat-only enforcement —
+      Linux adds hierarchy but also a bigger surface); known residuals:
+      kernel work not attributable to the initiating cgroup (Houdini's
+      Escape, CCS 2019), OOM-killer gaming, and unaccounted global
+      structures still allow targeted exhaustion. A=2: in-tree
+      config-gated controllers over core rlimit machinery (consistent
+      with C4.6 A=2 for the isolation facet of the same cgroup
+      machinery; C5e.3 scores the availability facet). T_age=3 (memcg
+      2008, v2 interface + pids 2015); T_maintained=3 (memcontrol.c among
+      the most actively maintained mm files through 2026).
+  C7d.1:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - CONFIG_X86_CPU_RESCTRL=y (Fedora 44 x86-64)
+      - CONFIG_RESCTRL_FS=y + CONFIG_ARCH_HAS_CPU_RESCTRL=y (arch-neutral fs since 6.16)
+      - requires RDT/PQOS-capable CPU + mount -t resctrl + schemata configuration (no default policy)
+      source_files:
+      - fs/resctrl/rdtgroup.c
+      - arch/x86/kernel/cpu/resctrl/core.c
+      default_state: >-
+        Fedora 44 x86-64 compiles resctrl in, but it is inert until the
+        resctrl filesystem is mounted and partitions (schemata) are
+        configured by the administrator on CAT/MBA-capable hardware
+        (Intel RDT, AMD PQOS). Way-based L3 (and on some parts L2) cache
+        allocation, approximate memory-bandwidth allocation (MBA), and
+        occupancy/bandwidth monitoring (CMT/MBM) are supported. There is
+        no page-colouring fallback for hardware without CAT and no
+        default partitioning of any shared microarchitectural state.
+    commits:
+    - hash: 5ff193fbde20df5d80fec367cea3e7856c057320
+      date: '2016-10-28'
+      description: 'x86/intel_rdt: Add basic resctrl filesystem support'
+    - hash: 05b93417ce5b924c6652de19fdcc27439ab37c90
+      date: '2017-04-07'
+      description: 'x86/intel_rdt/mba: Add primary support for Memory Bandwidth Allocation (MBA)'
+    discussions: []
+    rationale: >-
+      P=1: resctrl is a real, hardware-backed partitioning mechanism for
+      shared microarchitectural state — way-based cache allocation (CAT)
+      plus bandwidth allocation (MBA) — usable to separate distrusting
+      workloads' timing footprints. D=1: compiled into the Fedora kernel
+      but inert until mounted and configured; no default partitioning.
+      S=1: raises the bar but is far from principled time protection —
+      way-based allocation does not partition the TLB, interconnect,
+      DRAM row buffers or L1/L2 on most parts, way occupancy still leaks,
+      MBA is approximate throttling, and there is no flush-on-switch or
+      page-colouring fallback (cf. seL4 time protection, Ge et al.
+      EuroSys 2019). A=2: in-tree option. T_age=3 (CAT/resctrl mainline
+      4.10, 2016; MBA 2017); T_maintained=3 (resctrl split into
+      arch-neutral fs/resctrl in 2025 to host ARM MPAM; AMD ABMC and
+      Intel AET enabling through 2026).
+    arm64:
+      P: 1
+      D: 1
+      S: 1
+      A: 2
+      T_age: 1
+      T_maintained: 3
+      implementation:
+        config_options:
+        - CONFIG_ARM64_MPAM not set (Fedora 44 aarch64) — requires kernel rebuild
+        - CONFIG_RESCTRL_FS (selected by ARM64_MPAM when enabled)
+        source_files:
+        - drivers/resctrl/mpam_devices.c
+        - drivers/resctrl/mpam_resctrl.c
+        - drivers/acpi/arm64/mpam.c
+        default_state: >-
+          The arm64 analogue of CAT/MBA is MPAM (Memory System Resource
+          Partitioning and Monitoring, ARMv8.4+): cache-portion and
+          bandwidth partitioning exposed through the same resctrl
+          filesystem. The arm_mpam driver landed in mainline between
+          2025-11 and 2026-03 (kernel 7.0), but Fedora 44 aarch64 ships
+          with CONFIG_ARM64_MPAM disabled, so the mechanism requires a
+          custom kernel build plus MPAM-capable silicon and firmware
+          (ACPI MPAM table) — rare outside server SoCs.
+      commits:
+      - hash: f04046f2577a5c76167333ca99d3903ee5331ba0
+        date: '2025-11-19'
+        description: 'arm_mpam: Add probe/remove for mpam msc driver and kbuild boiler plate'
+      - hash: 09e61daf8e96b9bdb04dd112bdecf9382fd3f919
+        date: '2026-03-13'
+        description: 'arm_mpam: resctrl: Add boilerplate cpuhp and domain allocation'
+      rationale: >-
+        arm64: P=1 — MPAM resctrl support is upstream in the evaluated
+        kernel generation (7.0). D=1 — in-tree but not built in the
+        Fedora 44 aarch64 kernel (rebuild required; same treatment as
+        C3c.3 ZERO_CALL_USED_REGS), and MPAM hardware+firmware support
+        is scarce. S=1 — same partial-partitioning class as x86 CAT/MBA:
+        portion/bandwidth control without TLB/interconnect coverage or
+        flush-on-switch. A=2 — in-tree option. T_age=1 (mainline
+        2025-11–2026-03, <1 year); T_maintained=3 (active enabling
+        series through 2026) → T=1.

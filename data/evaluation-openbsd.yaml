@@ -1,0 +1,2780 @@
+# yaml-language-server: $schema=schema/evaluation.schema.json
+# OpenBSD kernel hardening evaluation.
+# Scores for x86-64 primary architecture.
+os: openbsd
+schema_version: 1
+baseline_class: shipped-default
+default_config: "OpenBSD 7.9 @ c787a87f71a1643c3c1b4dbdf0cb6744927ac4e1, amd64 GENERIC kernel"
+
+mechanisms:
+  C1a.1:
+    P: 1
+    D: 3
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "Kernel: -fret-protector (compiler default, replaces SSP)"
+      - "Userland: -fstack-protector-strong (SSPStrong in OpenBSD clang)"
+      source_files:
+      - "lib/libc/sys/stack_protector.c"
+      - "sys/arch/amd64/include/asm.h"
+      - "gnu/llvm/clang/lib/Driver/ToolChains/Clang.cpp"
+      default_state: >-
+        On x86-64, OpenBSD's clang enables RETGUARD (-fret-protector)
+        by default for kernel code, which REPLACES traditional SSP
+        canaries. RETGUARD XORs the return address with a per-function
+        random cookie; stack corruption that reaches the return address
+        area is detected. Userland uses standard SSP (-fstack-protector-
+        strong via SSPStrong default in OpenBSD's clang). Userland
+        canary in __guard_local (.openbsd.randomdata section).
+    commits:
+    - hash: "e688c2b0648a80551cf7353d9f455c7cbb98f13c"
+      date: "2018-06-06"
+      description: "Add RETGUARD to clang for amd64: per-function random cookies protect function return instructions (default-on for x86-64)"
+    - hash: "b6cd93857594bceac7f2734519d1f90ef2f5d7b8"
+      date: "2018-07-01"
+      description: "Add retguard asm macros"
+    discussions: []
+    rationale: >-
+      Kernel uses RETGUARD instead of traditional SSP canaries.
+      RETGUARD detects stack buffer overflows that corrupt the return
+      address area (per-function XOR cookies). Weaker than SSP for
+      overflows that only corrupt local variables without reaching
+      the return address, but stronger for return address protection.
+      Userland has standard SSP. S=2 (known bypass via info-leak).
+      D=3 per the disable-path convention: RETGUARD is the unconditional
+      compiler default for the single GENERIC kernel (Makefile.amd64 applies
+      -fno-ret-protector only to explicitly exempted files) and no Kconfig-style
+      option, boot parameter or sysctl can turn it off.
+      RETGUARD legitimately fills both C1a.1 and C2b.1
+      because the rows score distinct properties (overflow detection vs
+      backward-edge integrity) of one primitive; S is assessed per-property.
+      T_age=3 (RETGUARD default-on since 2018), but T_maintained=1: the
+      dedicated stack-protector files saw zero mechanism-relevant commits in
+      the 2025-01-21 - 2026-07-21 maintenance window
+      (lib/libc/sys/stack_protector.c last edited 2017-11-29), so the row is
+      dormant and T = min(3,1) = 1.
+  C1a.2:
+    P: 1
+    D: 3
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/uvm/uvm_glue.c"
+      - "sys/uvm/uvm_map.c"
+      - "sys/uvm/uvm_mmap.c"
+      - "sys/arch/amd64/include/param.h"
+      default_state: >-
+        Kernel stacks include true unmapped guard pages created via
+        pmap_kremove(). MAP_STACK flag enforces that all userland
+        stacks must be in MAP_STACK-flagged regions; SP register is
+        validated against MAP_STACK memory on syscall entry and page
+        faults. This is a unique OpenBSD enforcement mechanism.
+    commits:
+    - hash: "9898077bee6a54ec1fb6e74af9bae14ad8b70ede"
+      date: "2025-07-07"
+      description: "Add MI mechanism for an unmapped guard page between PCB and kernel stack; switch amd64 over and enable on arm64/powerpc64/riscv64"
+    - hash: "73df96d47c0a83e272643e8b1273805ee6983dec"
+      date: "2024-10-24"
+      description: "Stop leaking kernel stack guard pages"
+    discussions: []
+    rationale: >-
+      True unmapped guard pages for kernel stacks via pmap_kremove().
+      MAP_STACK enforcement validates SP on syscall/pagefault for
+      userland stacks. S=2 (moderate: strong guard pages but no heap
+      guard coverage in production).
+      D=3 per the disable-path convention: the pmap_kremove() kernel-stack
+      guard pages and MAP_STACK sp-validation on syscall entry are
+      unconditional in GENERIC; no sysctl or boot option disables them.
+  C1a.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/copy.S"
+      - "sys/arch/amd64/amd64/cpu.c"
+      default_state: >-
+        copyin/copyout validate user addresses against
+        VM_MAXUSER_ADDRESS. SMAP enforcement via SMAP_STAC/SMAP_CLAC
+        codepatch macros restricts kernel access to user memory to
+        narrow copy windows. Copy functions also protected by
+        RETGUARD. LVI mitigation via lfence added in 2020.
+    commits:
+    - hash: "ab8e1d1048f427ce7eddea1eb397e25b91e49b66"
+      date: "2012-10-31"
+      description: "Add support for Intel SMAP feature"
+    - hash: "6e3bbdbc7ca6fb202c4c93125fdee5dce85a6c41"
+      date: "2017-09-16"
+      description: "copyin(9) family should return EFAULT for all memory protection issues"
+    - hash: "67ca69ecacf46c8d970d09c75497d3681d2aa2b8"
+      date: "2020-03-11"
+      description: "Load-Value-Injection mitigation using lfence"
+    discussions: []
+    rationale: >-
+      copyin/copyout in copy.S validate user addresses against
+      VM_MAXUSER_ADDRESS before access. SMAP STAC/CLAC macros restrict
+      kernel-user memory access windows. Copy functions also protected
+      by RETGUARD. No Linux-style CONFIG_HARDENED_USERCOPY slab-cache
+      object size validation. S=2.
+  C1a.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "include/string.h"
+      - "include/stdlib.h"
+      - "gnu/llvm/clang/include/clang/Basic/Attr.td"
+      default_state: >-
+        OpenBSD libc headers (string.h, stdlib.h, etc.) carry
+        systematic __attribute__((__bounded__(...))) annotations on
+        buffer-handling APIs — an OpenBSD-pioneered mechanism
+        intended as an analog to glibc's _FORTIFY_SOURCE. The
+        annotations describe parameter sizes so the compiler can
+        warn on static-size buffer overflows. However, OpenBSD's
+        bundled clang declares the attribute as IgnoredAttr
+        (Bounded : IgnoredAttr in Attr.td), meaning clang parses the
+        attribute but does not act on it. Result: no compile-time
+        buffer overflow detection is active in the production build
+        toolchain. No _FORTIFY_SOURCE define in share/mk/ or
+        sys/conf/. No kernel FORTIFY_SOURCE support.
+    commits: []
+    discussions: []
+    rationale: >-
+      OpenBSD intended __bounded__ attribute annotations to provide
+      compile-time buffer overflow detection (its analog to glibc's
+      _FORTIFY_SOURCE), but clang treats the attribute as
+      IgnoredAttr — no warnings are emitted. Effectively absent in
+      the production toolchain. P=0 because the *active* mechanism
+      count is zero, not because the design was missing. Mitigated
+      differently, not equivalently: the
+      project-wide strlcpy/strlcat API discipline (Miller & de Raadt,
+      USENIX '99) bounds writes by construction, but that is runtime
+      truncation semantics — not compile-time detection and not
+      FORTIFY-style fail-stop runtime checking — and API discipline
+      is not a scorable mechanism row. No credible developer
+      rejection of FORTIFY_SOURCE exists in the marc.info archives
+      (checked 2026-07); the __bounded__ checker simply died in the
+      2017 gcc-to-clang switch and was never replaced. Related but
+      distinct protections are credited at their own rows (RETGUARD
+      C1a.1, allocator hardening C1b.2).
+  C1a.5:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "option KUBSAN (kernel config)"
+      - "MALLOC_OPTIONS=C (userland canaries)"
+      - "MALLOC_OPTIONS=J (userland junk fill)"
+      - "MALLOC_OPTIONS=F (userland freeguard)"
+      source_files:
+      - "lib/libc/stdlib/malloc.c"
+      - "sys/kern/subr_pool.c"
+      - "sys/kern/subr_poison.c"
+      default_state: >-
+        KUBSAN available as kernel config option for undefined behavior
+        detection. Userland malloc has extensive diagnostics: canaries
+        (C), junk fill (J), freeguard (F), leak detection (D). Kernel
+        pool allocator has built-in poison checks (pool_debug=1 by
+        default in GENERIC). No KASAN equivalent for production.
+    commits:
+    - hash: "286735181e96e624bfb5a61f2ba75479ca1259d2"
+      date: "2019-03-18"
+      description: "Add kubsan(4), an undefined behavior sanitizer for the kernel"
+    - hash: "9545b26b0c679a3b3b14180af131c31eaf6c295a"
+      date: "2015-12-09"
+      description: "malloc: optionally add random canaries to the end of an allocation ('C' option); check junk intact on delayed free"
+    discussions: []
+    rationale: >-
+      KUBSAN and allocator diagnostics are available, and pool poisoning is
+      default-on (pool_debug=1), but there is no KASAN-equivalent spatial or
+      temporal instrumentation. S=1: these are selected
+      diagnostic checks with broad memory-safety blind spots. D=1 because
+      KUBSAN and the stronger malloc diagnostics remain opt-in/debug features.
+  C1a.6:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/include/pmap.h"
+      - "sys/arch/amd64/amd64/pmap.c"
+      default_state: >-
+        ARM MTE is not available on x86-64 architecture. OpenBSD
+        does support arm64 but MTE hardware is not widely deployed.
+    commits: []
+    discussions: []
+    rationale: >-
+      Hardware memory tagging (ARM MTE) not applicable on x86-64
+      primary evaluation target.
+  C1a.7:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "-DKUBSAN in IDENT (Makefile.amd64 adds -fsanitize=undefined -fno-wrapv under clang)"
+      - "kubsan keyword gates kern/subr_kubsan.c (sys/conf/files)"
+      source_files:
+      - "sys/kern/subr_kubsan.c"
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      - "sys/conf/files"
+      default_state: >-
+        KUBSAN is OpenBSD's kernel undefined-behavior sanitizer
+        (kubsan(4)). When the kernel is built with -DKUBSAN, clang's
+        -fsanitize=undefined instruments array-index accesses; the
+        out-of-bounds handler __ubsan_handle_out_of_bounds() in
+        subr_kubsan.c records the array type, index type, and offending
+        index and reports "out of bounds: index N is out of range".
+        This is OpenBSD's analog to Linux UBSAN_BOUNDS array-index
+        instrumentation (it also covers shift-out-of-bounds). KUBSAN is
+        a build option only: it is wired in Makefile.amd64 and gated by
+        the kubsan keyword in sys/conf/files, but is NOT enabled in the
+        amd64 GENERIC kernel config. Reports are printed, not trapped
+        (no UBSAN_TRAP equivalent). There is no __counted_by-style
+        flexible-array hardening.
+    commits:
+    - hash: "286735181e96e624bfb5a61f2ba75479ca1259d2"
+      date: "2019-03-18"
+      description: "Add kubsan(4), an undefined behavior sanitizer for the kernel"
+    - hash: "202e2461a0d9a8e3abe70503423141a09ea1c4f4"
+      date: "2024-09-06"
+      description: "Fix KUBSAN by adding invalid builtin detection, as needed by current clang"
+    discussions: []
+    rationale: >-
+      KUBSAN implements UBSAN-style array-index bounds checking via the
+      __ubsan_handle_out_of_bounds handler, satisfying the C1a.7 intent.
+      It is a debug/opt-in build option (-DKUBSAN), absent from GENERIC,
+      so D=1. S=1: the same recoverable KUBSAN
+      array-index diagnostic used by the BSD peers reports rather than
+      trapping and covers only compiler-visible accesses. A=2 (in-tree
+      kernel build option). P=1.
+      T_age=3 (first landed 2019), but T_maintained=1: subr_kubsan.c
+      saw zero commits in the Dec 2024 - Jun 2026 window (last edit
+      2024-09-06), so the mechanism is dormant. T = min(3,1) = 1.
+  C1b.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "pool_debug=1 (default in GENERIC kernel)"
+      source_files:
+      - "sys/kern/subr_pool.c"
+      - "sys/kern/subr_poison.c"
+      default_state: >-
+        Pool allocator implements comprehensive poisoning on free.
+        poison_mem() writes address-dependent patterns (POISON0=
+        0xdeadbeef, plus inverted patterns). poison_check() verifies
+        on reuse, detecting use-after-free. pool_debug=1 by default
+        in GENERIC kernel enables poisoning for all pool allocations.
+        Per-CPU cache items also tracked via POOL_CACHE_ITEM_POISONED.
+    commits:
+    - hash: "656ea6a3c6703b6dfbc43c4cd9d7865d2894b26a"
+      date: "2013-03-31"
+      description: "Replace pool debug magic with shared mem poison code"
+    discussions: []
+    rationale: >-
+      Pool allocator poisoning with address-dependent patterns
+      (POISON0/inverted variants), enabled by default via pool_debug=1.
+      Detects UAF on reuse. Detection not prevention (attacker can
+      still exploit timing window). S=2.
+  C1b.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "pool_debug=1 (default in GENERIC kernel)"
+      source_files:
+      - "sys/kern/subr_pool.c"
+      - "sys/kern/subr_poison.c"
+      - "lib/libc/stdlib/malloc.c"
+      default_state: >-
+        Pool page headers include randomized magic (ph_magic via
+        arc4random_buf()). Pool items validated via XOR-encoded
+        pi_magic = (u_long)(pi) ^ ph_magic. Double-free detection
+        checks if item already on free list ("double pool_put" panic).
+        Per-CPU cache items include POOL_CACHE_ITEM_NITEMS_POISON
+        tracking. Userland malloc supports canaries and guard pages.
+    commits:
+    - hash: "094d005d3a7e40bbafdd82ec22ad5436da735c7a"
+      date: "2013-06-05"
+      description: "Blow up sooner rather than later for double pool_put (double-free detection)"
+    - hash: "497068d7ea291638196daf252277d7ee38f0812d"
+      date: "2014-09-22"
+      description: "Rework the pool code for mpsafety; page-header magic ph_magic now randomized via arc4random_buf"
+    - hash: "dfa20e7121d673ffdb7da23611ec46d3d3dea48c"
+      date: "2014-10-10"
+      description: "Massage the pool item header and pool item magic words: XOR-encoded pi_magic via POOL_IMAGIC(ph, pi)"
+    discussions: []
+    rationale: >-
+      Randomized pool magic (arc4random), XOR-encoded item integrity
+      (pi_magic), double-free detection, per-CPU cache poisoning.
+      Comprehensive metadata protection enabled by default. S=2
+      (robust detection but not hardware-enforced).
+  C1b.3:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "option DIAGNOSTIC (default in GENERIC)"
+      source_files:
+      - "sys/sys/refcnt.h"
+      - "sys/kern/kern_synch.c"
+      default_state: >-
+        refcnt_rele() has KASSERT(refs != ~0) detecting underflow
+        (wrap to UINT_MAX). refcnt_take() has KASSERT(refs > 1)
+        detecting take-after-free. DIAGNOSTIC is enabled in GENERIC
+        kernel (sys/conf/GENERIC:12), so KASSERTs are active in
+        production. Detection via kernel panic, not saturation or
+        prevention. No equivalent to Linux CONFIG_REFCOUNT_FULL
+        saturating semantics.
+    commits:
+    - hash: "123296c46b0f16efc90d91f53e9d716522cb4650"
+      date: "2015-09-11"
+      description: "Introduce a wrapper around reference counts called refcnt"
+    - hash: "7ca3eedf3d9ae32fa953a265ec06973e41997111"
+      date: "2016-01-15"
+      description: "KASSERT on refcnt underflow"
+    discussions: []
+    rationale: >-
+      KASSERT-based underflow/use-after-free detection in refcnt API.
+      Active in production (DIAGNOSTIC default-on). Panics on
+      detection rather than saturating. D=2 (DIAGNOSTIC default).
+      S=1 (detection via panic, not prevention/saturation).
+  C1b.4:
+    P: 1
+    D: 3
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/subr_pool.c (pi_magic validated in pool_do_get on every allocation in the production kernel at :729 and in pool_do_put on every free at :993; assigned per item, header-address-keyed, at :962)"
+      - "sys/sys/queue.h:345-369 (XSIMPLEQ: free-list next pointers XOR-encoded with a per-head arc4random cookie)"
+      default_state: >-
+        Pool free lists — the kernel's primary unlink-attack surface — carry
+        two unconditional integrity layers in the production GENERIC kernel:
+        every pool item stores pi_magic (keyed to the page header address)
+        which pool_do_get/pool_do_put validate on every allocation and free,
+        panicking on mismatch; and the free list itself is an XSIMPLEQ whose
+        next pointers are XOR-encoded with a per-head arc4random() cookie, so
+        a corrupted or attacker-forged pointer decodes to a wild address and
+        faults instead of being followed. Neither layer has a disable knob
+        (kern.pool_debug gates junk poisoning only). General-purpose
+        LIST/TAILQ macros outside the pool allocator carry no validation.
+    commits:
+    - hash: "fe0ccc0bec445938d8423a6003fdd0f2cc4c11e0"
+      date: "2013-05-03"
+      description: "add an xor cookie variant of simpleq (XSIMPLEQ: XOR-encoded pointers seeded from arc4random, used for pool free lists)"
+    discussions: []
+    rationale: >-
+      FreeBSD
+      (INVARIANTS queue asserts) and NetBSD (QUEUEDEBUG under DIAGNOSTIC)
+      hold P=1 D=1 for list checking that is compiled out of their default
+      kernels; OpenBSD's pool-layer protection is unconditional in GENERIC
+      and covers the free lists that unlink-style exploits actually target,
+      matching the cross-BSD anchor. P=1: pi_magic
+      item validation plus XSIMPLEQ XOR-encoded next pointers are genuine
+      list-integrity hardening, not just poisoning. D=3 per the
+      disable-path convention (both layers unconditional; no knob). S=1:
+      obfuscation-and-detect grade — pointers are XOR-hidden and magic
+      mismatches panic, but there is no prev/next relationship validation
+      on general kernel LIST/TAILQ users (Linux CONFIG_LIST_HARDENED
+      grade), so coverage is allocator-scoped. A=2 (in-tree allocator
+      layer). T=2 (T_age=3: XSIMPLEQ since 2013; T_maintained=2: the pool
+      and queue files carried only a handful (1-10) of mechanism-relevant
+      commits in the 2025-01-21 - 2026-07-21 maintenance window).
+  C1b.5:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/include/pmap.h"
+      - "sys/arch/amd64/amd64/pmap.c"
+      default_state: >-
+        ARM MTE temporal mode not available on x86-64 architecture.
+    commits: []
+    discussions: []
+    rationale: >-
+      Hardware memory tagging (ARM MTE temporal mode) not applicable
+      on x86-64 primary evaluation target.
+  C1c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      default_state: >-
+        No -ftrivial-auto-var-init=zero or equivalent compiler flag
+        in kernel or userland build system. No automatic variable
+        initialization mechanism. OpenBSD relies on explicit
+        initialization by developers rather than compiler enforcement.
+    commits: []
+    discussions: []
+    rationale: >-
+      No compiler-enforced automatic variable initialization. P=0.
+  C1c.2:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "pool_debug=1 (junk fill, not zero fill)"
+      - "MALLOC_OPTIONS=Z (userland zero fill)"
+      source_files:
+      - "sys/kern/subr_pool.c"
+      - "lib/libc/stdlib/malloc.c"
+      default_state: >-
+        Kernel pool allocator fills freed memory with junk patterns
+        (poison_mem) by default but does not zero on allocation.
+        Callers must explicitly request zeroed memory (PR_ZERO flag
+        for pools, M_ZERO for malloc). Userland malloc supports 'Z'
+        option for zero-fill. Junk fill detects use of stale data
+        but does not prevent info-leak from uninitialized allocation.
+    commits:
+    - hash: "10fb64475ee8f94ee1087460882fd26b3598982c"
+      date: "2007-09-07"
+      description: "Add the long requested M_ZERO flag to malloc(9)"
+    - hash: "cf17dfd626b20a24c224ac3291fed4cf1a3692c3"
+      date: "2008-05-06"
+      description: "Add a PR_ZERO flag for pools, to complement the M_ZERO malloc flag"
+    discussions: []
+    rationale: >-
+      Junk fill on free is default-on but zero-fill on allocation
+      requires explicit caller request (PR_ZERO/M_ZERO). Not
+      automatic. D=1 (available but requires opt-in per allocation).
+      S=1 (junk fill catches bugs but does not prevent info-leak).
+  C1d.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "STACKGAP_RANDOM=256*1024 (sys/arch/amd64/include/vmparam.h)"
+      - "kern.stackgaprandom sysctl"
+      source_files:
+      - "sys/kern/kern_exec.c"
+      - "sys/arch/amd64/include/vmparam.h"
+      default_state: >-
+        Per-process random stack gap of up to 256 KB on x86-64.
+        Randomized via arc4random() at exec time. Gap inserted
+        between argv/envp and the stack. Applied to all 64-bit
+        architectures. Controllable via kern.stackgaprandom sysctl.
+    commits:
+    - hash: "56b6d61326f145cc3ab78a126b1b1a2f3b8fcc59"
+      date: "2015-01-26"
+      description: "Move the stackgap from the stack into its own page at a random address"
+    - hash: "e8dad7d80fee101871148bbec4c7a8712708ea02"
+      date: "2023-03-19"
+      description: "Aggressively randomize the location of the stack on all 64-bit architectures (except alpha); up to 26 extra bits of stack address randomness"
+    discussions: []
+    rationale: >-
+      256 KB per-process stack gap randomization via arc4random().
+      Default-on for all 64-bit architectures. Good entropy. S=2
+      (significantly increases difficulty of stack address prediction
+      but does not prevent all brute-force attacks).
+      T_age=3 (stackgap since 2015, aggressively extended 2023), but
+      T_maintained=1: the stackgap code saw zero mechanism-relevant commits
+      in the 2025-01-21 - 2026-07-21 maintenance window, so the row is
+      dormant and T = min(3,1) = 1.
+  C1d.2:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/subr_pool.c"
+      default_state: >-
+        pool(9), OpenBSD's kernel slab/cache allocator, randomizes
+        the order in which fresh pool pages populate their free
+        item lists. In subr_pool.c:965, each new page generates a
+        32-bit value via arc4random() and uses each bit to decide
+        whether to insert the next item at the head or tail of the
+        free list (XSIMPLEQ_INSERT_HEAD vs INSERT_TAIL). For a
+        page with N items this produces 2^N possible orderings.
+        Additionally, subr_pool.c:1739 seeds per-pool magic cookies
+        from arc4random for free-list pointer obfuscation. This is
+        OpenBSD's analog to Linux's CONFIG_RANDOM_KMALLOC_CACHES
+        (which randomizes which cache an allocation lands in) —
+        different mechanism, same goal of unpredictable allocation
+        order. Default-on for all pool(9)-backed allocations, but
+        scoped to them: malloc(9) is not pool-backed on OpenBSD —
+        kern_malloc.c serves requests from kmembuckets over km_alloc
+        with no arc4random involvement — so the general-purpose
+        kernel malloc path is not randomized.
+    commits:
+    - hash: "a544e172bbf221032329dc290631fe436d7c0ac7"
+      date: "2018-02-06"
+      description: "slightly randomize the order that new pages populate their item lists in"
+    - hash: "80f0d99cbd92c2a609c0943848841fbb4bc75f1d"
+      date: "2014-05-01"
+      description: "with some random chance, swizzle the current page for the pool to avoid fully deterministic behavior"
+    discussions: []
+    rationale: >-
+      pool(9) randomizes free-list insertion order via arc4random
+      on each fresh page, and seeds per-pool free-list pointer
+      magic cookies. Default-on with no opt-in needed, but coverage is
+      limited to fixed-size pool(9) caches: malloc(9) is NOT pool-backed
+      on OpenBSD (kern_malloc.c uses kmembuckets over km_alloc and calls
+      no arc4random), so the general kernel malloc path is unrandomized.
+      S=2 (moderate: per-page
+      randomization with N bits of entropy, but allocation order
+      across multiple pages is still page-sequential; an attacker
+      who can spray many allocations and observe layout via a
+      side channel can defeat the per-page entropy). A=3 because
+      randomization is integrated into the core allocator, not a
+      bolt-on plugin. T=2 (T_age=3: mature since 2014/2018;
+      T_maintained=2: only a handful (1-10) of mechanism-relevant commits
+      to sys/kern/subr_pool.c in the 2025-01-21 - 2026-07-21 window).
+      D=3 per the disable-path convention: the arc4random() insertion-order
+      randomization in pool_p_alloc() is unconditional (sys/kern/subr_pool.c)
+      — kern.pool_debug gates poisoning, not randomization — and no knob
+      disables it.
+  C1d.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      - "sys/conf/files"
+      default_state: >-
+        No randomized structure layout mechanism. No equivalent to
+        Linux CONFIG_RANDSTRUCT compiler plugin. Structure layouts
+        are fixed across all builds.
+    commits: []
+    discussions: []
+    rationale: >-
+      No randomized structure layout. P=0.
+  C1e.1:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/pmap.c"
+      - "sys/arch/amd64/amd64/locore0.S"
+      default_state: >-
+        W^X strictly enforced in kernel space. The enforcement does not
+        come from protection_codes[] in pmap.c: that table maps
+        PROT_WRITE|PROT_EXEC (and PROT_READ|PROT_WRITE|PROT_EXEC) to plain
+        PG_RW without pg_nx, so it does not by itself forbid a
+        writable-and-executable mapping. The guarantee comes from the
+        static kernel mappings established in locore0.S (text RX, data/bss
+        NX) together with UVM's W^X policy, which refuses to hand out
+        simultaneously writable and executable mappings. .rodata mapped
+        read-only and non-executable from boot (locore0.S). OpenBSD
+        pioneered W^X enforcement; it is a core design property that
+        cannot be disabled.
+    commits:
+    - hash: "1fef330025f793df9c61fbbe0d13ed9647883154"
+      date: "2004-02-23"
+      description: "Get use of NX on amd64 (partially from NetBSD)"
+    - hash: "24767d70a034d00f013c1354a004ee30b66a50ee"
+      date: "2014-10-18"
+      description: "Make the direct map non-executable, enforcing W^X in the kernel; mitigates ret2dir attacks"
+    - hash: "c7636a68831104520cbf866b4b8d6bf887102168"
+      date: "2014-12-21"
+      description: "Prevent writing to the kernel area via the direct map (write permission removed)"
+    discussions: []
+    rationale: >-
+      W^X is a core OpenBSD design principle, strictly enforced via
+      hardware NX bit. The guarantee is NOT produced by
+      protection_codes[] in pmap.c — that table maps PROT_WRITE|PROT_EXEC
+      to PG_RW without pg_nx — but by the static kernel mappings set up in
+      locore0.S plus UVM's W^X policy, which refuses simultaneously
+      writable and executable mappings.
+      PT_OPENBSD_WXNEEDED ELF flag exists as a per-binary exception
+      for compatibility, but cannot globally disable W^X. D=3
+      (mandatory), S=3 (hardware-enforced NX), A=3 (core design
+      property).
+      T=3 is retained under the pmap-architecture exception: the
+      2025-01-21 - 2026-07-21 window carries 11 non-trivial pmap/locore0
+      commits, including pmap_write_protect handling for kernel addresses,
+      so T_maintained=3 despite W^X itself being a long-settled property.
+  C1e.2:
+    P: 1
+    D: 3
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/locore0.S"
+      - "sys/arch/amd64/conf/ld.script"
+      default_state: >-
+        Kernel .rodata sections mapped read-only and non-executable
+        from boot (locore0.S). Linker script (ld.script) separates
+        .rodata from writable sections. RETGUARD cookies stored in
+        .openbsd.randomdata.retguard section. Codepatch chunks for
+        SMEP/SMAP in .rodata for immutability. No __ro_after_init
+        annotation (data is either always-RO via .rodata or always-RW).
+    commits:
+    - hash: "7e27549ba0e36b10a93f9efee24e731b6fa615db"
+      date: "2014-11-05"
+      description: "Map .rodata RO after boot on amd64"
+    discussions: []
+    rationale: >-
+      .rodata sections enforced read-only from boot. No __ro_after_init
+      annotation: OpenBSD uses compile-time .rodata placement rather
+      than Linux-style post-init transition. Effective for static data
+      but cannot protect data that needs initialization at boot. D=3,
+      S=2.
+      D=3 per the disable-path convention: .rodata is mapped read-only from
+      boot unconditionally via the pmap protection codes; unlike Linux, which
+      retains a rodata=off boot-parameter escape hatch, OpenBSD has no switch
+      that maps it writable.
+      T_age=3 (.rodata mapped RO since 2014), but T_maintained=1: the
+      dedicated files saw zero mechanism-relevant commits in the
+      2025-01-21 - 2026-07-21 maintenance window
+      (sys/arch/amd64/conf/ld.script last edited 2022-11-07), so the row is
+      dormant and T = min(3,1) = 1.
+  C1e.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "kern.securelevel (default 1 in multiuser mode)"
+      source_files:
+      - "sys/kern/kern_sysctl.c"
+      - "sys/uvm/uvm_mmap.c"
+      - "sys/uvm/uvm_map.c (mimmutable enforcement)"
+      - "sys/kern/kern_exec.c"
+      - "sys/kern/exec_subr.c"
+      default_state: >-
+        kern.securelevel enforced monotonically (atomic_cas_uint
+        prevents lowering). At securelevel >= 1: prevents raw disk
+        writes, immutable/append-only flags cannot be removed, kernel
+        memory cannot be written. mimmutable(2) syscall allows
+        userspace to mark regions permanently immutable.
+        uvm_map_immutable() used internally for signal code and
+        timekeep pages. Securelevel raised to 1 automatically in
+        multiuser mode.
+    commits:
+    - hash: "df930be708d50e9715f173caa26ffe1b7599b157"
+      date: "1995-10-18"
+      description: "Initial import of NetBSD tree (4.4BSD-Lite derived); mechanism inherited as ancestral BSD functionality"
+    - hash: "8c7187e8f9910ee01579e69c0d0a30f2bd8a8769"
+      date: "2022-10-07"
+      description: "Add mimmutable(2) system call which locks the permissions of memory mappings"
+    discussions: []
+    rationale: >-
+      securelevel (decades-old, monotonic enforcement) + mimmutable(2)
+      syscall for userspace. A=2 (in-tree policy mechanism, deeply
+      integrated but not a structural architectural property). D=2
+      (default securelevel=1 in multiuser). S=2 (effective but kernel
+      itself can still modify own writable data at securelevel 1).
+      T_age=3 (ancestral securelevel; mimmutable(2) since 2022), but
+      T_maintained=2: the row's only mechanism-relevant change in the
+      2025-01-21 - 2026-07-21 window is the uvm_map_immutable() EPERM on
+      MAP_INHERIT_ZERO entries in sys/uvm/uvm_map.c, so T = min(3,2) = 2.
+  C1e.4:
+    P: 1
+    D: 2
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/cpu.c"
+      - "sys/arch/amd64/include/specialreg.h"
+      - "sys/arch/amd64/amd64/trap.c"
+      default_state: >-
+        SMEP auto-enabled on CPUs with SEFF0EBX_SMEP support
+        (CR4_SMEP set in cpu.c:802-803). Kernel panics on SMEP
+        fault (trap.c). PXN implemented for arm64 (pmap.c).
+        Hardware-enforced: prevents kernel from executing code
+        mapped in userspace pages.
+    commits:
+    - hash: "5146392b320122b494d07e87860b3a7619dfde11"
+      date: "2012-10-09"
+      description: "Enable Supervisor Mode Execution Protection (SMEP)"
+    discussions: []
+    rationale: >-
+      SMEP auto-enabled on compatible CPUs. Hardware-enforced
+      prevention of ret2usr attacks. S=3 (hardware enforcement,
+      no known practical bypass when enabled). D=2 (auto-enabled
+      on supporting hardware, not D=3 since older CPUs lack it).
+      T_age=3 (SMEP enabled since 2012), but T_maintained=1: no
+      SMEP-related diff landed in the 2025-01-21 - 2026-07-21 maintenance
+      window — the in-window churn in the cited files was SEV-ES work, not
+      mechanism-relevant — so T = min(3,1) = 1.
+  C1e.5:
+    P: 1
+    D: 3
+    S: 2
+    A: 2
+    T_age: 2
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "__HAVE_USPACE_GUARD (amd64, arm64, powerpc64, riscv64)"
+      source_files:
+      - "sys/uvm/uvm_glue.c"
+      - "sys/arch/amd64/include/param.h"
+      - "sys/arch/amd64/amd64/vm_machdep.c"
+      default_state: >-
+        The amd64 u-area contains the PCB and kernel stack. Since July
+        2025, __HAVE_USPACE_GUARD makes uvm_uarea_alloc() remove the
+        page immediately above the PCB, creating an unmapped guard
+        between control metadata and the stack. The mechanism is
+        unconditional on the evaluated amd64 target and is also
+        enabled on arm64, powerpc64 and riscv64.
+    commits:
+    - hash: "9898077bee6a54ec1fb6e74af9bae14ad8b70ede"
+      date: "2025-07-07"
+      description: "Add MI mechanism for an unmapped guard page between PCB and kernel stack; switch amd64 over and enable on arm64/powerpc64/riscv64"
+    discussions: []
+    rationale: >-
+      P=1 under the functional-equivalence rule: the unmapped u-area
+      guard directly prevents a kernel-stack overflow from reaching
+      the adjacent PCB, which is the control-metadata isolation
+      property measured by C1e.5. D=3 because the guard cannot be
+      disabled on the evaluated amd64 kernel. S=2 because it strongly
+      separates the PCB from the stack but does not isolate all
+      process metadata such as credentials and file tables. A=2
+      because it is an in-tree UVM/architecture facility rather than
+      a general kernel object-isolation architecture. T=2: introduced
+      in 2025 and actively maintained, but not yet battle-tested for
+      five years.
+  C1e.6:
+    P: 1
+    D: 2
+    S: 3
+    A: 3
+    T_age: 2
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "ld.bfd --execute-only (default on amd64)"
+      - "PROT_EXEC mappings strip read in pmap layer"
+      source_files:
+      - "sys/arch/amd64/amd64/pmap.c"
+      - "sys/uvm/uvm_mmap.c"
+      - "gnu/usr.bin/binutils-2.17/bfd"
+      default_state: >-
+        On amd64 with hardware xonly support (modern Intel/AMD
+        x86-64 CPUs supporting PKU/EPT-X-only or page-table
+        execute-only encoding), kernel pmap honors PROT_EXEC
+        without implicit PROT_READ — text segments cannot be read
+        as data even by the owning process. Default-flipped on
+        2023-02-04 when ld.bfd switched to
+        --execute-only by default for amd64. On older hardware
+        without PTE-level xonly, OpenBSD emulates the
+        confidentiality property at the copyin(9) layer: a 4-entry
+        range table (main program, ld.so, signal trampoline,
+        libc.so) lets the kernel reject userland reads that
+        overlap executable text. Kernel .text became execute-only
+        on arm64 in late 2022; the rollout to amd64 (via PKU keys),
+        riscv64, mips64, sparc64, hppa, and powerpc64 landed over
+        2022-2023. Defeats just-in-time gadget
+        enumeration, JIT-ROP, and arbitrary-read-based ROP
+        construction.
+    commits:
+    - hash: "cda64c0f886397e4adeb75ba491959f8dc0e9f35"
+      date: "2023-02-04"
+      description: "Make ld.bfd default to --execute-only on amd64"
+    - hash: "754e8b3d331df0029595c848486ad20597337c4d"
+      date: "2023-01-09"
+      description: "Implement --execute-only and turn --no-execute-only into the opposite option"
+    - hash: "406273279adfaafe7aabb82d92c2f3b3b5366b3a"
+      date: "2022-12-24"
+      description: "Make .text (and .btext) execute-only on arm64"
+    - hash: "d62ebcb2023f9bedf18a9581f9e426635774d636"
+      date: "2023-01-31"
+      description: "On systems without xonly mmu hardware-enforcement, emulate via copyin range checks (BROP mitigation)"
+    discussions: []
+    rationale: >-
+      Execute-only memory denies the read permission on text
+      segments at the page-table level (or via copyin range checks
+      on legacy hardware). This blocks a whole exploitation class:
+      attackers cannot read .text to enumerate ROP gadgets, defeat
+      KARL by leaking offsets via .text reads, or implement
+      JIT-ROP. The distinction from Linux is default posture, not
+      capability: Linux does implement x86-64 execute-only via MPK
+      (__arch_override_mprotect_pkey allocates the mm's execute-only
+      pkey for a PROT_EXEC-without-PROT_READ mapping, scored at
+      linux C1e.6), but glibc's loader maps text RX, so applications
+      must opt in — hence linux D=1 against OpenBSD's D=2, where
+      ld.bfd defaults to --execute-only on amd64 and ordinary
+      program text is X-only. P=1, D=2 (default-on amd64 modern,
+      --no-execute-only override possible), S=3 (no known practical
+      bypass when hardware supports it; copyin emulation is
+      comprehensive on legacy hardware), A=3 (kernel pmap + linker +
+      toolchain cooperation), T=min(T_age=2 for amd64 default since
+      2023, T_maintained=1) = 1 — no xonly/PG_XO diff landed in the
+      2025-01-21 - 2026-07-21 maintenance window, so the row is dormant
+      despite the recent default flip.
+  C1e.7:
+    P: 1
+    D: 2
+    S: 3
+    A: 3
+    T_age: 2
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "mimmutable(2) syscall"
+      - "ld.so seals .text/.rodata/.relro of all loaded objects"
+      - "static crt0 self-mprotects relro and calls mimmutable"
+      source_files:
+      - "sys/uvm/uvm_mmap.c"
+      - "sys/uvm/uvm_map.c"
+      - "lib/libc/sys/mimmutable.2"
+      - "libexec/ld.so/loader.c"
+      - "lib/csu/crt0.c"
+      default_state: >-
+        mimmutable(2) locks a memory mapping's permissions
+        permanently; subsequent mmap, mprotect, or munmap on the
+        immutable region returns EPERM. ld.so calls mimmutable() on
+        every loaded shared object's .text and .rodata at startup,
+        and again on RTLD_NODELETE / dlopen subsidiary libraries.
+        Static-PIE crt0 (rcrt0.o, built from lib/csu/crt0.c with
+        -DRCRT0) self-mprotects its relro region and calls
+        mimmutable() too. madvise(2) and msync(2) destructive ops
+        on immutable memory also return EPERM. Result: an attacker
+        who has already corrupted memory cannot make .text writable
+        (defeating shellcode injection), demote .rodata to writable
+        (defeating constants-corruption), or unmap pinned regions
+        (defeating remap-with-different-permissions tricks).
+    commits:
+    - hash: "8c7187e8f9910ee01579e69c0d0a30f2bd8a8769"
+      date: "2022-10-07"
+      description: "Add mimmutable(2) system call which locks the permissions of memory mappings"
+    - hash: "f4d4d691ec79bfc8aa6d32d80682a8edbe0dbdd5"
+      date: "2022-10-07"
+      description: "Add mimmutable(2) libc stub, manual page, crank libc minor"
+    - hash: "9ba2c65f00ed07a3f3367ffa7061b2f43f010a11"
+      date: "2022-12-04"
+      description: "ld.so figures out what regions of memory of startup shared library mappings can be made immutable, and does this for dlopen subsidiaries"
+    - hash: "f82a5fa9f8030ce9defde93755524dd160d9206e"
+      date: "2022-10-21"
+      description: "static binaries self-mprotect their relro in crt0; mimmutable also works here"
+    - hash: "114aad1984406bb6d9522da21182f9fcf7b0f369"
+      date: "2024-01-21"
+      description: "madvise(2) and msync(2) destructive ops not allowed on immutable memory; return EPERM"
+    discussions: []
+    rationale: >-
+      mimmutable(2) provides per-VMA permission seal preventing
+      post-init mprotect/munmap. ld.so applies it to all
+      executable + read-only segments by default, so userland gets
+      coverage without code changes. Linux's mseal(2) (since 6.10)
+      is a structural analog but is opt-in via MAP_SEALABLE and
+      not yet applied by glibc's default loader. P=1, D=2
+      (default-on for all loaded objects), S=3 (kernel-enforced;
+      no known bypass — even root cannot remove the seal), A=3
+      (kernel + libc + ld.so + crt0 cooperation), T=2 — pinned by
+      T_age=2 (~3.5 years); T_maintained is also 2 (a handful (1-10) of
+      mechanism-relevant commits in the 2025-01-21 - 2026-07-21 window).
+  C1e.8:
+    P: 1
+    D: 3
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "_ALIGN_TRAPS macro in sys/arch/*/include/asm.h"
+      - "ENTRY() macro emits trapsled-aligned function prologues"
+      - "0xcc fill on kernel .text alignment gaps"
+      source_files:
+      - "sys/arch/amd64/include/asm.h"
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      - "sys/arch/i386/include/asm.h"
+      default_state: >-
+        Kernel .text alignment gaps are filled with 0xcc (int3)
+        trap instructions instead of the traditional NOP padding.
+        The kernel build's assembler ENTRY() prologue aligns each
+        function on a 16-byte boundary using _ALIGN_TRAPS, which
+        emits int3 fill bytes between symbols. NOP-sled gadgets
+        that previously existed in alignment padding inside the
+        kernel image — which an attacker could target as ROP entry
+        points or as a fall-through ramp into adjacent kernel
+        functions — are replaced with traps that fault on
+        execution. The same construction is reused for the L1TF
+        mitigation in vmm(4), where a 64K PA-linear region of
+        trapsleds is used to stuff the L1D cache before vmlaunch
+        / vmresume on Intel hosts.
+    commits:
+    - hash: "1f5e6df8ba8cc3c688fd41c9d47c5b1cb7120935"
+      date: "2017-08-15"
+      description: "Align text locations to 16, fill alignments with 0xcc (int 3) to match trapsled model"
+    - hash: "b433e1a003445ba4a963e55728b2fcbe0962c8c2"
+      date: "2018-07-01"
+      description: "Provide _ALIGN_TRAPS macro for text alignment with a trap-sled"
+    - hash: "a5910b4fbcaa3dd48faff38aeadcb22c953af71e"
+      date: "2018-07-10"
+      description: "ENTRY macro becomes a trapsled (NENTRY keeps nop-sled); amd64 binaries free of double-nop sequences"
+    - hash: "c844c4ad37ba222ab37c64cfbe4c5eb1ec73c844"
+      date: "2018-08-21"
+      description: "Perform mitigations for Intel L1TF: L1D flush via MSR or 64K PA-linear trapsled region before vmlaunch/vmresume"
+    - hash: "ed80a50a25727b80d28b321e99de10f627426c90"
+      date: "2017-08-01"
+      description: "Use int3 trap padding between functions instead of trapsleds with leading jump"
+    discussions: []
+    rationale: >-
+      Scored against the kernel image only (per project scope):
+      trap fills inside kernel .text alignment gaps make padding
+      gadgets execution-faulting and turn fall-through control
+      flow between kernel functions into a panic. Mitigates
+      kernel-side ROP chains that landed on NOP-sleds and CFI
+      failures that fall off function boundaries. Linux's kernel
+      build does not emit trap-fills by default
+      (-fpatchable-function-entry uses NOPs). P=1, D=3 (default-on
+      for the kernel build on amd64 / i386), S=2 (probabilistic
+      gadget reduction; doesn't prevent direct ROP through real
+      instructions; modest defense-in-depth), A=2 (in-tree
+      kernel-build convention, not hardware/architectural), T=1
+      (T_age=3: ~8 years in the kernel build; T_maintained=1: the trapsled
+      macros in sys/arch/amd64/include/asm.h saw zero mechanism-relevant
+      commits in the 2025-01-21 - 2026-07-21 maintenance window, so the
+      row is dormant).
+      D=3 per the disable-path convention: _ALIGN_TRAPS int3 fills are
+      hardwired in the amd64 assembler macros (sys/arch/amd64/include/asm.h)
+      for the single GENERIC kernel; no configuration removes them.
+  C1f.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/conf/files"
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      default_state: >-
+        OpenBSD kernel is written entirely in C. No Rust, Go, or
+        other memory-safe language used in kernel code. No build
+        infrastructure for memory-safe language compilation in
+        kernel context.
+    commits: []
+    discussions: []
+    rationale: >-
+      No memory-safe language in kernel. P=0.
+  C2a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      - "sys/arch/amd64/include/asm.h"
+      default_state: >-
+        No software forward-edge CFI (Clang CFI / KCFI) in the
+        kernel. OpenBSD uses hardware IBT (C2a.2) for forward-edge
+        protection instead of software type-based CFI.
+    commits: []
+    discussions: []
+    rationale: >-
+      No software CFI. OpenBSD relies on hardware IBT for forward-edge
+      protection. P=0. Mitigated differently, not equivalently:
+      IBT is credited at C2a.2 and its deployment is
+      stricter than Linux's (mandatory by default with per-binary
+      opt-out, vs opt-out-by-silent-omission — de Raadt, 2023-07), but
+      IBT is coarse-grained (any endbr64 is a valid target) and lacks
+      kCFI's per-callsite type checking; pre-CET hardware gets no
+      forward-edge protection at all. No developer statement
+      evaluating software kCFI exists; the project went the hardware
+      route without recording a position on the software variant.
+  C2a.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 2
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "-fcf-protection=branch (sys/arch/amd64/conf/Makefile.amd64)"
+      source_files:
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      - "sys/arch/amd64/include/asm.h"
+      - "sys/arch/amd64/amd64/cpu.c"
+      default_state: >-
+        Intel IBT enabled for kernel. All ENTRY/ASENTRY/IDTVEC macros
+        include endbr64 instruction (asm.h:172). Kernel compiled with
+        -fcf-protection=branch. MSR_S_CET enabled with MSR_CET_ENDBR_EN
+        on IBT-capable CPUs (Tiger Lake+). On CPUs with eIBRS or IBT,
+        retpolines are codepatch-replaced with direct indirect jumps
+        since retpolines are IBT bypass gadgets. SMALL_KERNEL uses
+        -fcf-protection=none.
+    commits:
+    - hash: "55fdb5fa9e714dd482ce610b9e56496f18472337"
+      date: "2023-07-10"
+      description: "Enable Indirect Branch Tracking for amd64 userland"
+    - hash: "1538f8cb209f93ed99ddae606a02707e3bdd9dfc"
+      date: "2023-07-31"
+      description: "On CPUs with eIBRS or IBT, replace retpolines with indirect jumps"
+    discussions: []
+    rationale: >-
+      IBT enabled kernel-wide via -fcf-protection=branch and endbr64
+      in all function entry macros. Hardware-enforced on Tiger Lake+
+      CPUs. Retpolines replaced on IBT-capable CPUs since they are
+      IBT bypass gadgets. D=2 (auto-enabled on supporting hardware).
+      S=2 (hardware-enforced but coarse-grained: any ENDBR is a valid
+      target; coarse-grained CFI is capped at S=2).
+      T_age=2 (2023, ~3 years); T_maintained=1: no endbr/IBT diff landed
+      in the 2025-01-21 - 2026-07-21 maintenance window
+      (sys/arch/amd64/include/asm.h last touched for IBT in 2023-04), so
+      T = min(2,1) = 1.
+  C2a.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - "-mbranch-protection=bti (arm64 only)"
+      source_files:
+      - "sys/arch/arm64/conf/Makefile.arm64"
+      - "sys/arch/arm64/include/asm.h"
+      default_state: >-
+        ARM BTI is enabled for arm64 kernel builds via
+        -mbranch-protection=bti. Entry macros include bti c
+        instructions. However, this evaluation targets x86-64
+        as primary architecture. BTI is N/A for x86-64.
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM BTI not applicable on x86-64 primary evaluation target.
+      (OpenBSD does enable BTI on arm64 builds.)
+  C2b.1:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "-fret-protector (compiler default, disabled with -fno-ret-protector)"
+      - "-fret-clean (Makefile.amd64; stale return-address stack-slot cleaning, present since 7.6)"
+      source_files:
+      - "sys/arch/amd64/include/asm.h"
+      - "sys/arch/amd64/conf/ld.script"
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      - "sys/arch/amd64/amd64/copy.S"
+      default_state: >-
+        RETGUARD is OpenBSD's unique backward-edge CFI mechanism.
+        Per-function 64-bit random cookies stored in the
+        .openbsd.randomdata.retguard section, which the bootloader
+        fills with fresh random bytes on every boot because the segment
+        is marked PT_OPENBSD_RANDOMIZE (sys/lib/libsa/loadfile_elf.c
+        calls rc4_getbytes over it). RETGUARD_SETUP XORs return address with
+        cookie at function entry; RETGUARD_CHECK validates at exit.
+        Mismatch triggers int3;int3 trap. Applied to all assembly
+        functions (70 RETGUARD_SETUP instances on amd64). Compiler
+        support via -fret-protector flag (default-on). The kernel is
+        also built with -fret-clean (Makefile.amd64), which clears
+        stale return-address slots after calls; that separate
+        information-leak property is scored under C3c.2. RETGUARD is
+        implemented across amd64, arm64, powerpc, powerpc64, riscv64.
+    commits:
+    - hash: "b6cd93857594bceac7f2734519d1f90ef2f5d7b8"
+      date: "2018-07-01"
+      description: "Add retguard asm macros"
+    - hash: "1457ca8725ed4b2243ae5e62536b5691f061f6e3"
+      date: "2024-06-04"
+      description: "Enable -fret-clean on amd64 (libc, libcrypto, ld.so, kernel, ssh tools)"
+    discussions: []
+    rationale: >-
+      RETGUARD is OpenBSD's signature backward-edge CFI. Per-function
+      XOR cookies are freshly randomized on every boot by the bootloader,
+      which fills the .openbsd.randomdata.retguard segment because it is
+      marked PT_OPENBSD_RANDOMIZE (sys/lib/libsa/loadfile_elf.c) — cookie
+      freshness does not come from KARL, whose relink randomizes code
+      layout rather than cookie values. Stronger than
+      global stack canaries (per-function granularity). Requires
+      both info-leak and KASLR bypass to defeat. S=2 (bypassable
+      with info-leak of cookie value). A=3 (core design, integrated
+      into compiler and linker). Complemented by -fret-clean
+      register scrubbing since 7.6.
+      D=3 per the disable-path convention: RETGUARD is the unconditional
+      compiler default for the GENERIC kernel with no supported off switch.
+      See the recorded C1a.1/C2b.1 dual-row decision at C1a.1.
+      T_age=3 (RETGUARD since 2018), but T_maintained=1: the RETGUARD
+      implementation files saw zero mechanism-relevant commits in the
+      2025-01-21 - 2026-07-21 maintenance window
+      (sys/arch/amd64/include/asm.h and the LLVM X86RetClean.cpp pass both
+      unchanged in-window), so T = min(3,1) = 1.
+  C2b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/locore.S"
+      - "sys/arch/amd64/amd64/cpu.c"
+      default_state: >-
+        CET ENDBR tracking is enabled (scored under C2a.2) but
+        CET Shadow Stack is not implemented. OpenBSD uses RETGUARD
+        (C2b.1) for backward-edge protection instead of hardware
+        shadow stacks.
+    commits: []
+    discussions: []
+    rationale: >-
+      No CET shadow stack implementation. RETGUARD used for
+      backward-edge protection instead. P=0.
+  C2b.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/arm64/arm64/aesv8-armx.S"
+      default_state: >-
+        ARM PAC not applicable on x86-64 primary evaluation target.
+        Minimal PAC usage found in arm64 crypto code (paciasp in
+        aesv8-armx.S) but not kernel-wide pointer authentication.
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM PAC not applicable on x86-64 primary evaluation target.
+  C2b.4:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/cpu.c"
+      - "sys/arch/amd64/amd64/locore.S"
+      default_state: >-
+        ARM Guarded Control Stack (FEAT_GCS, ARMv9.4) not applicable
+        on x86-64 primary evaluation target. OpenBSD has no GCS
+        support on any architecture: the arm64 kernel uses only
+        -mbranch-protection=bti (no GCS), and no GCSPR/GCS enablement
+        exists. (The lone "gcs" token in arm64 disasm.c is an "ngcs"
+        instruction-decoder mnemonic alias, not GCS support.)
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM GCS (FEAT_GCS, ARMv9.4) not applicable on x86-64 primary
+      evaluation target. OpenBSD has not wired up arm64 GCS.
+  C2c.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/net/bpf_filter.c"
+      default_state: >-
+        OpenBSD has classic BPF interpreter only (bpf_filter.c).
+        No eBPF, no JIT compiler. Attack surface does not exist.
+    commits: []
+    discussions: []
+    rationale: >-
+      No in-kernel JIT. Classic BPF interpreter only. No eBPF.
+      Attack surface does not exist. P=N/A.
+  C3a.1:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "libexec/reorder_kernel/reorder_kernel.sh"
+      - "sys/arch/amd64/conf/ld.script"
+      - "sys/conf/makegap.sh"
+      default_state: >-
+        KARL (Kernel Address Randomized Link) relinks the kernel
+        binary with random function/object order on every boot via
+        reorder_kernel.sh (runs from rc). Uses /usr/share/relink/kernel
+        kit. SHA256-verified before relinking. Random seed from
+        /etc/random.seed spread over .openbsd.randomdata section via
+        arc4random/ChaCha20. For this row — base-address randomization —
+        what matters is that the kernel base VA is NOT randomized:
+        sys/arch/amd64/conf/ld.script fixes __kernel_base at
+        0xffffffff80000000. The per-boot base slide comes solely from the
+        gap.o object emitted by sys/conf/makegap.sh, which prepends
+        RANDOM1 in [0, 3 pages) (then page-aligned) plus a sub-page
+        RANDOM2 before .text. The link-order shuffle that moves every
+        function is scored separately at C3a.2.
+    commits:
+    - hash: "527d7fdf3c0bf4f2d31d1136ecd5de1aab43c9e6"
+      date: "2017-05-31"
+      description: "Split early startup into locore0.S, always linked first; randomize the link order of all other kernel .o files (KARL introduction)"
+    - hash: "5a1765374ffb438a18c236b42238ebc55b0ed55b"
+      date: "2017-06-14"
+      description: "Add reorder_kernel() relinking and installing a new kernel in the background on system startup"
+    - hash: "226329da4068eb9ad21ac65c174f0628c5ec1ea3"
+      date: "2017-06-22"
+      description: "Generate a gap.link script and use it to generate gap.o (random-sized gap at the start of each kernel text/data segment)"
+    - hash: "6248d275279851465c9013c61a38254643611b2d"
+      date: "2017-08-21"
+      description: "Move the kernel relinking code from /etc/rc into a separate script /usr/libexec/reorder_kernel"
+    discussions: []
+    rationale: >-
+      This row scores kernel base-address randomization only. On OpenBSD
+      the kernel base VA is static: sys/arch/amd64/conf/ld.script fixes
+      __kernel_base at 0xffffffff80000000. The only boot-to-boot slide of
+      kernel text comes from the gap.o object generated by
+      sys/conf/makegap.sh, which prepends RANDOM1 in [0, 3 pages)
+      (page-aligned, 3 choices) plus a sub-page RANDOM2 aligned to 16
+      (256 choices) — roughly 9.6 bits of entropy, i.e. comparable to
+      Linux KASLR rather than stronger than it. The property often
+      attributed to KARL here — every function at a unique address on each
+      boot — is the object-file link-order shuffle, which belongs to C3a.2
+      and is scored there. D=3 (runs automatically
+      via rc). S=2 (strong per-boot randomization but static within a
+      boot session; side-channel attacks could leak addresses). A=3
+      (core design property, deeply integrated into build/boot process).
+      D=3 per the disable-path convention: /etc/rc invokes
+      /usr/libexec/reorder_kernel unconditionally — the library_aslr rc.conf
+      knob controls library reordering only, and no variable governs the
+      kernel relink.
+      T_age=3 (KARL since 2017), but T_maintained=2: only a handful (1-10)
+      of mechanism-relevant commits in the 2025-01-21 - 2026-07-21 window,
+      so T = min(3,2) = 2.
+  C3a.2:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "libexec/reorder_kernel/reorder_kernel.sh"
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      default_state: >-
+        KARL provides object-file-level randomization by randomly
+        sorting object files before linking (Makefile.amd64:143 uses
+        sort -R on OBJS list). Functions in different .o files end up
+        at unpredictable relative addresses. Functions within the same
+        .o file maintain their relative order. This is coarser than
+        true per-function FG-KASLR but finer than base-only KASLR.
+        Knowing one function's address does not reveal functions in
+        other object files.
+    commits:
+    - hash: "527d7fdf3c0bf4f2d31d1136ecd5de1aab43c9e6"
+      date: "2017-05-31"
+      description: "Split early startup into locore0.S, always linked first; randomize the link order of all other kernel .o files (KARL introduction)"
+    discussions: []
+    rationale: >-
+      KARL randomizes at object-file granularity (sort -R on OBJS),
+      not individual function level. Coarser than Linux FG-KASLR
+      (which can randomize per-section) — functions within the same
+      .c file maintain relative order. Still significantly improves
+      on base-only KASLR. S=2 (effective but within-object offsets
+      predictable).
+      D=3 per the disable-path convention: same basis as C3a.1 — the KARL
+      relink runs unconditionally from /etc/rc with no rc.conf knob.
+  C3b.1:
+    P: 1
+    D: 2
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/cpu.c"
+      - "sys/arch/amd64/amd64/pmap.c"
+      - "sys/arch/amd64/amd64/locore0.S"
+      - "sys/arch/amd64/amd64/locore.S"
+      - "sys/arch/amd64/amd64/machdep.c"
+      default_state: >-
+        Separate kernel/user page tables for Meltdown mitigation.
+        cpu_meltdown flag set by default (locore0.S:246), cleared
+        only if IA32_ARCH_CAPABILITIES MSR reports RDCL_NO.
+        ci_kern_cr3 and ci_user_cr3 per-CPU. pmap_enter_special()
+        creates minimal user-visible kernel mappings in pm_pdir_intel.
+        Xsyscall_meltdown entry point switches CR3 on syscall.
+        Speculation barriers (lfence) prevent speculative access
+        during CR3 switch.
+    commits:
+    - hash: "ca88a4fb6ab1d28866f47b6481a10197030dfaee"
+      date: "2018-01-07"
+      description: "Remove all PG_G global page mappings from the kernel on Intel CPUs (Meltdown mitigation groundwork)"
+    - hash: "b767b017801a7911c8695888fb3667cbbba30f7b"
+      date: "2018-02-21"
+      description: "Meltdown: implement user/kernel page table separation"
+    discussions: []
+    rationale: >-
+      Full page table isolation with separate CR3 per-CPU for
+      kernel and user mode. Auto-enabled on vulnerable Intel CPUs
+      (assumed vulnerable by default). S=3 (hardware page table
+      separation with speculation barriers). D=2 (auto-enabled
+      on affected hardware).
+  C3b.2:
+    P: 1
+    D: 2
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/cpu.c"
+      - "sys/arch/amd64/amd64/copy.S"
+      default_state: >-
+        SMAP enabled automatically on CPUs with SEFF0EBX_SMAP
+        (CR4_SMAP set in cpu.c:804-805). STAC/CLAC instructions
+        code-patched at boot (replacesmap function). Kernel access
+        to user memory restricted to narrow STAC/CLAC windows in
+        copyin/copyout functions. CVE-2019-1125 optimization: on
+        SMAP systems without Meltdown, speculative path faults
+        from SMAP itself.
+    commits:
+    - hash: "ab8e1d1048f427ce7eddea1eb397e25b91e49b66"
+      date: "2012-10-31"
+      description: "Add support for Intel SMAP feature"
+    - hash: "019cf0fb22d42118c2ac05f0e22ff051bd243cdc"
+      date: "2017-08-25"
+      description: "Clear PSL_AC on kernel entry and interrupt so only copyin/copyout run with it set; panic if set on entry to trap or syscall"
+    discussions: []
+    rationale: >-
+      SMAP hardware enforcement restricts all kernel access to
+      user memory. STAC/CLAC brackets narrow access windows. S=3
+      (hardware-enforced, no known practical bypass). D=2 (auto-
+      enabled on supporting hardware).
+  C3c.1:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "POOL_DEBUG (enabled in GENERIC)"
+      - "pool_debug=1 (default)"
+      source_files:
+      - "sys/kern/subr_poison.c"
+      - "sys/kern/subr_pool.c"
+      default_state: >-
+        Pool allocator fills freed memory with junk patterns
+        (POISON0=0xdeadbeef, POISON1=0xdeafbead) via poison_mem().
+        Pattern varies based on page address bits. POOL_DEBUG enabled
+        in GENERIC kernel (sys/conf/GENERIC:19, pool_debug=1). Pool
+        code passes full allocation size to poison_mem() but
+        subr_poison.c:65 caps write to POISON_SIZE=64 bytes. This
+        is JUNK fill, not zero fill: detects UAF but does not
+        prevent info disclosure from freed memory.
+    commits:
+    - hash: "ef2441bcf93b02ad7a090ebae81ef35f7ac914cc"
+      date: "2013-03-28"
+      description: "Separate memory poisoning code to a new file and make it usable kernel wide"
+    - hash: "656ea6a3c6703b6dfbc43c4cd9d7865d2894b26a"
+      date: "2013-03-31"
+      description: "Replace pool debug magic with shared mem poison code"
+    discussions: []
+    rationale: >-
+      Junk fill on free via pool poisoning (default-on). Not zero
+      fill: patterns are recognizable (0xdeadbeef) and only cover
+      first 64 bytes. Detects use-after-free but does not fully
+      prevent info-leak from freed memory. D=2 (default-on via
+      POOL_DEBUG). S=1 (junk, not zero; partial coverage).
+  C3c.2:
+    P: 1
+    D: 3
+    S: 1
+    A: 2
+    T_age: 2
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "-fret-clean (default kernel compiler flag on amd64)"
+      source_files:
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      - "gnu/llvm/llvm/lib/Target/X86/X86RetClean.cpp"
+      default_state: >-
+        The amd64 kernel is compiled with -fret-clean by default.
+        OpenBSD's LLVM X86RetClean pass inserts
+        "movq $0, -8(%rsp)" after calls to erase the stale return
+        address from the caller's stack. It does not erase the full
+        kernel stack high-water region on syscall return and does not
+        scrub registers.
+    commits:
+    - hash: "1457ca8725ed4b2243ae5e62536b5691f061f6e3"
+      date: "2024-06-04"
+      description: "Enable -fret-clean on amd64 (libc, libcrypto, ld.so, kernel, ssh tools)"
+    discussions: []
+    rationale: >-
+      P=1 under the functional-equivalence rule, but only for the
+      narrow stale-return-address disclosure class. D=3 because
+      -fret-clean is enabled in the default amd64 kernel build. S=1:
+      clearing one return-address slot after each call raises the bar
+      against stack disclosure but is substantially weaker than
+      STACKLEAK-style erasure of the used kernel-stack region. A=2:
+      integrated in the in-tree compiler and kernel build. T=1:
+      T_age=2 (deployed since OpenBSD 7.6), but T_maintained=1 — the
+      X86RetClean.cpp pass has had no mechanism-relevant commit since
+      2024-06 and therefore none in the 2025-01-21 - 2026-07-21
+      maintenance window, so T = min(2,1) = 1.
+      D=3 per the disable-path convention: -fret-clean is in the unconditional
+      CMACHFLAGS of Makefile.amd64; no runtime or configuration switch
+      disables it.
+  C3c.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      - "sys/arch/amd64/amd64/locore.S"
+      default_state: >-
+        No -fzero-call-used-regs compiler flag in kernel build.
+        Register zeroing in syscall exit path is specifically for
+        MDS mitigation (VERW + selective xor), not general register
+        scrubbing on function return. Scored under C7c.1. FPU register
+        state is cleared on context handling via fpureset() and the
+        7.9 FP-DSS mitigation (AMD-SB-7053) sets an MSR chicken bit,
+        but neither constitutes general-purpose register scrubbing on
+        function return.
+    commits: []
+    discussions: []
+    rationale: >-
+      No register scrubbing on function return. MDS-targeted register
+      zeroing in syscall exit path is scored under C7c.1; FPU-state
+      clearing (fpureset, FP-DSS MSR mitigation) is microarchitectural
+      and scored under C7c. P=0. Mitigated differently, not
+      equivalently: OpenBSD deliberately built the
+      narrower -fret-clean pass (7.6+, unconditional in the amd64
+      GENERIC build), which clears the return-address stack slot after
+      every call — de Raadt's own proposal concedes "this doesn't fix
+      all pointers you can see on the stack, just this one type" —
+      and is credited at C3c.2. Register *contents* and call-frame
+      locals remain unscrubbed; -fzero-call-used-regs was never
+      discussed on the lists (zero marc.info hits, checked 2026-07),
+      so this row's absence is undisputed rather than rejected.
+  C3d.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "kern.allowkmem (default 0 = restricted)"
+      - "kern.securelevel (default 1 in multiuser)"
+      source_files:
+      - "sys/kern/kern_sysctl.c"
+      - "sys/sys/sysctl.h"
+      - "sys/kern/tty.c"
+      - "sys/arch/amd64/amd64/mem.c"
+      default_state: >-
+        kern.allowkmem defaults to 0: /dev/mem and /dev/kmem access
+        denied at securelevel > 0 unless allowkmem explicitly set.
+        sysctl_securelevel_int() prevents lowering once securelevel
+        raised. Kernel message buffer (dmesg) accessible but does not
+        expose raw kernel pointers in standard configuration. Kernel
+        pointers exported via sysctl are gated behind a root-only
+        show_pointers/show_addresses check (suser(curproc) == 0): the
+        FILL_KPROC macro only emits p_wchan/p_addr and similar kernel
+        addresses to root. OpenBSD 7.9 extended this gating to fields
+        that had escaped it (process p_addr, KERN_TTY_INFO t_session).
+    commits:
+    - hash: "19aedf236181e81baf170421900911c82671fae4"
+      date: "2016-09-25"
+      description: "Add sysctl kern.allowkmem (default 0): /dev/mem and /dev/kmem can be opened at securelevel > 0 only if allowkmem is set"
+    - hash: "fc24682d162d1168f8409889883aa738fd923555"
+      date: "2021-03-24"
+      description: "Fix reversed mmrw() direct-map range check; make /dev/mem range checks stricter"
+    - hash: "a87550c1c9f645f57b708ed21aa842f4f06305d4"
+      date: "2026-04-16"
+      description: "do not expose p_addr kernel address unless root (FILL_KPROC gated behind show_addresses); from Bruce Dang of Calif.io"
+    - hash: "203548908adbed033da3db50573359b451361d06"
+      date: "2026-04-16"
+      description: "KERN_TTY_INFO exports t_session kernel pointer only to root (ttystats_init show_pointers); reported by Bruce Dang of Calif.io"
+    discussions: []
+    rationale: >-
+      kern.allowkmem=0 default prevents /dev/kmem access. securelevel
+      protects against lowering. Kernel pointers in sysctl output are
+      gated root-only via show_pointers/show_addresses. Effective
+      restriction of kernel memory and pointer exposure. OpenBSD 7.9
+      added incremental fixes (p_addr, t_session) closing specific
+      kernel-pointer leaks within the existing root-only model; this is
+      continued tightening rather than a strength-class improvement, so
+      S stays 2 (effective, but root at securelevel -1 can still bypass).
+      D=2 (default-on). S=2. A=2 (in-tree gating, not a core isolation
+      boundary).
+  C3d.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "kern.allowkmem (restricts process inspection)"
+      source_files:
+      - "sys/kern/kern_sysctl.c"
+      default_state: >-
+        Process information visibility restricted via sysctl_proc_*
+        functions (sysctl_proc_args, sysctl_proc_cwd, sysctl_proc_vmmap).
+        kern.allowkmem=0 prevents detailed kernel diagnostic access.
+        Process listing via KERN_PROC restricted by sysctl_doproc().
+        No equivalent to Linux hidepid mount option but process info
+        restricted by default privilege model.
+    commits:
+    - hash: "747ce49b4e26209a3aaa0d97a22da672c758f04e"
+      date: "2014-12-05"
+      description: "Allow only root to use KERN_PROC_VMMAP until it is really proven safe"
+    discussions: []
+    rationale: >-
+      Process information and kernel diagnostic interfaces restricted
+      by default via kern.allowkmem and securelevel. sysctl_proc_*
+      functions enforce access control. D=2 (default restrictions).
+      S=2 (effective for non-root).
+  C4.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/kern_unveil.c (per-process filesystem visibility attenuation enforced in namei)"
+      - "sys/kern/kern_pledge.c (per-process syscall-class rights attenuation)"
+      - "lib/libc/sys/unveil.2"
+      default_state: >-
+        OpenBSD has no unforgeable-capability model (no Capsicum capability
+        mode, no Zircon-style handles). The ambient-authority/confused-deputy
+        class is instead addressed by per-process rights attenuation: unveil(2)
+        irreversibly shrinks the filesystem namespace a process can see
+        (enforced kernel-side in namei on every lookup), and pledge(2)
+        irreversibly drops syscall-class rights. Both are opt-in per process
+        — the same deployment posture as Capsicum's cap_enter() — and are
+        adopted pervasively across the base system. Once dropped, rights
+        cannot be re-acquired by the process.
+    commits:
+    - hash: "8b23add8c74b86d0da67de43302cf21b97b028be"
+      date: "2018-07-13"
+      description: "Unveiling unveil(2): bring the per-process filesystem-visibility restriction into the tree (enabled for general use in 6.4)"
+    - hash: "350b464c5787ce73b4bf8e99960537423713261c"
+      date: "2015-10-09"
+      description: "Rename tame() to pledge(): per-process promise-based rights attenuation"
+    discussions: []
+    rationale: >-
+      Scored under the
+      functional-equivalence rule. The row's vulnerability class is ambient
+      authority / confused deputy, and the as-applied cross-OS bar is not an
+      object-capability purity test: Linux holds P=1 S=1 here for
+      capabilities(7) — coarse root-privilege decomposition with no
+      delegation semantics. pledge+unveil
+      attenuate a process's ambient rights far more finely than
+      capabilities(7), and Capsicum (P=1 S=3) is credited for an opt-in
+      mechanism with the same per-process deployment model.
+      P=1 as functional equivalent. S=2: substantially
+      reduces ambient authority (irreversible drop, kernel-enforced on
+      every lookup/syscall), but weaker than Capsicum/Zircon S=3 —
+      attenuation is path- and syscall-class-based rather than unforgeable
+      transferable rights, covers the filesystem namespace but not
+      arbitrary object references, and UID ambient authority persists
+      outside pledged/unveiled processes. D=2: kernel side always
+      available, per-process opt-in (same basis as FreeBSD Capsicum D=2
+      and C4.3 pledge D=2). A=2: in-tree facility layered on the UID
+      model, not a core capability architecture. T=3 (T_age=3: unveil
+      since 6.4 (2018), pledge since 5.9; T_maintained=3: both actively
+      maintained). unveil evidence is credited only here — C4.4 remains
+      deferred and C4.3's S=3 rests on pledge's syscall filtering alone —
+      so there is no double-counting.
+  C4.3:
+    P: 1
+    D: 2
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/kern_pledge.c"
+      - "sys/sys/pledge.h"
+      default_state: >-
+        pledge(2) restricts process syscalls to named promise groups.
+        pledge_syscalls[] array maps every syscall to its required
+        pledge group. Enforcement at syscall entry via pledge_syscall();
+        violations trigger SIGABRT via pledge_fail() (or ENOSYS in
+        "error" mode). PLEDGE_ALWAYS includes only exit, kbind,
+        __get_tcb/__set_tcb, pledge, sendsyslog, thrkill, utrace,
+        pinsyscalls. In OpenBSD 7.9 the "tmppath" promise was retired
+        (now returns EINVAL); temp-file use migrates to unveil "/tmp"
+        "rwc" + pledge "rpath wpath cpath". A new libc-internal
+        __pledge_open(2) opens a small controlled set of files (e.g.
+        /dev/null, /dev/tty, zoneinfo) under special pledge rules, with
+        strict symlink handling for /etc/localtime and zoneinfo.
+        Extensively adopted across OpenBSD base-system daemons and
+        utilities.
+    commits:
+    - hash: "586b470f3a48386e9005eb2372f8b7d7b2210f1f"
+      date: "2015-07-19"
+      description: "tame(2) is a subsystem which restricts programs into a reduced feature operating model (kernel component)"
+    - hash: "df174574d401c5c122a73e20e0b23ac91a73c4b1"
+      date: "2015-10-09"
+      description: "Rename tame() to pledge(): programs pledge/promise to operate within an easily defined subset of the Unix environment"
+    - hash: "5dbe1e3f450a186975449ab61d7f4a5bc9c6e6a8"
+      date: "2026-03-08"
+      description: "Introduce __pledge_open(2): libc-internal controlled open for files allowed even when rpath/unveil would deny"
+    - hash: "c883e836f48a8ca9ee3be9de6ebf4b36751f2196"
+      date: "2026-02-26"
+      description: "Retire pledge \"tmppath\" promise; now returns EINVAL. Replaced by unveil \"/tmp\" \"rwc\" + pledge \"rpath wpath cpath\""
+    - hash: "48a70aacebe55b9b947f0b8559ab60ad9d5b9af8"
+      date: "2026-03-14"
+      description: "man pledge.2: tmppath changed from Deprecated to No longer available"
+    - hash: "0e67b3de4b873402830e8a388ac9d137b486a1d1"
+      date: "2026-05-15"
+      description: "Strict __pledge_open(2) handling of /etc/localtime and /usr/share/zoneinfo (one symlink translation must land in zoneinfo; no symlinks within zoneinfo)"
+    discussions: []
+    rationale: >-
+      pledge(2) is OpenBSD's signature security mechanism: fine-grained
+      promise groups with kernel enforcement at syscall dispatch. Widely
+      adopted in base system. Once pledged, privileges cannot be
+      regained. No known practical bypass. D=2 (base-system daemons
+      pledge by default). S=3 (kernel-enforced, eliminates the
+      unrestricted-syscall class). A=2 (in-tree syscall added in 2015,
+      deeply integrated but not original architecture). 7.9 refined the
+      promise surface (tmppath retired, __pledge_open added, stricter
+      zoneinfo handling) without changing the security envelope.
+      T_maintained=3 (kern_pledge.c heavily maintained in the window).
+  C4.5:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/syscalls.master"
+      - "sys/arch/amd64/conf/GENERIC"
+      default_state: >-
+        OpenBSD removed its LKM subsystem and module syscalls in 2014.
+        OpenBSD 7.9's amd64 GENERIC kernel is statically linked and exposes
+        no runtime kernel-module or extension loader. Restrictions on
+        /dev/mem and /dev/kmem remain part of C6.4, but they do not create a
+        module-loading surface for this mechanism.
+    commits:
+    - hash: "987ad31189382b7b4c720d6c83968f2237b72f9c"
+      date: "2014-10-09"
+      description: "Remove LKM support"
+    - hash: "276ea4ffcf65e46f4c98b547ad04d6916059971f"
+      date: "2014-10-09"
+      description: "Delete LKM syscall stubs"
+    discussions: []
+    rationale: >-
+      N/A under the subsystem-removal rule: there is no module loader to
+      restrict. Treating removal as a strength-3 implementation would
+      incorrectly award points for a vacuous surface and would differ from
+      the same no-module condition on Fuchsia and other kernels.
+  C4.6:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/vfs_syscalls.c"
+      default_state: >-
+        Only chroot(2) available for filesystem isolation. No
+        namespace support (pid, net, mount, user), no jails, no
+        container primitives. chroot provides filesystem boundary
+        only, not full resource isolation. pledge/unveil provide
+        per-process restriction but are not container-level isolation.
+    commits:
+    - hash: "df930be708d50e9715f173caa26ffe1b7599b157"
+      date: "1995-10-18"
+      description: "Initial import of NetBSD tree (4.4BSD-Lite derived); mechanism inherited as ancestral BSD functionality"
+    discussions: []
+    rationale: >-
+      Only chroot for filesystem isolation. No namespaces, jails,
+      or container primitives. Known chroot escapes exist. D=1
+      (opt-in). S=1 (weak, known escapes without additional
+      restrictions). OpenBSD compensates with pledge/unveil but
+      those are scored separately.
+  C4.7:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "kern.global_ptrace (default 0 = restricted)"
+      source_files:
+      - "sys/kern/sys_process.c"
+      - "sys/kern/kern_pledge.c"
+      default_state: >-
+        global_ptrace=0 by default: only parent can trace child
+        processes. UID must match for PT_ATTACH or require superuser.
+        init (PID 1) cannot be traced at securelevel >= 0.
+        Ancestor/descendant checks prevent tracing loops. pledge("proc")
+        required for fork/vfork/setpgid/setsid. pledge("error") mode
+        returns ENOSYS instead of SIGABRT for graceful degradation.
+    commits:
+    - hash: "ad9da47b06fc9089a87b07f5da1c900072247243"
+      date: "2014-12-12"
+      description: "Add sysctl kern.global_ptrace: controls whether ptrace works on any process or only one's own children"
+    discussions: []
+    rationale: >-
+      Restricted ptrace (global_ptrace=0 default), UID enforcement,
+      PID 1 protection, pledge("proc") requirement. Comprehensive
+      credential and process relationship hardening. D=2 (default-on
+      restrictions). S=2 (effective but root can still trace).
+  C4.8:
+    P: 1
+    D: 2
+    S: 3
+    A: 3
+    T_age: 2
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "pinsyscalls(2) syscall (ld.so registers libc.so text range with kernel)"
+      - "msyscall(2) — predecessor, removed 2024"
+      source_files:
+      - "sys/sys/syscall_mi.h"
+      - "sys/uvm/uvm_mmap.c"
+      - "sys/sys/proc.h"
+      - "sys/kern/syscalls.master"
+      - "libexec/ld.so/library.c"
+      - "lib/libc/sys/pinsyscalls.2"
+      default_state: >-
+        ld.so calls pinsyscalls(2) once during program startup,
+        passing libc.so's text-segment range to the kernel (ps_libcpin;
+        static binaries / ld.so use ps_pin). The kernel's pin_check()
+        (inline in syscall_mi.h, run on every syscall) rejects any
+        syscall whose origin PC does not fall in the pinned region and
+        whose recorded per-syscall offset does not match — returning
+        ENOSYS. Invoking a syscall from any other code page (a JIT
+        page, a manually-mapped exec region, a ROP/JOP gadget landing
+        outside libc text) is killed. The check is lockless O(1). The
+        mechanism evolved: msyscall(2) added 2019-11-27, replaced by
+        pinsyscalls(2)+mimmutable in 2023 for a stricter lockless
+        mechanism; sys_msyscall deleted 2024-04. Combined with xonly
+        memory (C1e.6) this also blocks BROP-style attacks. In 7.9 the
+        libc-trusted-origin model is reinforced: descriptors opened via
+        the libc-internal __pledge_open(2) are tagged UF_PLEDGEOPEN and
+        may not be written/chmod/chflags/chown/ftruncate'd or fd-passed,
+        so only static libc code can use them.
+    commits:
+    - hash: "43981c5226a00cb8b9ea74db0c340b73dbde2350"
+      date: "2019-11-27"
+      description: "Add dummy msyscall(2) system call (predecessor of pinsyscalls)"
+    - hash: "37b1a9ceb494a5a4b920f5978bc890e4dcb53a28"
+      date: "2019-11-27"
+      description: "Document msyscall(2): ld.so tells kernel where libc.so's text segment is; kernel will kill processes invoking syscalls from outside permitted regions"
+    - hash: "e50417250fb1d11dd90538c8f1a10723b2e4b3af"
+      date: "2019-11-29"
+      description: "Repurpose 'syscalls must be on writeable page' check into 'syscalls must be in pre-registered regions'"
+    - hash: "30d2057940fb9e9627ddc71bfc4fe05f8825fcec"
+      date: "2024-04-02"
+      description: "Delete msyscall — mimmutable+pinsyscalls replaces it with stricter, lockless O(1) mechanism"
+    - hash: "b4359f85f619cff3785d5b633f569ccbfc6db376"
+      date: "2025-02-24"
+      description: "Only allow pinsyscalls() to set libc pins once (close race after copyin sleeping point)"
+    - hash: "a13048d8f4539e63d23a77a5d72f5c4cb92ca928"
+      date: "2026-03-09"
+      description: "Descriptors from libc __pledge_open(2) (UF_PLEDGEOPEN) cannot be written/chmod/chflags/chown/ftruncate'd or fd-passed — reinforces libc-only trusted syscall/IO origin"
+    discussions: []
+    rationale: >-
+      Syscall-origin pinning is unique to OpenBSD (Fuchsia's vDSO
+      mediation is structurally similar but architectural rather
+      than enforced as a separate check). It complements C4.3
+      (pledge limits *which* syscalls a process can issue) by
+      restricting *from where* in process memory those syscalls
+      can originate — closing a gap that pledge alone leaves: an
+      attacker with full ROP/JOP capability who has not violated
+      any pledge can still issue any pledged syscall through a
+      gadget. With pinsyscalls, the gadget chain must terminate
+      inside libc.so's pinned text, dramatically constraining
+      exploitation. P=1, D=2 (ld.so calls it on every program
+      start; static binaries that don't link libc are exempt but
+      rare in practice), S=3 (no known bypass except via libc
+      itself), A=3 (kernel + ld.so + libc cooperation), T=2 — pinned by
+      T_age=2 (~3 years in current pinsyscalls form; 6+ years if counting
+      the msyscall predecessor); T_maintained is also 2 (a handful (1-10)
+      of mechanism-relevant commits in the 2025-01-21 - 2026-07-21
+      window). 7.9 extended the libc-trusted-origin
+      model to __pledge_open descriptors.
+  C5a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/conf/files"
+      - "sys/arch/amd64/conf/GENERIC"
+      default_state: >-
+        Monolithic kernel: all drivers run in ring 0 with full kernel
+        privileges and shared address space. No driver sandboxing,
+        no capability-based driver isolation, no fault containment.
+    commits: []
+    discussions: []
+    rationale: >-
+      No driver fault isolation. Monolithic kernel design. P=0.
+  C5a.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/syscalls.master"
+      - "sys/arch/amd64/conf/GENERIC"
+      default_state: >-
+        OpenBSD 7.9 has no loadable kernel modules or extension loader, so
+        there is no loaded module whose privileges could be isolated.
+    commits:
+    - hash: "987ad31189382b7b4c720d6c83968f2237b72f9c"
+      date: "2014-10-09"
+      description: "Remove LKM support"
+    - hash: "276ea4ffcf65e46f4c98b547ad04d6916059971f"
+      date: "2014-10-09"
+      description: "Delete LKM syscall stubs"
+    discussions: []
+    rationale: >-
+      N/A: C5a.2 scores isolation of an extension after it has been loaded;
+      OpenBSD removed the entire runtime-loadable module subsystem, making
+      that sandbox property inapplicable rather than an absent mitigation.
+  C5a.3:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/net/bpf_filter.c"
+      default_state: >-
+        OpenBSD has the classic BPF interpreter only (bpf_filter.c, no
+        JIT). Every attached filter program is statically checked by
+        bpf_validate() (bounds-checked memory/jump operands, forward
+        jumps only, guaranteed termination) before it may run. No eBPF,
+        no XDP, no map infrastructure; no equivalent for
+        kprobes/tracepoints, perf event programs, or LSM hooks.
+    commits:
+    - hash: "df930be708d50e9715f173caa26ffe1b7599b157"
+      date: "1995-10-18"
+      description: "Initial import of NetBSD tree (4.4BSD-Lite derived); mechanism inherited as ancestral BSD functionality"
+    discussions: []
+    rationale: >-
+      P=1: classic BPF is an in-kernel VM that runs user-supplied
+      programs under a real verifier — bpf_validate() rejects programs
+      with out-of-bounds memory/jump operands or backward jumps,
+      guaranteeing sandboxed, terminating execution. This follows the
+      FreeBSD C5a.3 precedent (same classic-BPF-with-validator mechanism,
+      P=1/D=2/S=1 "present, limited"); NetBSD scores P=1 on the same
+      grounds. D=2: the
+      verifier is unconditional for every filter attached via bpf(4) in
+      the default kernel. S=1: weak relative to the eBPF reference point
+      — a narrow packet-filter instruction set with no program types,
+      maps, bounded-loop analysis or register-state tracking. The project
+      deliberately refuses a Turing-rich in-kernel VM (eBPF verifier CVE
+      history: CVE-2021-3490, CVE-2022-23222, CVE-2024-26581, ...),
+      treating "do not introduce the attack surface" as the strongest
+      mitigation — the narrowness is reflected in S=1, interpreter-only
+      execution being the conservative end of this row. A=2: in-tree
+      subsystem. T_age=3 (ancestral, 1995 import); T_maintained=2
+      (sys/net/bpf* carried only a handful (1-10) of mechanism-relevant
+      commits in the 2025-01-21 - 2026-07-21 window), so T = min(3,2) = 2.
+  C5b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/vmm_machdep.c"
+      - "sys/arch/amd64/include/vmmvar.h"
+      default_state: >-
+        No hypervisor-enforced kernel integrity mechanism. No HEKI
+        or Integrity Guard equivalent. OpenBSD has vmm(4) hypervisor
+        but it does not protect the host kernel from itself.
+    commits: []
+    discussions: []
+    rationale: >-
+      No hypervisor-enforced kernel integrity. P=0.
+  C5b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/dev/acpi/tpm.c"
+      - "sys/arch/amd64/conf/GENERIC"
+      default_state: >-
+        Basic TPM device support exists (tpm* at acpi? in GENERIC)
+        but no TPM-sealed key storage, no attestation, no
+        enclave-style protection. No TEE or SGX integration for
+        protecting kernel key material.
+    commits: []
+    discussions: []
+    rationale: >-
+      TPM device driver exists but no key sealing, attestation,
+      or enclave-style protection. P=0.
+  C5c.1:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "acpidmar0 at acpi? (disabled by default in amd64 GENERIC)"
+      source_files:
+      - "sys/dev/acpi/acpidmar.c"
+      - "sys/arch/amd64/amd64/acpi_machdep.c"
+      default_state: >-
+        Intel VT-d / AMD-Vi IOMMU support exists for amd64 via the
+        acpidmar(4) driver, but it is shipped 'disable'd in amd64
+        GENERIC (acpidmar0 at acpi? disable), so DMA remapping is OFF
+        by default. acpi_iommu_device_map() wires devices to the IOMMU
+        when enabled. ARM64 has Apple DART and SMMU support. IOMMU is
+        not used for comprehensive per-device driver isolation: device
+        drivers share the kernel address space and DMA access is not
+        strictly restricted per-device in the general case.
+    commits:
+    - hash: "969402718346f9dea55b91cce8485c570c7b090b"
+      date: "2020-10-27"
+      description: "Add IOMMU support for AMD-Vi and Intel VT-d (disabled): separate domains per PCI device, protection against invalid memory access"
+    - hash: "d69264de62415ca591fd273f32b5ecf83de55535"
+      date: "2026-02-24"
+      description: "Make acpidmar useful for general IOMMU use on amd64"
+    - hash: "019066103c6ee21ae15687fbb691ea5a90852e90"
+      date: "2026-03-27"
+      description: "acpidmar(4): Recognize reserved 4-byte IVHD device entry"
+    discussions: []
+    rationale: >-
+      IOMMU/DMAR support (acpidmar) exists but is disabled by default
+      in amd64 GENERIC and not used for comprehensive DMA isolation;
+      device drivers share the kernel address space. D=1 (available
+      but off by default / not enforced). S=1 (basic remapping, not
+      strict per-device isolation). A=2 (in-tree, substantially
+      extended in the 7.9 cycle for general amd64 IOMMU use, but still
+      not the default isolation posture). T_maintained=2: acpidmar.c saw
+      mechanism-relevant development in Feb-Mar 2026, but only a handful
+      (1-10) of such commits fall in the 2025-01-21 - 2026-07-21 window;
+      with T_age=3 this gives T = min(3,2) = 2.
+  C5c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/pmap.c"
+      - "sys/conf/files"
+      default_state: >-
+        No intra-kernel memory protection domains. Monolithic kernel
+        with flat address space. No PKS-based domains or equivalent
+        compartmentalization mechanism.
+    commits: []
+    discussions: []
+    rationale: >-
+      No intra-kernel memory domains. Monolithic design. P=0.
+  C5c.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/pmap.c"
+      default_state: >-
+        ARM MTE domain separation not applicable on x86-64.
+    commits: []
+    discussions: []
+    rationale: >-
+      Memory tagging for isolation (ARM MTE) not applicable on
+      x86-64 primary evaluation target.
+  C5d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/conf/files"
+      - "sys/arch/amd64/conf/GENERIC"
+      default_state: >-
+        Monolithic kernel: all services (filesystem, networking,
+        device drivers) run in a single privileged address space.
+        No architectural separation of kernel services.
+    commits: []
+    discussions: []
+    rationale: >-
+      Monolithic kernel with no architectural separation of
+      services. P=0.
+  C5d.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/conf/files"
+      - "sys/arch/amd64/amd64/pmap.c"
+      default_state: >-
+        No internal compartmentalization within the monolithic
+        kernel. All subsystems share the same address space and
+        privilege level. pledge(2) creates logical boundaries for
+        userspace but does not compartmentalize the kernel.
+    commits: []
+    discussions: []
+    rationale: >-
+      No internal kernel compartmentalization. Monolithic design
+      with shared address space. P=0.
+  C6.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/stand/efiboot/efiboot.c"
+      - "usr.bin/signify/signify.c"
+      default_state: >-
+        OpenBSD does not participate in UEFI Secure Boot. The
+        amd64 EFI bootloader is unsigned by Microsoft's CA, and
+        the kernel image is not verified by any firmware-anchored
+        chain at boot. signify(1) (Ed25519) verifies installation
+        sets and syspatch updates, but only at install/upgrade
+        time in userspace; it is not consulted on each boot, and
+        the project's release-key trust anchor is not stored in
+        firmware.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0 is correct, but with documented context. OpenBSD's
+      threat model treats firmware-anchored Secure Boot as
+      protection against an attacker with persistent root or
+      physical access — a class the project explicitly declines
+      to defend against, on the grounds that root is already
+      game-over and that platform-firmware trust roots (Microsoft
+      CA, vendor keys) introduce a different set of supply-chain
+      risks. The project's integrity story is signify-verified
+      release artifacts plus immutable filesystems mounted via
+      securelevel(7) and KARL re-randomization on each boot. This
+      is weaker than a hardware-anchored chain against an
+      attacker who can replace the on-disk kernel offline, and
+      that gap is real; the score reflects the actual capability,
+      not the philosophy.
+  C6.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/dev/acpi/tpm.c"
+      - "sys/arch/amd64/conf/GENERIC"
+      default_state: >-
+        No measured boot or remote attestation. No IMA equivalent.
+        No TPM PCR extension during boot. Basic TPM device driver
+        exists but not used for measured boot.
+    commits: []
+    discussions: []
+    rationale: >-
+      No measured boot or attestation mechanism. P=0.
+  C6.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/syscalls.master"
+      - "sys/arch/amd64/conf/GENERIC"
+      default_state: >-
+        OpenBSD 7.9 cannot load kernel modules or extensions after boot.
+        Consequently there is no module-signature enforcement point.
+        Verification of the booted kernel image belongs to C6.1; signify(1)
+        package verification is outside this kernel-level mechanism.
+    commits:
+    - hash: "987ad31189382b7b4c720d6c83968f2237b72f9c"
+      date: "2014-10-09"
+      description: "Remove LKM support"
+    - hash: "276ea4ffcf65e46f4c98b547ad04d6916059971f"
+      date: "2014-10-09"
+      description: "Delete LKM syscall stubs"
+    discussions: []
+    rationale: >-
+      N/A under the subsystem-removal rule: C6.3 is signature enforcement
+      for runtime-loadable kernel extensions, and OpenBSD has no such
+      extension surface. The absence of Secure Boot remains P=0 at C6.1.
+  C6.4:
+    P: 1
+    D: 2
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "kern.securelevel (default 1 in multiuser)"
+      source_files:
+      - "sys/kern/kern_sysctl.c"
+      default_state: >-
+        kern.securelevel provides runtime kernel integrity protection.
+        At securelevel >= 1: prevents /dev/kmem writes, raw disk
+        access, immutable flag removal, and lowering securelevel
+        (monotonic via atomic_cas_uint). No active integrity
+        monitoring (no kernel text hashing like LKRG), but prevents
+        unauthorized modification vectors.
+    commits:
+    - hash: "df930be708d50e9715f173caa26ffe1b7599b157"
+      date: "1995-10-18"
+      description: "Initial import of NetBSD tree (4.4BSD-Lite derived); mechanism inherited as ancestral BSD functionality"
+    - hash: "11c54b0955d14dd95543d586eec9299e95de6d29"
+      date: "2024-08-22"
+      description: "Introduce sysctl_securelevel() to modify securelevel mp-safe (monotonic raise-only enforcement via atomic_cas_uint)"
+    discussions: []
+    rationale: >-
+      securelevel provides runtime protection by preventing
+      modification vectors rather than detecting modifications.
+      Default securelevel=1 in multiuser mode. Monotonic enforcement.
+      D=2 (default-on). S=2 (prevents modification but no active
+      integrity verification). A=3 (core design property).
+      T_age=3 (ancestral BSD securelevel), but T_maintained=1: no
+      securelevel or allowkmem diff landed in sys/kern/kern_sysctl.c during
+      the 2025-01-21 - 2026-07-21 maintenance window (last mechanism-relevant
+      change 2024-08-22), so T = min(3,1) = 1.
+  C6.5:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/kern_exec.c"
+      - "sys/kern/exec_elf.c"
+      default_state: >-
+        No kernel-level executable integrity verification. No veriexec,
+        no IMA/EVM, no fs-verity. signify(1) provides userspace
+        package verification but does not prevent execution of
+        unsigned binaries. No runtime binary signature checking.
+    commits: []
+    discussions: []
+    rationale: >-
+      No kernel-level executable integrity verification. signify(1)
+      is userspace only. P=0.
+  C7a.1:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/copy.S"
+      - "sys/arch/amd64/amd64/locore.S"
+      - "sys/arch/amd64/include/codepatch.h"
+      default_state: >-
+        lfence barriers inserted in sensitive code paths (copy
+        operations, error paths, crypto code). Codepatch mechanism
+        allows runtime patching of speculation barriers. LVI
+        mitigation via lfence (2020). Selective deployment in
+        critical paths rather than comprehensive annotation like
+        Linux array_index_nospec.
+    commits:
+    - hash: "67ca69ecacf46c8d970d09c75497d3681d2aa2b8"
+      date: "2020-03-11"
+      description: "Load-Value-Injection mitigation using lfence"
+    discussions: []
+    rationale: >-
+      lfence barriers in sensitive code paths (copy operations,
+      crypto). Selective rather than comprehensive. No
+      array_index_nospec equivalent for systematic bounds-check
+      hardening. D=2 (in default kernel). S=1 (selective coverage,
+      not comprehensive).
+  C7a.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "machdep.retpoline sysctl"
+      source_files:
+      - "sys/arch/amd64/amd64/cpu.c"
+      - "sys/arch/amd64/include/codepatch.h"
+      - "sys/arch/amd64/include/specialreg.h"
+      default_state: >-
+        Comprehensive Spectre v2 mitigation. need_retpoline=1 default.
+        Enhanced IBRS (ibrs==2): MSR_SPEC_CTRL set once at boot.
+        IBPB on context switch when available (codepatch mechanism).
+        On CPUs with eIBRS or IBT: retpolines replaced with direct
+        jumps via codepatch (since retpolines are IBT bypass gadgets).
+        Intel and AMD detection paths. Three retpoline thunks
+        (RAX, R11, R13) patchable at runtime.
+    commits:
+    - hash: "1538f8cb209f93ed99ddae606a02707e3bdd9dfc"
+      date: "2023-07-31"
+      description: "On CPUs with eIBRS or IBT, replace retpolines with indirect jumps"
+    discussions: []
+    rationale: >-
+      Comprehensive Spectre v2 defense: retpoline + IBPB + eIBRS
+      with intelligent runtime codepatch adaptation. Retpolines
+      replaced on IBT-capable CPUs. D=2 (default-on). S=2 (strong
+      but side-channel residual risk remains).
+      T_age=3 (mitigations in place since 2018), but T_maintained=1: no
+      IBRS or retpoline diff landed in the 2025-01-21 - 2026-07-21
+      maintenance window (last mechanism-relevant change 2023-07), so
+      T = min(3,1) = 1.
+  C7a.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/include/specialreg.h"
+      default_state: >-
+        SSBD constants defined in specialreg.h (SPEC_CTRL_SSBD,
+        SEFF0EDX_SSBD, CPUIDEBX_SSBD) and CPU capability detected,
+        but SPEC_CTRL_SSBD is never written to MSR_SPEC_CTRL on
+        x86-64. Only SPEC_CTRL_IBRS is applied. OpenBSD mitigates
+        the same threat class via SMT disable (C7c.2) and VERW
+        buffer clearing (C7c.1) instead. ARM64 has explicit
+        Spectre v4 mitigation (cpu_mitigate_spectre_v4).
+    commits: []
+    discussions: []
+    rationale: >-
+      SSBD not applied on x86-64 despite hardware detection.
+      OpenBSD relies on SMT disable and VERW instead. P=0 for
+      dedicated SSBD mitigation on x86-64. Unfinished rather than
+      rejected: the 2019 vmm commits hiding SSBD
+      from guests state the controls "are not fully implemented yet
+      ... When these are properly passed through, we can restore
+      advertising", and kettenis implemented Spectre-v4 mitigation
+      on arm64 in 2024 (cpu_mitigate_spectre_v4, always-on, no knob)
+      — so there is no philosophical objection on record. The
+      residual exposure is narrow: cross-thread store-buffer leakage
+      is foreclosed by default SMT-off (C7c.2) plus VERW on
+      return-to-userspace (C7c.1), and no unprivileged in-kernel JIT
+      exists to attack across the kernel boundary; what is missing
+      is the per-process opt-in (prctl-style) SSBD that in-process
+      sandboxes use on Linux — a mechanism category OpenBSD has
+      never built.
+  C7a.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      - "sys/arch/amd64/amd64/locore.S"
+      default_state: >-
+        No -mharden-sls compiler flag in kernel build system. No
+        SLS-specific int3/ud2 barriers after ret/jmp instructions.
+        CVE-2021-26341 mitigation not implemented.
+    commits: []
+    discussions: []
+    rationale: >-
+      No straight-line speculation mitigation. P=0.
+  C7b.1:
+    status: xref
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files: []
+      default_state: >-
+        Meltdown mitigation via separate page tables scored under
+        C3b.1. OpenBSD uses cpu_meltdown flag with separate
+        ci_kern_cr3/ci_user_cr3 per-CPU, auto-enabled on vulnerable
+        Intel CPUs.
+    commits: []
+    discussions: []
+    rationale: >-
+      Cross-reference to C3b.1 (KPTI/separate page tables).
+  C7b.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/vmm_machdep.c"
+      - "sys/arch/amd64/amd64/vmm_support.S"
+      - "sys/arch/amd64/amd64/identcpu.c"
+      default_state: >-
+        L1TF mitigation via L1D cache flush on VM exit.
+        vmx_has_l1_flush_msr checked: if available, uses MSR-based
+        fast flush; otherwise allocates 64KB l1tf_flush_region for
+        memory-access-based slow flush. Applied in VMX/vmm context.
+        identcpu.c checks VMX L1D flush capability and
+        VMX_SKIP_L1D_FLUSH semantics.
+    commits:
+    - hash: "c844c4ad37ba222ab37c64cfbe4c5eb1ec73c844"
+      date: "2018-08-21"
+      description: "Perform mitigations for Intel L1TF: L1D flush via MSR or 64K PA-linear trapsled region before vmlaunch/vmresume"
+    - hash: "d31beec159fe731d4c61c4d62e46ba88eb2d68db"
+      date: "2019-05-28"
+      description: "Correct the test for when L1TF has been mitigated via hardware update (RDCL_NO) or nested-VM L1D_FLUSH MSR"
+    discussions: []
+    rationale: >-
+      L1TF mitigated via L1D flush on VM exit (fast MSR or slow
+      memory-based). Applied in vmm(4) hypervisor context. D=2
+      (auto-enabled). S=2 (effective for VMM context; kernel
+      context mitigated by PTE inversion behavior).
+      T_age=3 (L1TF mitigation since 2018), but T_maintained=1: no
+      L1D-flush diff landed in the 2025-01-21 - 2026-07-21 maintenance
+      window — the in-window vmm churn was SEV-ES work, not
+      mechanism-relevant — so T = min(3,1) = 1.
+  C7c.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/mds.S"
+      - "sys/arch/amd64/amd64/locore.S"
+      - "sys/arch/amd64/amd64/cpu.c"
+      - "sys/arch/amd64/include/codepatch.h"
+      - "sys/arch/amd64/include/specialreg.h"
+      default_state: >-
+        Comprehensive MDS mitigation with CPU model-specific handlers.
+        VERW instruction in syscall exit path (locore.S) clears
+        microarchitectural buffers. CPU-specific handlers in mds.S:
+        mds_handler_ivb (Ivy Bridge), mds_handler_bdw (Broadwell),
+        mds_handler_skl (Skylake with SSE/AVX/AVX-512 variants),
+        mds_handler_silvermont, mds_handler_knights. CPTAG_MDS and
+        CPTAG_MDS_VMM codepatch tags. Register zeroing (xor edi,
+        esi, r11d, eax, ecx) before VERW. Enhanced with L1D flush
+        MSR integration. 7.9 adds an FP-DSS (Floating Point Divider
+        State Sampling, AMD-SB-7053) mitigation: cpu_fix_msrs() sets
+        the FP_CFG_9 chicken bit in MSR_FP_CFG (0xc0011028) at boot
+        on AMD Zen/Zen+ (family 0x17, model <= 0x2f, non-virtualized),
+        on both amd64 and i386 — applied unconditionally, no sysctl gate.
+    commits:
+    - hash: "a0dcb1783e6fe75c0d3cc06802415d3e715ac53b"
+      date: "2019-05-17"
+      description: "Mitigate Intel's Microarchitectural Data Sampling vulnerability: VERW or Deep-Dive sequence in return-to-userspace and enter-VMM-guest paths"
+    - hash: "813fdc5e2b5dc48d12266ff2a8ee915135328414"
+      date: "2026-04-19"
+      description: "FP-DSS (Floating Point Divider State Sampling, AMD-SB-7053) mitigation: set FP_CFG_9 chicken bit on AMD Zen/Zen+"
+    discussions: []
+    rationale: >-
+      Comprehensive MDS mitigation with per-CPU-model handlers and
+      VERW buffer clearing. Codepatch mechanism enables runtime
+      adaptation. Register scrubbing in syscall exit path. 7.9 extends
+      the data-sampling family with an FP-DSS chicken-bit mitigation
+      for AMD Zen1, applied by default at boot. D=2 (auto-enabled on
+      vulnerable CPUs). S=2 (effective on targeted CPUs, some residual
+      risk on novel variants).
+      T_age=3 (MDS mitigation since 2019), but T_maintained=1: the MDS
+      mechanism's own files saw zero mechanism-relevant commits in the
+      2025-01-21 - 2026-07-21 maintenance window — sys/arch/amd64/amd64/mds.S
+      was last edited 2024-04-14, and the in-window FP-DSS chicken-bit change
+      landed outside the MDS handler files — so T = min(3,1) = 1.
+  C7c.2:
+    P: 1
+    D: 2
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "hw.blockcpu sysctl (default \"SL\" = SMT + lethargic cores blocked)"
+      - "hw.smt sysctl (retained but superseded; follows hw.blockcpu=S, warns on use)"
+      - "sched_blockcpu = CPUTYP_SMT | CPUTYP_L (machdep.c:324)"
+      source_files:
+      - "sys/arch/amd64/amd64/machdep.c"
+      - "sys/kern/kern_sched.c"
+      - "sys/sys/sched.h"
+      default_state: >-
+        OpenBSD disables SMT by default — unique among evaluated
+        OSes. sched_blockcpu initialized to CPUTYP_SMT|CPUTYP_L
+        (machdep.c:324), blocking SMT threads and lethargic cores
+        from scheduling. In 7.9 the control is generalized via the
+        new hw.blockcpu sysctl, a 4-letter mask (S=SMT, P=performance,
+        E=efficient, L=lethargic) of core classes to evict from the
+        scheduler; the default is "SL", so SMT stays blocked by
+        default. hw.smt is retained but superseded — it now follows
+        hw.blockcpu=S and warns when used. Scheduler checks
+        ci_cputype against sched_blockcpu before scheduling on any
+        CPU. Introduced June 2018 with rationale: "SMT implementations
+        typically share TLBs and L1 caches between threads... we
+        strongly suspect this will make several spectre-class bugs
+        exploitable."
+    commits:
+    - hash: "96c11352863a7f6240b4e5e388052f414b75f95b"
+      date: "2018-06-19"
+      description: "Disable use of additional processor threads in scheduler by default (hw.smt)"
+    - hash: "7ce80b65779a855abfb87fae4cb84abf5092a171"
+      date: "2026-03-31"
+      description: "Introduce hw.blockcpu sysctl (4-letter S/P/E/L mask); default SL keeps SMT blocked; hw.smt follows hw.blockcpu=S"
+    - hash: "1675bd6d036ef9e3506130e95cf7cd3603615ff7"
+      date: "2026-03-31"
+      description: "Warn if hw.smt is used, and recommend hw.blockcpu"
+    discussions: []
+    rationale: >-
+      OpenBSD is the ONLY evaluated OS to disable SMT by default.
+      Eliminates cross-thread speculation attacks at the scheduler
+      level. 7.9 generalizes the control via hw.blockcpu (default
+      "SL"), superseding hw.smt while keeping SMT off by default.
+      D=2 (default-on but re-enableable via hw.blockcpu/hw.smt).
+      S=3 (completely eliminates cross-thread side channels). A=3
+      (architectural decision deeply integrated into scheduler).
+  C5e.1:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "option DDB (in-kernel debugger, default-on in GENERIC)"
+      - "option DIAGNOSTIC (internal consistency checks, default-on)"
+      - "kern.watchdog.period / kern.watchdog.auto (off by default, period=0)"
+      source_files:
+      - "sys/kern/subr_prf.c"
+      - "sys/kern/kern_watchdog.c"
+      - "sys/conf/GENERIC"
+      default_state: >-
+        Monolithic kernel: a kernel fault cannot be contained or
+        recovered in place - panic() calls reboot(RB_AUTOBOOT|RB_DUMP),
+        performing an automatic crash dump and reboot (whole-machine
+        recovery, default-on). A generic hardware watchdog framework
+        (kern_watchdog.c; kern.watchdog sysctl; drivers register via
+        wdog_register, e.g. tcpcib(4)/ipmi(4)) provides liveness
+        recovery on hang but ships disabled (period 0). option DDB and
+        option DIAGNOSTIC are default-on in GENERIC for fault
+        detection/diagnosis. No soft/hard-lockup or hung-task detector,
+        no kdump-style kernel-state recovery, no per-subsystem fault
+        containment.
+    commits:
+    - hash: "f206784a65b4d4a8c21f9e5a4370de565b5a590e"
+      date: "2003-01-21"
+      description: "Add kern.watchdog sysctl and generic watchdog interface"
+    - hash: "0e8206e596add74fef1653b4472de6b3723c435f"
+      date: "2026-03-20"
+      description: "Ignore TCP SACK packets with invalid sequence numbers (integer overflow -> NULL deref kernel crash); reported by Nicholas Carlini at Anthropic"
+    discussions: []
+    rationale: >-
+      In a monolithic kernel there is no in-kernel fault containment:
+      a kernel fault panics. P=1 because OpenBSD does provide
+      availability primitives - automatic reboot+dump on panic
+      (default-on), a generic hardware watchdog framework for liveness
+      recovery (opt-in), and default-on DDB/DIAGNOSTIC fault detection.
+      D=1: the watchdog (the active containment facet) is off by
+      default; the default-on facet is whole-machine reboot, which is
+      coarse. S=1: recovery is a full reboot, not fault containment;
+      no lockup/hung-task detectors. A=2: in-tree and integrated but no
+      per-fault containment architecture (cf. microkernel per-component
+      restart). The 7.9 TCP SACK invalid-sequence kernel-crash fix
+      reflects a strong robustness culture but is a point-fix, not a
+      fault-containment mechanism. Userland daemon resilience (privsep,
+      init restart) is out of kernel scope. T_age=3 (watchdog 2003,
+      panic/DDB foundational); T_maintained=2 (only a handful (1-10) of
+      mechanism-relevant commits to the watchdog/panic/DDB files in the
+      2025-01-21 - 2026-07-21 window), so T = min(3,2) = 2.
+  C5e.2:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "setrlimit RLIMIT_CPU (login.conf 'cputime' class limit; default unlimited)"
+      - "setpriority/nice (scheduler priority; no rtprio API)"
+      source_files:
+      - "sys/kern/kern_resource.c"
+      - "sys/kern/sched_bsd.c"
+      - "sys/sys/resource.h"
+      default_state: >-
+        Per-process CPU-time budget is enforced via RLIMIT_CPU: a
+        periodic ps_rucheck_to timeout (RUCHECK_INTERVAL) in
+        kern_resource.c sums per-thread runtime and raises SIGXCPU at
+        the soft limit, SIGKILL at the hard limit. Default rlim_cur is
+        RLIM_INFINITY (no cap) unless set via login.conf 'cputime'.
+        Scheduling is BSD time-share with nice/setpriority only - no
+        rtprio(1) API. There is NO cgroup-style CPU bandwidth/quota
+        (cpu.max), NO SCHED_DEADLINE/EDF admission control, NO per-cpu%
+        cap (cf. FreeBSD RCTL pcpu), and no hard real-time budget.
+    commits:
+    - hash: "df930be708d50e9715f173caa26ffe1b7599b157"
+      date: "1995-10-18"
+      description: "Initial import of NetBSD tree (4.4BSD-Lite derived); mechanism inherited as ancestral BSD functionality"
+    - hash: "3cb3b60b5ff33f40f1ca18594bc0f47646bba98b"
+      date: "2019-06-10"
+      description: "Avoid changing resource limits in rucheck(); new state variable tracks when to send next SIGXCPU"
+    discussions: []
+    rationale: >-
+      P=1: RLIMIT_CPU is a real in-kernel CPU-time budget that kills a
+      runaway process (defends CWE-400 CPU starvation), plus
+      nice/setpriority scheduler control. D=1: the mechanism requires
+      an explicit setrlimit(2) or login.conf limit because the default
+      cap is RLIM_INFINITY.
+      S=1: weak - a coarse total-CPU-seconds cap and priorities, NOT
+      temporal isolation; no CPU-bandwidth/quota, no deadline
+      scheduling, no per-cpu% cap. A=2: an upstream in-tree resource
+      accounting and enforcement facility, but not a core temporal-
+      isolation architecture. T_age=3
+      (RLIMIT_CPU enforcement predates 2019, foundational scheduler);
+      T_maintained=2 (sched_bsd.c and kern_resource.c carried only a
+      handful (1-10) of mechanism-relevant commits in the
+      2025-01-21 - 2026-07-21 window), so T = min(3,2) = 2.
+  C5e.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "setrlimit RLIMIT_DATA/STACK/RSS/MEMLOCK/NPROC/NOFILE/FSIZE/CORE"
+      - "login.conf class limits (datasize, stacksize, maxproc, openfiles, memorylocked)"
+      - "kern.maxproc / kern.maxfiles / kern.maxthread sysctls"
+      - "UFS disk quotas (quota(1), quotacheck(8); opt-in via fstab)"
+      source_files:
+      - "sys/kern/kern_resource.c"
+      - "sys/kern/kern_fork.c"
+      - "sys/ufs/ufs/ufs_quota.c"
+      - "sys/sys/resource.h"
+      default_state: >-
+        Per-process resource quotas via setrlimit(2)/RLIMIT_* with
+        sane default-on limits set in lim_startup(): RLIMIT_NOFILE,
+        RLIMIT_NPROC (=MAXUPRC), and a low default RLIMIT_MEMLOCK.
+        Per-uid process counting (chgproccnt) is enforced in fork1():
+        a non-root fork is denied once count > lim_cur(RLIMIT_NPROC) or
+        within 5 of the global maxprocess. Global kern.maxproc /
+        kern.maxfiles / kern.maxthread sysctls bound system-wide
+        consumption. login.conf class limits (datasize, stacksize,
+        maxproc, openfiles, memorylocked) are applied at login.
+        Filesystem disk quotas (UFS ufs_quota.c, quota(1)) are
+        available but opt-in. No hierarchical cgroup-style quota
+        framework (cf. Linux memcg / FreeBSD RACCT).
+    commits:
+    - hash: "e6fd2ff84860d099ea5ae17d34f29629f598ebc7"
+      date: "2012-04-10"
+      description: "Make KERN_NPROCS/KERN_MAXPROC and RLIMIT_NPROC count processes not threads; add KERN_NTHREADS/KERN_MAXTHREAD sysctls"
+    discussions: []
+    rationale: >-
+      P=1: comprehensive resource-exhaustion enforcement - per-process
+      RLIMIT_*, per-uid proc counting (chgproccnt in kern_fork.c),
+      global maxproc/maxfiles/maxthread sysctls, and UFS disk quotas;
+      defends CWE-400/CWE-770. D=2: rlimits ship with real default-on
+      limits (NOFILE, NPROC=MAXUPRC, MEMLOCK), while disk quotas are
+      opt-in. S=2: effective per-process/per-uid/per-filesystem caps,
+      but flat - no hierarchical cgroup-style nesting and no unified
+      hierarchical quota framework. A=2: in-tree and well-integrated.
+      T_age=3 (UFS quota since 1995, rlimits
+      foundational); T_maintained=2 (the rlimit path in kern_resource.c and
+      kern_fork.c carried only a handful (1-10) of mechanism-relevant
+      commits in the 2025-01-21 - 2026-07-21 window; UFS quota sporadic),
+      so T = min(3,2) = 2.
+  C7d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/kern_sched.c"
+      - "sys/arch/amd64/amd64/cpu.c"
+      default_state: >-
+        No cache partitioning or time-protection mechanism. OpenBSD
+        has no Intel CAT/RDT / resctrl support (no IA32_PQR_ASSOC or
+        L3 QoS MSR programming, no LLC allocation), no security-
+        oriented page coloring, and no temporal-partitioning
+        scheduler isolation. The micro-architectural timing-channel
+        attack surface (shared LLC, shared structures) exists but is
+        not addressed by any dedicated partitioning mechanism. SMT is
+        disabled by default (scored under C7c.2) and KPTI provides
+        page-table isolation (scored under C3b.1), which incidentally
+        reduce some timing channels, but neither is cache/time
+        partitioning.
+    commits: []
+    discussions: []
+    rationale: >-
+      No dedicated time-protection / cache-partitioning mechanism in
+      OpenBSD 7.9. No Intel CAT/RDT, no page coloring for security, no
+      temporal partitioning. The timing-channel surface exists, so
+      P=0 (absent), not null (N/A). Adjacent mitigations (SMT disable
+      C7c.2, KPTI C3b.1) are scored elsewhere.

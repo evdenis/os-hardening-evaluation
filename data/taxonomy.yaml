@@ -1,0 +1,758 @@
+schema_version: 1
+evaluation_review_date: '2026-07-21'
+dimension_weights:
+  balanced: {w_d: 0.25, w_s: 0.35, w_a: 0.25, w_t: 0.15}
+  security_first: {w_d: 0.20, w_s: 0.45, w_a: 0.25, w_t: 0.10}
+  pragmatic: {w_d: 0.30, w_s: 0.25, w_a: 0.15, w_t: 0.30}
+  architectural: {w_d: 0.15, w_s: 0.25, w_a: 0.45, w_t: 0.15}
+category_weights:
+  general_purpose_server:
+    C1: 0.20
+    C2: 0.15
+    C3: 0.15
+    C4: 0.20
+    C5: 0.10
+    C6: 0.10
+    C7: 0.10
+  high_security:
+    C1: 0.20
+    C2: 0.20
+    C3: 0.15
+    C4: 0.15
+    C5: 0.15
+    C6: 0.10
+    C7: 0.05
+  embedded_iot:
+    C1: 0.15
+    C2: 0.10
+    C3: 0.10
+    C4: 0.15
+    C5: 0.25
+    C6: 0.15
+    C7: 0.10
+operating_systems:
+  linux:
+    name: "Linux"
+    version: "7.1.4 / Fedora 44 kernel 7.1.4-200.fc44"
+    kernel_type: monolithic
+    first_release_year: 1991
+    architectural_metrics:
+      tcb_kloc: 11158
+      tcb_kloc_breakdown:
+        builtin: 1883
+        shipped: 11158
+      tcb_kloc_method: >-
+        Config-resolved: SLOC of everything a full build of the pinned
+        Fedora 44 config actually compiles — 16,764
+        C/asm translation units (compile_commands.json of a v7.1.4 build; kmax
+        presence-condition static resolution agrees on 97.6% of the TU union)
+        plus 159 in-tree .rs sources across the 10 in-tree Rust crates, which
+        the upstream compile_commands.json generator cannot express because it
+        matches only `[^ ]*\.[cS]`. Headers excluded; lines behind
+        CONFIG-disabled preprocessor conditionals filtered out (the .rs
+        dependency lists are already config-resolved, so no filter applies).
+        Headline = shipped package (3,445 builtin units = 1,883 KLOC vmlinux +
+        13,478 module units across 4,996 modules); a deployment loads a module
+        subset, so the deployed TCB sits between the builtin and shipped bounds
+        (Kurmus et al., NDSS 2013).
+        Two exclusions are worth naming. (1) A Rust compilation unit is a
+        *crate*, not a file: rust/kernel.o alone is 149 .rs files, so units are
+        counted per source file to stay commensurable with the C side. (2) The
+        Rust `core` library (rust/core.o, 351 files / 211 KLOC) is compiled
+        from rust-src and linked into vmlinux but lives outside the kernel
+        repository, so it is excluded as out-of-tree — the one place where the
+        Rust TCB has an out-of-tree component the C TCB does not.
+        Prior releases of this dataset recorded 11,131/1,858 KLOC with
+        memory_safe_lang_pct 0: that build ran on a host without `bindgen`, so
+        Kconfig silently dropped CONFIG_RUST and its four Rust symbols. The
+        C-only resolution still reproduces those figures to within 0.1%
+        (16,764 TUs = 11,132 KLOC shipped / 1,859 KLOC builtin), the residual
+        being the two C helper TUs that CONFIG_RUST=y itself adds.
+      tcb_kloc_resolution: config-resolved
+      formal_verification_pct: 0
+      memory_safe_lang_pct: 0.23
+    repo_url: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
+    evaluated_ref: "7a5cef0db4795d9d453a12e0f61b5b7634fc4d40"
+    web:
+      kind: cgit
+      base_url: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
+    companion_repos:
+      linux_history:
+        repo_url: "https://git.kernel.org/pub/scm/linux/kernel/git/history/history.git"
+        source_dir: linux-history
+        evaluated_ref: "e7e173af42dbf37b1d946f9ee00219cb3b2bea6a"
+        clone: true
+        web:
+          kind: cgit
+          base_url: "https://git.kernel.org/pub/scm/linux/kernel/git/history/history.git"
+        purpose: "BitKeeper-era pre-1da177e4c3f4 history (1991-2005); resolves SHAs older than 2.6.12-rc2 cited in C1e.2 NX et al."
+  openbsd:
+    name: "OpenBSD"
+    version: "7.9"
+    kernel_type: monolithic
+    first_release_year: 1996
+    architectural_metrics:
+      tcb_kloc: 1909
+      tcb_kloc_method: >-
+        Config-resolved (2026-07): SLOC of the 2,475 translation units the
+        amd64 GENERIC configuration compiles, statically resolved from the
+        config(8) machinery (sys/conf/files + files.amd64 + GENERIC option/
+        device set with attribute closure and file-alternation handling),
+        .c/.S TUs only. Includes GENERIC's
+        compiled-in drivers (the DRM subsystem alone is 1,288 TUs), which the
+        previous directory-set proxy (419 KLOC, sys/ minus sys/dev) excluded.
+      tcb_kloc_resolution: config-resolved
+      formal_verification_pct: 0
+      memory_safe_lang_pct: 0
+    repo_url: "https://github.com/openbsd/src.git"
+    evaluated_ref: "c787a87f71a1643c3c1b4dbdf0cb6744927ac4e1"
+    web:
+      kind: github
+      base_url: "https://github.com/openbsd/src"
+  netbsd:
+    name: "NetBSD"
+    version: "11.0"
+    kernel_type: monolithic
+    first_release_year: 1993
+    architectural_metrics:
+      tcb_kloc: 2269
+      tcb_kloc_breakdown:
+        static: 1617
+        shipped: 2269
+      tcb_kloc_method: >-
+        Config-resolved (2026-08): SLOC of the 4,183 translation units the
+        shipped amd64 release compiles — the static GENERIC image (3,140 TUs
+        from the config(8) machinery: sys/conf/files include tree +
+        files.{amd64,x86,xen} per the machine line, file-system/select/options
+        tokens, attribute closure, prefix-directive handling) plus the
+        sys/modules tree (1,043 additional TUs incl. ZFS/DTrace/solaris from
+        external/cddl/osnet, MIT lua, nvmm, compat_linux; mini-bmake
+        evaluation with include-following over the sparse checkout
+        (etc/external/sbin/share/sys)), .c/.S TUs only; 3 generated
+        SRCS entries uncounted. Headline = shipped (mirrors the Linux
+        builtin/shipped convention). Replaces the directory-set proxy
+        (979 KLOC).
+      tcb_kloc_resolution: config-resolved
+      formal_verification_pct: 0
+      memory_safe_lang_pct: 0
+    repo_url: "https://github.com/NetBSD/src.git"
+    evaluated_ref: "7d25f256a2826e0a1945771090aceb98f7d2cf72"
+    web:
+      kind: github
+      base_url: "https://github.com/NetBSD/src"
+  fuchsia:
+    name: "Fuchsia"
+    version: "F30"
+    kernel_type: microkernel
+    first_release_year: 2021
+    architectural_metrics:
+      tcb_kloc: 234
+      tcb_kloc_method: >-
+        Directory-set measurement, configuration-unresolved (the sparse
+        zircon/-only checkout cannot run a GN configure): SLOC at
+        evaluated_ref over zircon/kernel; drivers are user-space components
+        outside the privileged TCB.
+      tcb_kloc_resolution: directory-set
+      formal_verification_pct: 0
+      memory_safe_lang_pct: 0
+    repo_url: "https://fuchsia.googlesource.com/fuchsia"
+    evaluated_ref: "18e076df165365da341315cf2bb86b2c1e0eb8a4"
+    web:
+      kind: gitiles
+      base_url: "https://fuchsia.googlesource.com/fuchsia"
+  hurd:
+    name: "GNU/Hurd"
+    version: "GNU Mach snapshot 2026-07-21 / Debian GNU/Hurd 2025 (amd64 + i386)"
+    kernel_type: microkernel
+    first_release_year: 1997
+    architectural_metrics:
+      tcb_kloc: 54
+      tcb_kloc_method: >-
+        Config-resolved (2026-07): SLOC of the 142 translation units the
+        Debian gnumach amd64 build compiles, resolved from the Automake
+        conditionals in Makefrag*.am (HOST_x86_64, AT platform, APIC on, no
+        Xen, no kdb, kmsg on), .c/.S TUs only;
+        MIG-generated stubs are build artifacts and uncounted. Replaces the
+        directory-set proxy (70 KLOC). Hurd servers run in user space outside
+        the privileged TCB.
+      tcb_kloc_resolution: config-resolved
+      formal_verification_pct: 0
+      memory_safe_lang_pct: 0
+    repo_url: "https://git.savannah.gnu.org/git/hurd/gnumach.git"
+    evaluated_ref: "5643c894115885d0e8b261bf5e0a6edebbc97fc5"
+    web:
+      kind: cgit
+      base_url: "https://git.savannah.gnu.org/cgit/hurd/gnumach.git"
+    companion_repos:
+      hurd_servers:
+        repo_url: "https://git.savannah.gnu.org/git/hurd/hurd.git"
+        source_dir: hurd-servers
+        evaluated_ref: "8110d3ec482e99b44bd49f895c0aaa4e8fc34e08"
+        clone: true
+        web:
+          kind: cgit
+          base_url: "https://git.savannah.gnu.org/cgit/hurd/hurd.git"
+        purpose: "Hurd servers (auth, proc, exec, fs/*) — user-space half of the kernel that resolves cited commits outside gnumach"
+      hurd_mig:
+        repo_url: "https://git.savannah.gnu.org/git/hurd/mig.git"
+        source_dir: hurd-mig
+        evaluated_ref: "d27138506196f2fba644568d596851208db4abca"
+        clone: true
+        web:
+          kind: cgit
+          base_url: "https://git.savannah.gnu.org/cgit/hurd/mig.git"
+        purpose: "MIG IDL compiler used to generate gnumach RPC stubs"
+  redox:
+    name: "Redox OS"
+    version: "Redox OS 0.9.0 / kernel crate 0.5.12 snapshot 2026-04-16"
+    kernel_type: microkernel
+    first_release_year: 2015
+    architectural_metrics:
+      tcb_kloc: 29
+      tcb_kloc_method: >-
+        SLOC (non-blank, non-comment source lines) at kernel-crate
+        evaluated_ref over src/; drivers/filesystems are user-space schemes
+        outside the privileged TCB. The cargo crate with default features is
+        effectively configuration-resolved (feature gates are few and
+        default-on in the shipped build).
+      tcb_kloc_resolution: config-resolved
+      formal_verification_pct: 0
+      memory_safe_lang_pct: 100
+    repo_url: "https://gitlab.redox-os.org/redox-os/kernel.git"
+    evaluated_ref: "4531e15ba1f32ef53f126c70ace906f2a850adb7"
+    web:
+      kind: gitlab
+      base_url: "https://gitlab.redox-os.org/redox-os/kernel"
+    companion_repos:
+      redox_book:
+        repo_url: "https://gitlab.redox-os.org/redox-os/book.git"
+        source_dir: redox-book
+        evaluated_ref: "3369933750e6a6f8b0328f47df0310bf1c762e29"
+        clone: true
+        web:
+          kind: gitlab
+          base_url: "https://gitlab.redox-os.org/redox-os/book"
+        purpose: "Redox Book design and security documentation used as design-intent evidence"
+  zephyr:
+    name: "Zephyr RTOS"
+    version: "v4.4.1"
+    kernel_type: monolithic
+    first_release_year: 2016
+    architectural_metrics:
+      tcb_kloc: 25
+      tcb_kloc_method: >-
+        Directory-set measurement, configuration-unresolved (a Kconfig/DTS
+        configure needs the Zephyr SDK, absent on the measurement host): SLOC
+        at evaluated_ref over kernel, arch/arm, arch/common; drivers/ and
+        subsys/ excluded, so a deployed image adds the configured
+        driver/subsystem subset.
+      tcb_kloc_resolution: directory-set
+      formal_verification_pct: 0
+      memory_safe_lang_pct: 0
+    family: Zephyr
+    repo_url: "https://github.com/zephyrproject-rtos/zephyr"
+    evaluated_ref: "1f6485eca25431b5ff27ce9a754218c9e559bbbb"
+    web:
+      kind: github
+      base_url: "https://github.com/zephyrproject-rtos/zephyr"
+  tock:
+    name: "Tock OS"
+    version: "2.2"
+    kernel_type: monolithic
+    first_release_year: 2018
+    architectural_metrics:
+      tcb_kloc: 33
+      tcb_kloc_method: >-
+        SLOC (non-blank, non-comment source lines) at evaluated_ref over
+        kernel, arch, chips/nrf52, chips/nrf5x (the evaluated nRF52840DK
+        target); capsules/ excluded as the untrusted-by-design driver layer
+        (privileged but sandboxed in safe Rust).
+      tcb_kloc_resolution: directory-set
+      formal_verification_pct: 0
+      memory_safe_lang_pct: 100
+    family: Tock
+    repo_url: "https://github.com/tock/tock"
+    evaluated_ref: "9554639b17501a9f5940cef7a1770a0823e790c3"
+    web:
+      kind: github
+      base_url: "https://github.com/tock/tock"
+  sel4:
+    name: "seL4"
+    version: "15.0.0"
+    kernel_type: microkernel
+    first_release_year: 2014
+    family: L4
+    architectural_metrics:
+      tcb_kloc: 11
+      tcb_kloc_method: >-
+        Config-resolved (2026-07): SLOC of the 70 translation units (66 C
+        files concatenated into kernel_all.c + 4 assembly files) a CMake
+        configure of the pinned AArch64 verification build compiles
+        (configs/AARCH64_zynqmp_verified.cmake, KernelPlatform=zynqmp),
+        lines behind gen_config-disabled
+        CONFIG conditionals filtered; libsel4 (user-side API) excluded.
+        10,538 SLOC (10.5 KLOC) — consistent with the 8,700 lines of C Klein
+        et al. report for the original verified ARMv7 kernel. Replaces the
+        directory-set proxy (36 KLOC, all ARM platforms + headers).
+        Formal-verification coverage is derived from the same resolved file set:
+        the functional-correctness proof covers the 66 C translation units
+        (10,254 SLOC) but not the 4 hand-written AArch64 assembly units
+        (head.S, traps.S, idle.S, machine_asm.S, ~284 SLOC), which are assumed
+        correct rather than verified — hence 97%, not 100%. Boot code, the
+        compiler and linker (binary translation validation does not cover
+        AArch64) and cache/TLB management are outside the proof as well.
+        Integrity is additionally proved for this configuration;
+        confidentiality/non-interference is not, at the pinned revision.
+      tcb_kloc_resolution: config-resolved
+      formal_verification_pct: 97
+      memory_safe_lang_pct: 0
+    repo_url: "https://github.com/seL4/seL4"
+    evaluated_ref: "881de507fe528490dc5e570c7810a149bad5880f"
+    web:
+      kind: github
+      base_url: "https://github.com/seL4/seL4"
+    companion_repos:
+      l4v:
+        repo_url: "https://github.com/seL4/l4v"
+        source_dir: l4v
+        clone: false
+        web:
+          kind: github
+          base_url: "https://github.com/seL4/l4v"
+        purpose: "Isabelle/HOL machine-checked proofs (functional correctness, integrity, confidentiality/info-flow, binary translation validation) — documentation-only reference, NOT cloned (multi-GB); cited via the in-tree CAVEATS.md, docs.sel4.systems verified-configurations and the verification papers. Coverage is per architecture AND per configuration: the scored AArch64-with-hypervisor build has functional correctness and integrity; confidentiality and binary-level validation are AArch32/RISC-V results and do not transfer to it"
+mechanisms:
+  C1a.1:
+    category: C1
+    subcategory: C1a
+    name: "Stack buffer overflow detection"
+    vulnerability_class: "CWE-121"
+  C1a.2:
+    category: C1
+    subcategory: C1a
+    name: "Guard pages (stack / heap)"
+    vulnerability_class: "CWE-121, CWE-122"
+  C1a.3:
+    category: C1
+    subcategory: C1a
+    name: "Hardened user-kernel copy"
+    vulnerability_class: "CWE-120"
+  C1a.4:
+    category: C1
+    subcategory: C1a
+    name: "Compile-time buffer overflow detection (FORTIFY_SOURCE)"
+    vulnerability_class: "CWE-120"
+  C1a.5:
+    category: C1
+    subcategory: C1a
+    name: "Runtime memory-safety sanitizers and bounds checking"
+    vulnerability_class: "CWE-787, CWE-125, CWE-416"
+  C1a.6:
+    category: C1
+    subcategory: C1a
+    name: "Hardware memory tagging (spatial mode)"
+    vulnerability_class: "CWE-787"
+  C1a.7:
+    category: C1
+    subcategory: C1a
+    name: "Array index bounds checking (UBSAN_BOUNDS)"
+    vulnerability_class: "CWE-129, CWE-787"
+  C1b.1:
+    category: C1
+    subcategory: C1b
+    name: "Use-after-free mitigation (allocator-level)"
+    vulnerability_class: "CWE-416"
+  C1b.2:
+    category: C1
+    subcategory: C1b
+    name: "Heap metadata and allocator hardening"
+    vulnerability_class: "CWE-122"
+    scoring_notes: >-
+      Cross-OS precedent: type-segregated slab caches with in-band but typed
+      free-lists score P=1 D=2 S=1 (FreeBSD "inherent slab architecture";
+      gnumach matches); a single undifferentiated heap with an intrusive
+      in-band free-list and no segregation scores P=0 (Redox). S=2 requires
+      actual free-list hardening — obfuscation, canaries or poisoning
+      (Linux/NetBSD/OpenBSD).
+  C1b.3:
+    category: C1
+    subcategory: C1b
+    name: "Reference count overflow protection"
+    vulnerability_class: "CWE-190, CWE-416"
+    scoring_notes: >-
+      Cross-OS precedent: an unconditional overflow check on a real
+      attacker-reachable refcount scores P=1 D=3 even when coverage is narrow
+      (Linux refcount_t, FreeBSD refcount(9) saturation). S grades on coverage
+      breadth: S=2 for pervasive checked types, S=1 for a narrow guard on one
+      counter family (OpenBSD debug assertions, Hurd MACH_PORT_UREFS_OVERFLOW).
+  C1b.4:
+    category: C1
+    subcategory: C1b
+    name: "Linked list integrity hardening"
+    vulnerability_class: "CWE-416"
+  C1b.5:
+    category: C1
+    subcategory: C1b
+    name: "Hardware memory tagging (temporal mode)"
+    vulnerability_class: "CWE-416"
+  C1c.1:
+    category: C1
+    subcategory: C1c
+    name: "Automatic variable initialization"
+    vulnerability_class: "CWE-457"
+  C1c.2:
+    category: C1
+    subcategory: C1c
+    name: "Heap zeroing on allocation"
+    vulnerability_class: "CWE-908"
+  C1d.1:
+    category: C1
+    subcategory: C1d
+    name: "Kernel stack randomization"
+    vulnerability_class: "CWE-330 (stack address prediction)"
+  C1d.2:
+    category: C1
+    subcategory: C1d
+    name: "Heap layout and allocation-order randomization"
+    vulnerability_class: "CWE-330 (heap layout prediction)"
+  C1d.3:
+    category: C1
+    subcategory: C1d
+    name: "Randomized structure layout"
+    vulnerability_class: "CWE-330 (known struct member offsets)"
+  C1e.1:
+    category: C1
+    subcategory: C1e
+    name: "W^X / DEP / NX enforcement in kernel space"
+    vulnerability_class: "CWE-94"
+  C1e.2:
+    category: C1
+    subcategory: C1e
+    name: "Read-only after init (__ro_after_init)"
+    vulnerability_class: "CWE-471 (post-boot modification of assumed-immutable data)"
+  C1e.3:
+    category: C1
+    subcategory: C1e
+    name: "Immutable memory regions"
+    vulnerability_class: "CWE-471 (runtime kernel data modification)"
+  C1e.4:
+    category: C1
+    subcategory: C1e
+    name: "Kernel execute-never for userspace mappings (SMEP/PXN)"
+    vulnerability_class: "CWE-269 (ret2usr)"
+  C1e.5:
+    category: C1
+    subcategory: C1e
+    name: "Sensitive control-metadata isolation"
+    vulnerability_class: "CWE-787 (control metadata corruption)"
+  C1e.6:
+    category: C1
+    subcategory: C1e
+    name: "Execute-only memory (xonly) for code segments"
+    vulnerability_class: "ROP gadget enumeration via .text disclosure (CWE-200)"
+  C1e.7:
+    category: C1
+    subcategory: C1e
+    name: "Immutable mappings (per-VMA seal against later mprotect/munmap)"
+    vulnerability_class: "post-init mapping permission tampering (CWE-732)"
+  C1e.8:
+    category: C1
+    subcategory: C1e
+    name: "Executable section trap fills (trapsleds)"
+    vulnerability_class: "CWE-121, CWE-787 (ROP gadget reuse in alignment padding; fall-through into adjacent code)"
+  C1f.1:
+    category: C1
+    subcategory: C1f
+    name: "Memory-safe language usage in kernel code"
+    vulnerability_class: "CWE-787, CWE-416, CWE-125 (entire class)"
+  C2a.1:
+    category: C2
+    subcategory: C2a
+    name: "Software forward-edge CFI"
+    vulnerability_class: "CWE-843"
+    dependencies: ["C1e.1", "C1e.2", "C3d.1"]
+  C2a.2:
+    category: C2
+    subcategory: C2a
+    name: "Hardware forward-edge — x86 (indirect branch tracking)"
+    vulnerability_class: "CWE-843"
+  C2a.3:
+    category: C2
+    subcategory: C2a
+    name: "Hardware forward-edge — ARM (branch target identification)"
+    vulnerability_class: "CWE-843"
+  C2b.1:
+    category: C2
+    subcategory: C2b
+    name: "Software backward-edge (shadow call stack / return guard)"
+    vulnerability_class: "CWE-121, CWE-787 (return-address corruption; ROP)"
+    dependencies: ["C1e.1", "C1d.1"]
+  C2b.2:
+    category: C2
+    subcategory: C2b
+    name: "Hardware backward-edge — x86 (shadow stack)"
+    vulnerability_class: "CWE-121, CWE-787 (return-address corruption; ROP)"
+    dependencies: ["C1e.1", "C1d.1"]
+  C2b.3:
+    category: C2
+    subcategory: C2b
+    name: "Hardware pointer authentication (ARM PAC)"
+    vulnerability_class: "CWE-121, CWE-787 (pointer forgery; ROP/JOP)"
+  C2b.4:
+    category: C2
+    subcategory: C2b
+    name: "Hardware backward-edge — ARM (Guarded Control Stack)"
+    vulnerability_class: "CWE-121, CWE-787 (return-address corruption; ROP)"
+  C2c.1:
+    category: C2
+    subcategory: C2c
+    name: "JIT code hardening"
+    vulnerability_class: "CWE-94 (JIT spray)"
+    dependencies: ["C5a.3"]
+  C3a.1:
+    category: C3
+    subcategory: C3a
+    name: "Kernel base address randomization (KASLR / KARL)"
+    vulnerability_class: "CWE-200 (kernel address disclosure)"
+    dependencies: ["C3d.1", "C3b.1"]
+  C3a.2:
+    category: C3
+    subcategory: C3a
+    name: "Fine-grained function randomization (FG-KASLR)"
+    vulnerability_class: "CWE-200, CWE-330 (KASLR bypass via known function offsets)"
+    dependencies: ["C3d.1", "C3b.1"]
+  C3b.1:
+    category: C3
+    subcategory: C3b
+    name: "Kernel page table isolation (KPTI)"
+    vulnerability_class: "CWE-200 (Meltdown)"
+  C3b.2:
+    category: C3
+    subcategory: C3b
+    name: "Supervisor-mode access/execute prevention (SMAP/PAN)"
+    vulnerability_class: "CWE-200 (unintended userspace access)"
+  C3c.1:
+    category: C3
+    subcategory: C3c
+    name: "Memory zeroing on free"
+    vulnerability_class: "CWE-226 (freed memory disclosure)"
+  C3c.2:
+    category: C3
+    subcategory: C3c
+    name: "Stack erasure on syscall return"
+    vulnerability_class: "CWE-200 (stack data leak)"
+  C3c.3:
+    category: C3
+    subcategory: C3c
+    name: "Register scrubbing on function return"
+    vulnerability_class: "CWE-200 (register data leak)"
+  C3d.1:
+    category: C3
+    subcategory: C3d
+    name: "Kernel pointer and log exposure restriction"
+    vulnerability_class: "CWE-200 (kernel address leak)"
+  C3d.2:
+    category: C3
+    subcategory: C3d
+    name: "Kernel diagnostic interface restriction"
+    vulnerability_class: "CWE-200 (procfs/sysfs leak)"
+    scoring_notes: >-
+      Cross-OS precedent: any by-design restriction of kernel diagnostic
+      interfaces counts as presence, even partial or permissive by default —
+      sel4 (capability/config-gated debug syscalls), NetBSD (security.curtain,
+      default off, D=1), FreeBSD (see_other_uids, permissive, D=1), Hurd
+      (device-master-port gate, mandatory for the device layer, D=2). S grades
+      on how much of the diagnostic surface the restriction covers.
+  C4.2:
+    category: C4
+    subcategory:
+    name: "Capability-based access control"
+    vulnerability_class: "CWE-269"
+  C4.3:
+    category: C4
+    subcategory:
+    name: "Syscall attack surface reduction"
+    vulnerability_class: "CWE-269"
+  C4.5:
+    category: C4
+    subcategory:
+    name: "Kernel module / extension loading restrictions"
+    vulnerability_class: "CWE-269"
+  C4.6:
+    category: C4
+    subcategory:
+    name: "Process / resource isolation domains"
+    vulnerability_class: "CWE-269"
+  C4.7:
+    category: C4
+    subcategory:
+    name: "Credential and process relationship hardening"
+    vulnerability_class: "CWE-269"
+    scoring_notes: >-
+      Cross-OS precedent: a uid-based gate on acquiring debug authority over
+      another process, WITHOUT an ancestry/scope filter, scores S=1 (NetBSD
+      uid-match ptrace, Hurd proc-server check_owner); adding a Yama-style
+      ancestry/scope restriction earns S=2 (Linux ptrace_scope, OpenBSD).
+  C4.8:
+    category: C4
+    subcategory:
+    name: "Syscall origin pinning (libc-only syscall entry)"
+    vulnerability_class: "ROP/JOP issuing syscalls from gadget chains (CWE-94)"
+    scoring_notes: >-
+      Scored independently for every OS: origin pinning (from WHERE a syscall
+      may be issued) is a distinct property from C4.3 filtering (WHICH
+      syscalls may be issued) — a process that violates no filter can still
+      issue any permitted syscall from a ROP/JOP gadget unless its origin is
+      pinned. Evidence must not be double-counted with C4.3: an
+      implementation credited here must not also be the decisive property
+      behind a C4.3 Strength score. (Restored from cross-reference status by
+      the 2026-07 cross-OS fairness review; the previous fold into C4.3 was
+      lossy for systems whose C4.3 already sat at the S=3 anchor.)
+  C5a.1:
+    category: C5
+    subcategory: C5a
+    name: "Driver fault isolation"
+    vulnerability_class: "CWE-829, CWE-862 (driver bugs crashing kernel)"
+    scoring_notes: >-
+      Cross-OS precedent: D grades on default driver-class coverage — D=3
+      requires all drivers in userspace by architecture (Fuchsia "all drivers
+      userspace"); default-on for major classes but with some classes still
+      in-kernel (or one arch opt-in) caps at D=2 (Hurd amd64); an opt-in
+      userspace-driver framework scores D=1 (NetBSD rump).
+  C5a.2:
+    category: C5
+    subcategory: C5a
+    name: "Loadable module / extension isolation"
+    vulnerability_class: "CWE-829, CWE-862"
+  C5a.3:
+    category: C5
+    subcategory: C5a
+    name: "In-kernel VM sandbox (eBPF verifier + runtime)"
+    vulnerability_class: "CWE-829, CWE-862"
+    scoring_notes: >-
+      Classic BPF with a
+      registration-time validator (bpf_validate) scores P=1 D=2 S=1 "present,
+      limited" on every OS that ships it (FreeBSD, OpenBSD, NetBSD, Hurd
+      are scored on the same grounds). S>=2 requires an eBPF-class verifier
+      (program types, maps, register-state tracking).
+  C5b.1:
+    category: C5
+    subcategory: C5b
+    name: "Hypervisor-enforced kernel integrity (HEKI / IKG)"
+    vulnerability_class: "CWE-693, CWE-732 (post-compromise kernel modification)"
+  C5b.2:
+    category: C5
+    subcategory: C5b
+    name: "Enclave-style protection of kernel key material"
+    vulnerability_class: "CWE-693, CWE-732 (key exposure)"
+  C5c.1:
+    category: C5
+    subcategory: C5c
+    name: "DMA / device / peripheral access isolation"
+    vulnerability_class: "CWE-269, CWE-284 (DMA attacks, unauthorized peripheral access)"
+  C5c.2:
+    category: C5
+    subcategory: C5c
+    name: "Intra-kernel memory-protection domains"
+    vulnerability_class: "CWE-269, CWE-284 (lateral movement)"
+  C5c.3:
+    category: C5
+    subcategory: C5c
+    name: "Memory tagging for isolation (ARM MTE domain separation)"
+    vulnerability_class: "CWE-269, CWE-284"
+  C5d.1:
+    category: C5
+    subcategory: C5d
+    name: "Architectural separation of kernel services"
+    vulnerability_class: "CWE-250 (monolithic attack surface)"
+  C5d.2:
+    category: C5
+    subcategory: C5d
+    name: "Internal compartmentalization (limiting lateral movement)"
+    vulnerability_class: "CWE-250"
+  C5e.1:
+    category: C5
+    subcategory: C5e
+    name: "Fault detection, containment and recovery"
+    vulnerability_class: "DoS via crash / hang / livelock (CWE-755, availability)"
+  C5e.2:
+    category: C5
+    subcategory: C5e
+    name: "Temporal isolation / CPU-budget enforcement"
+    vulnerability_class: "CPU starvation / DoS (CWE-400 uncontrolled resource consumption)"
+  C5e.3:
+    category: C5
+    subcategory: C5e
+    name: "Resource-exhaustion / quota enforcement"
+    vulnerability_class: "resource exhaustion / DoS (CWE-400, CWE-770 allocation without limits)"
+  C6.1:
+    category: C6
+    subcategory:
+    name: "Verified / secure boot chain"
+    vulnerability_class: "CWE-494 (untrusted code execution)"
+  C6.2:
+    category: C6
+    subcategory:
+    name: "Measured boot and remote attestation"
+    vulnerability_class: "CWE-494"
+  C6.3:
+    category: C6
+    subcategory:
+    name: "Kernel code signing enforcement"
+    vulnerability_class: "CWE-494"
+  C6.4:
+    category: C6
+    subcategory:
+    name: "Runtime kernel integrity protection"
+    vulnerability_class: "CWE-829"
+  C6.5:
+    category: C6
+    subcategory:
+    name: "Executable and object integrity verification"
+    vulnerability_class: "CWE-494"
+    dependencies: ["C6.1"]
+  C7a.1:
+    category: C7
+    subcategory: C7a
+    name: "Bounds check bypass mitigation (Spectre v1)"
+    vulnerability_class: "CWE-1420 (Spectre v1, CVE-2017-5753)"
+  C7a.2:
+    category: C7
+    subcategory: C7a
+    name: "Branch target injection mitigation (Spectre v2 / BTI / Retbleed / BHI)"
+    vulnerability_class: "CWE-1423 (Spectre v2 / BTI, CVE-2017-5715; Retbleed, BHI)"
+  C7a.3:
+    category: C7
+    subcategory: C7a
+    name: "Speculative store bypass mitigation (Spectre v4 / SSB)"
+    vulnerability_class: "CWE-1422 (Spectre v4 / SSB, CVE-2018-3639)"
+  C7a.4:
+    category: C7
+    subcategory: C7a
+    name: "Straight-line speculation mitigation (SLS)"
+    vulnerability_class: "CWE-1420 (SLS, CVE-2021-26341)"
+  C7b.1:
+    category: C7
+    subcategory: C7b
+    name: "Kernel memory read mitigation (Meltdown)"
+    vulnerability_class: "CWE-1421 (Meltdown, CVE-2017-5754)"
+    xref_target: C3b.1
+  C7b.2:
+    category: C7
+    subcategory: C7b
+    name: "L1 terminal fault mitigation (L1TF / Foreshadow)"
+    vulnerability_class: "CWE-1421 (L1TF / Foreshadow, CVE-2018-3615)"
+  C7c.1:
+    category: C7
+    subcategory: C7c
+    name: "Microarchitectural data sampling mitigation (MDS / TAA / MMIO)"
+    vulnerability_class: "CWE-1342, CWE-1421 (MDS, CVE-2018-12130; TAA; MMIO stale data)"
+  C7c.2:
+    category: C7
+    subcategory: C7c
+    name: "Cross-thread speculation isolation (STIBP / SMT disable)"
+    vulnerability_class: "CWE-1423 (cross-thread speculative leaks via shared SMT predictor state)"
+  C7d.1:
+    category: C7
+    subcategory: C7d
+    name: "Time protection / cache partitioning"
+    vulnerability_class: "covert/side timing channel (CWE-385, CWE-1303 non-transparent sharing of micro-arch resources)"

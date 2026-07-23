@@ -1,0 +1,2181 @@
+# yaml-language-server: $schema=schema/evaluation.schema.json
+# GNU/Hurd (GNU Mach + Hurd servers) kernel hardening evaluation.
+# Primary target: x86_64 (GNU Mach amd64 port). Comparator: i686.
+# Primary kernel source: gnumach.git. Supplementary evidence for C4/C5
+# (capability / least-privilege / server isolation) is drawn from
+# hurd.git servers (libports, libdiskfs, trans/) as the Mach port model
+# is what makes least-privilege enforcement work in practice.
+os: hurd
+schema_version: 1
+baseline_class: distribution
+default_config: >-
+  GNU Mach 5643c894115885d0e8b261bf5e0a6edebbc97fc5
+  (debian-hurd-amd64 config), with Hurd servers at
+  8110d3ec482e99b44bd49f895c0aaa4e8fc34e08 and MIG at
+  d27138506196f2fba644568d596851208db4abca.
+comparator_configs:
+- "debian-hurd-i386 (32-bit, long-stable port)"
+- "debian-hurd-amd64 (64-bit, new port as of 2024-2025)"
+
+mechanisms:
+  C1a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/configure.ac:196-215 (disable_smashing_stack_protector AM_CONDITIONAL true whenever compiler supports SSP)"
+      - "sources/hurd/Makefile.am:80-85 (AM_CFLAGS += -fno-stack-protector, unconditional of DEBUG/ASSERT)"
+      - "sources/hurd/kern/debug.c:197-211 (__stack_chk_guard is a static 3-byte constant, not a random canary)"
+      default_state: >-
+        gnumach's own Makefile.am passes -fno-stack-protector to every compilation
+        unit whenever the compiler supports SSP (i.e. always on a modern toolchain).
+        No debug-vs-release distinction. Debian packaging (debian/rules) does not
+        re-enable it for any variant (up/smp/pae/xen/486/amd64 all share the same
+        CFLAGS). __stack_chk_guard and __stack_chk_fail exist only to satisfy the
+        linker if stray object files were built with SSP.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: stack-protector is turned off at the source level, not merely elided by
+      the distribution. The stub canary is constant, so even if a translation unit
+      were recompiled with -fstack-protector the check would be trivially
+      bypassable. Same across all Debian variants and build modes.
+  C1a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/kern/thread.c:203-307 (stack allocated from slab, no guard)"
+      - "sources/hurd/i386/i386/vm_param.h:111 (KERNEL_STACK_SIZE=4*PAGE)"
+      default_state: >-
+        Kernel stacks come from a dedicated thread_stack_cache slab of exactly
+        KERNEL_STACK_SIZE (4 pages). No unmapped guard page below or above each
+        stack; overflows fall into adjacent slab data silently. No heap redzone
+        outside the opt-in KMEM_CF_VERIFY debug mode (see C1a.5). Same on
+        amd64/i386.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no guard pages reserved around stacks (no VMAP_STACK equivalent, no
+      vmalloc-style guard). No guard pages for heap allocations outside debug
+      mode. Compounds with C1e.1 absence — stack overflow is uncontained.
+  C1a.3:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/x86_64/locore.S:1579-1604 (copyin: cmpq $VM_MAX_ADDRESS,%rsi; jae copyin_fail)"
+      - "sources/hurd/i386/i386/locore.S (copyin/copyout i386 equivalents)"
+      - "sources/hurd/ipc/copy_user.c:343-449 (copyinmsg for IPC messages)"
+      default_state: >-
+        copyin and copyout compare only the starting user-space pointer against
+        VM_MAX_ADDRESS (amd64) or use a segment-limit check (i386). Length-based
+        overflow / start+len wraparound is not verified. Exception fixup (RECOVER)
+        handles faults, but size bounds against the target kernel object are not
+        checked — no Linux HARDENED_USERCOPY equivalent.
+    commits:
+    - hash: "f07a4c844da9f0ecae5bbee1ab94be56505f26f7"
+      date: "1997-02-25"
+      description: "Initial source (1997 gnumach CVS import of the Utah Mach 4-based kernel; mechanism inherited as ancestral Mach functionality)"
+    - hash: "6b6520294189f2a7c0aebf808e1364e2cfe27828"
+      date: "2020-03-28"
+      description: "locore: Add 64bit variant (introduces the amd64 copyin/copyout/copyinmsg primitives with RECOVER fault-fixup in x86_64/locore.S)"
+    - hash: "a251b15660097c37892bf510f0c9979a4ec196f2"
+      date: "2024-03-04"
+      description: "x86_64 locore: Check segmentation by hand (amd64 ignores segment limits, so userland pointers are checked against VM_MAX_ADDRESS by hand on the user-access paths)"
+    discussions: []
+    rationale: >-
+      P=1 (basic user-kernel boundary check exists). D=2 default-on: every copy
+      uses the checked primitive. S=1 weak: only the start pointer is bounded;
+      start+size wraparound and object-size mismatch are undetected. Easy to
+      mistakenly allow a huge copy. A=2 in-tree design. T_age=3 (ancestral Mach
+      primitive, i386 path since the 1997 import; amd64 path live since 2020),
+      T_maintained=2 (the cited locore.S files took 8 substantive SMP/swapgs
+      commits in the 18-month window; the earlier '1' rested on narrowing to
+      the cited line ranges). T=2. amd64
+      and i386 use different codepaths (segment-limit vs absolute compare) but
+      equivalent hardening level.
+  C1a.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am:44-88 (AM_CFLAGS: -ffreestanding -nostdlib, no _FORTIFY_SOURCE)"
+      default_state: >-
+        gnumach is built -ffreestanding -nostdlib; FORTIFY_SOURCE wraps glibc
+        string/IO functions that do not apply. Debian rules do not set
+        -D_FORTIFY_SOURCE either. No fortify-equivalent in-tree.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: FORTIFY_SOURCE is inapplicable to the freestanding kernel build, and no
+      in-kernel analogue (compiler builtin-size checks) is enabled.
+  C1a.5:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 2
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "KMEM_CACHE_VERIFY flag per-cache (no AC_ARG_ENABLE exposes it; no caller sets it)"
+      - "SLAB_VERIFY — hardcoded 0 in configfrag.ac:124 (no configure switch)"
+      source_files:
+      - "sources/hurd/configfrag.ac:124 (AC_DEFINE([SLAB_VERIFY], [0]) — hardcoded)"
+      - "sources/hurd/kern/slab.h:203 (KMEM_CACHE_VERIFY 0x4 — definition)"
+      - "sources/hurd/kern/slab.c:810-816 (KMEM_CF_VERIFY check)"
+      - "sources/hurd/kern/slab.c:1498-1499 ('enabling SLAB_VERIFY is recommended' hint)"
+      default_state: >-
+        Grep confirms zero kmem_cache_init() call sites pass KMEM_CACHE_VERIFY as a
+        flag. SLAB_VERIFY is hardcoded to 0 in configfrag.ac with no configure-time
+        switch to raise it. The redzone + 0xdeadbeef / 0xbaddcafe poison +
+        alloc-verification code paths exist but are dead. No KASAN/KFENCE/UBSAN
+        exists.
+    commits:
+    - hash: "7bc54a622e0c57a1085cd2990a1deedc8bd4743d"
+      date: "2011-12-17"
+      description: "Import the slab allocator (replaces the zone system; brings type-segregated object caches, off-slab kmem_slab descriptors for buffers above PAGE_SIZE/8 (KMEM_BUF_SIZE_THRESHOLD), and the dormant KMEM_CF_VERIFY redzone/poison/buftag debug framework with SLAB_VERIFY hardcoded to 0)"
+    - hash: "f22235e8d190cb6467aa755dc83bf85e7e95af04"
+      date: "2023-08-14"
+      description: "slab [SLAB_VERIFY]: Fix not enabling KMEM_CF_VERIFY on 4K slabs (rare maintenance of the otherwise-dormant verify path)"
+    discussions: []
+    rationale: >-
+      P=1 (the slab debug framework exists as a mechanism — KMEM_REDZONE_WORD,
+      KMEM_BUFTAG, KMEM_FREE_PATTERN are implemented). D=1 opt-in (per-cache
+      flag), and in practice nobody opts in. S=1 weak — debug-style redzone, not
+      KASAN. A=2 in-tree (dead) option. T_age=2 — capped below battle-tested
+      deliberately: the rubric's T_age=3 tier requires wide production
+      deployment, and this framework has never been enabled (contrast C1b.2,
+      whose live allocator from the same 2011 import earns T_age=3).
+      T_maintained=1 (code stable but never enabled); T=1.
+  C1a.6:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/x86_64/Makefrag.am (amd64 primary build; ARM MTE is not applicable)"
+      default_state: >-
+        ARM MTE is not applicable to GNU Mach's supported architectures (amd64,
+        i386). The aarch64/ directory is an early stub.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A on x86 architectures.
+  C1a.7:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/configure.ac (no -fsanitize wiring)"
+      - "sources/hurd/Makefile.am (no UBSAN CFLAGS in the kernel build)"
+      - "sources/hurd/Makerules.am (no UBSAN CFLAGS in common compiler rules)"
+      default_state: >-
+        gnumach is built as a plain C kernel with no array-index instrumentation.
+        Grep across configure.ac, configfrag.ac, Makefile.am, Makefrag.am and
+        Makerules.am finds zero -fsanitize / -fsanitize=bounds / UBSAN flags, and
+        the compiled tree carries no __ubsan_handle_out_of_bounds /
+        handle_out_of_bounds runtime-handler symbols. There is no __counted_by /
+        flexible-array annotation scheme. The array-index attack surface of a C
+        kernel exists, but no compiler trap guards it.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0 (the surface exists — gnumach is C with out-of-bounds array indexing
+      possible — but the mechanism, UBSAN_BOUNDS-style index trapping, is absent;
+      mirrors the openbsd/netbsd "surface exists -> P=0, not N/A" framing and the
+      freertos C1a.7 shape for a C kernel with zero instrumentation). With P=0,
+      D=S=A=T=0 by the rubric. No amd64/i386 divergence — the build wires no
+      sanitizer on either arch. (Contrast Linux default-on UBSAN_BOUNDS P=1 D=2;
+      gnumach has neither a debug nor a production sanitizer path, unlike the slab
+      redzone framework scored dead-but-present under C1a.5.)
+  C1b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/kern/slab.c:175-181 (KMEM_FREE_PATTERN 0xdeadbeef — gated on KMEM_CF_VERIFY)"
+      - "sources/hurd/kern/slab.c:810-816 (KMEM_CF_VERIFY setter — zero callers)"
+      - "sources/hurd/configfrag.ac:124 (SLAB_VERIFY=0 hardcoded)"
+      default_state: >-
+        Production kalloc returns freed buffers directly from the per-CPU pool with
+        no quarantine, no delayed free, no RCU-type-safe semantics. Free-poisoning
+        with 0xdeadbeef exists as dead code — reachable only when KMEM_CACHE_VERIFY
+        is passed at kmem_cache_init, and no call site does so (also see C1a.5).
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no default-on UAF mitigation. The poison path is present but never
+      reached; the distinction between 'absent' and 'present-but-dead' does not
+      change the score. Deliberate split: the dead
+      KMEM_CF_VERIFY framework is credited once, as C1a.5's present-but-dead
+      debug FRAMEWORK (P=1 D=1); it is not double-counted here or in C3c.1 as an
+      active UAF/zero-on-free mitigation, because as shipped it mitigates
+      nothing. Same across all Debian variants.
+  C1b.2:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/kern/slab.c (35+ kmem_cache_init sites — every major kernel object type in its own cache)"
+      - "sources/hurd/kern/slab.h:90-100 (bufctls 'located at the end of (but inside) each buffer' in normal caches — in-band)"
+      - "sources/hurd/kern/slab.c:834 (bufctl_dist = buf_size - sizeof(union kmem_bufctl) — freelist link inside the freed object)"
+      - "sources/hurd/kern/slab.c:103-738 (KMEM_BUF_SIZE_THRESHOLD gates off-slab placement of the slab descriptor, not the bufctls)"
+      default_state: >-
+        The hardening-relevant property is type segregation: every major kernel
+        object type lives in its own kmem cache (35+ kmem_cache_init call sites),
+        so cross-type heap grooming is constrained. The struct kmem_slab descriptor
+        is stored off-slab for buffers ≥ PAGE_SIZE/8 (a fragmentation decision with
+        incidental metadata-separation benefit). Per-object freelist bufctls,
+        however, are in-band — at the end of, but inside, each free buffer
+        (slab.h:90-96) — and unobfuscated: no CONFIG_SLAB_FREELIST_HARDENED
+        (freelist-pointer XOR), no checksum, no CONFIG_SLAB_FREELIST_RANDOM
+        equivalent.
+    commits:
+    - hash: "7bc54a622e0c57a1085cd2990a1deedc8bd4743d"
+      date: "2011-12-17"
+      description: "Import the slab allocator (replaces the zone system; brings type-segregated object caches, off-slab kmem_slab descriptors for buffers above PAGE_SIZE/8 (KMEM_BUF_SIZE_THRESHOLD), and the dormant KMEM_CF_VERIFY redzone/poison/buftag debug framework with SLAB_VERIFY hardcoded to 0)"
+    discussions: []
+    rationale: >-
+      P=1 stands on type-segregated per-object caches — the freebsd precedent ("present,
+      inherent slab architecture", P=1 D=2 S=1) — placing gnumach between redox
+      (P=0: single undifferentiated heap, same in-band freelist but no
+      segregation) and linux/netbsd (P=1 S=2: actual freelist
+      hardening/poisoning). D=2 default-on (the cache layout applies
+      automatically). S=1 weak (in-band unobfuscated freelist links inside freed
+      objects remain the classic corruption target). A=2 in-tree design. T_age=3
+      (slab allocator live since the 2011 import, Bonwick lineage),
+      T_maintained=1 (sporadic janitorial commits only). T=1.
+  C1b.3:
+    P: 1
+    D: 3
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/ipc/port.h:77-82 (MACH_PORT_UREFS_MAX = 2^16-1; MACH_PORT_UREFS_OVERFLOW tests both wraparound and the cap)"
+      - "sources/hurd/ipc/ipc_right.c:271-1097 (overflow checks on the urefs increment paths return KERN_UREFS_OVERFLOW)"
+      - "sources/hurd/kern/refcount.h:50-64 (refcount_take/drop — bare increment, unchecked)"
+      - "sources/hurd/ipc/ipc_object.h:102-109 (io_references — unchecked ++)"
+      default_state: >-
+        The attacker-reachable port user-reference count IS overflow-protected:
+        MACH_PORT_UREFS_OVERFLOW (ipc/port.h) tests both integer wraparound and the
+        2^16-1 cap, and ipc_right_delta / ipc_right_copyout — the paths behind the
+        unprivileged mach_port_mod_refs syscall with attacker-controlled delta —
+        check it on every increment and fail with KERN_UREFS_OVERFLOW instead of
+        wrapping. The check is unconditional (no config). Kernel-internal reference
+        counts remain bare increments: io_references (ipc_object.h) and the generic
+        refcount_take (kern/refcount.h) have no saturation, no overflow detection,
+        and no post-zero-use detection.
+    commits:
+    - hash: "f07a4c844da9f0ecae5bbee1ab94be56505f26f7"
+      date: "1997-02-25"
+      description: "Initial source (1997 gnumach CVS import of the Utah Mach 4-based kernel; mechanism inherited as ancestral Mach functionality)"
+    discussions: []
+    rationale: >-
+      P=1: the most attacker-reachable refcount is guarded — mach_port_mod_refs
+      takes a user-controlled delta and every increment path checks
+      MACH_PORT_UREFS_OVERFLOW, returning KERN_UREFS_OVERFLOW instead of wrapping
+      to zero (the classic refcount-overflow→UAF primitive). D=3 mandatory: the
+      check is compiled in unconditionally (matches linux/freebsd D=3 for
+      always-on refcount protection). S=1 weak: coverage is narrow — only the
+      16-bit urefs counter is guarded; kernel-internal io_references and
+      kern/refcount.h are bare ++ with no saturation, so internal-path overflows
+      remain theoretically possible (below linux/freebsd S=2 refcount_t-everywhere,
+      matching openbsd S=1 narrow-coverage band). A=2 in-tree design (a guard
+      macro on specific IPC paths, not a pervasive checked type). T_age=3
+      (ancestral — present in the 1997 import, 3 check sites in ipc_right.c from
+      day one); T_maintained=2 (ipc/ sees sporadic maintenance); T=2. No
+      amd64/i386 divergence — IPC layer is arch-independent.
+  C1b.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/kern/queue.h:253-271 (queue_enter/remove: plain pointer updates)"
+      default_state: >-
+        Mach queue_enter / queue_remove macros perform next/prev pointer updates
+        with no poisoning of removed elements and no assertion that the list is
+        consistent before an insertion. No LIST_POISON1/LIST_POISON2 equivalent.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no list-integrity hardening. Double-remove and double-add corruption
+      propagates silently.
+  C1b.5:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/x86_64/Makefrag.am (amd64 primary build; ARM MTE temporal tagging is not applicable)"
+      default_state: >-
+        MTE temporal-tag mode requires ARM hardware; N/A on amd64/i386.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A on x86 architectures.
+  C1c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am:55-88 (kernel AM_CFLAGS — no -ftrivial-auto-var-init)"
+      - "sources/hurd/tests/configfrag.ac:69 (test harness only — not kernel)"
+      default_state: >-
+        The kernel build does not pass -ftrivial-auto-var-init=zero/pattern. Debian
+        rules does not set it either. Only the user-space test harness enables it.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: uninitialized stack variables remain possible throughout the kernel.
+  C1c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/kern/slab.c:1372-1397 (kalloc: no memset of returned buffer)"
+      - "sources/hurd/kern/kalloc.h (no kzalloc/M_ZERO flag)"
+      default_state: >-
+        kalloc() returns memory with previous contents; callers must memset
+        themselves. No kzalloc variant, no CONFIG_INIT_ON_ALLOC_DEFAULT_ON
+        equivalent. Page-granularity allocations from kmem_pagealloc_* may be
+        incidentally zero but this is not guaranteed.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no guaranteed allocation-time zeroing; callers that forget memset can
+      leak prior kernel data.
+  C1d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/kern/thread.c:203-212 (stack from slab cache; no rdrand/rdtsc offset)"
+      default_state: >-
+        Kernel stacks are allocated from a fixed-size slab cache at their natural
+        alignment. No per-syscall random-offset (no RANDOMIZE_KSTACK_OFFSET
+        equivalent) and no per-process random stack gap.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: predictable kernel-stack addresses across syscalls.
+  C1d.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/kern/slab.c (kmem_slab_create builds freelist sequentially)"
+      default_state: >-
+        Slab freelist is built in sequential order; no randomization of which slot
+        is returned first or of slab-internal offsets. Allocation order is
+        deterministic.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: heap layout is predictable.
+  C1d.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am (complete compiler flags contain no RANDSTRUCT plugin or attribute)"
+      default_state: >-
+        No __randomize_layout attribute, no RANDSTRUCT GCC plugin. All kernel struct
+        member offsets are deterministic.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: struct offsets are deterministic; attacks can rely on them.
+  C1e.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/i386/intel/pmap.h:165-187 (PTE bits: no INTEL_PTE_NX defined)"
+      - "sources/hurd/i386/i386/msr.h:22-34 (EFER defines: only LONG_MODE_EN and SCE; no MSR_EFER_NXE)"
+      - "sources/hurd/x86_64/boothdr.S:155-158 (BSP EFER write: OR with LONG_MODE_EN only)"
+      - "sources/hurd/x86_64/cpuboot.S:178-181 (AP EFER write: same)"
+      - "sources/hurd/i386/i386/ldt.c:76 (only other EFER write: SCE for SYSCALL)"
+      - "sources/hurd/i386/i386/locore.h:68-101 (cpu_features[] probes only CPUID leaf 1; never reads leaf 0x80000001 where NX lives)"
+      default_state: >-
+        Neither the PTE-bit macro (INTEL_PTE_NX) nor the MSR-EFER NXE macro exist in
+        the gnumach source. CPUID leaf 0x80000001 is never queried for the NX
+        feature bit. The boot path ORs only LONG_MODE_EN into EFER. There is no
+        pmap_protect_range / kernel_text_ro call at end of boot (grep confirms zero
+        hits in kern/startup.c or model_dep.c). Kernel .text, .rodata, and .data all
+        map RWX. Same architecturally on amd64 and i386.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: kernel-space W^X is architecturally absent, not merely disabled.
+      Turning on every hardening flag the compiler accepts would still leave
+      kernel memory RWX because the relevant PTE bits and MSR writes do not exist
+      in the source. Arbitrary-write primitives can overwrite kernel code pages
+      freely. Critical gap amplified by absence of KASLR (C3a.1), SMEP (C1e.4),
+      and SMAP (C3b.2).
+  C1e.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/x86_64/ldscript:80 (.rodata — no runtime protect)"
+      - "sources/hurd/i386/ldscript:137 (DATA_SEGMENT_RELRO_END — ELF marker only)"
+      default_state: >-
+        No __ro_after_init section, no post-boot remap loop. RELRO directives in the
+        linker script are standard GNU ld output but without an accompanying
+        mprotect/pmap_protect pass they have no runtime effect — compounded by C1e.1
+        (no NX enforcement).
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: kernel data intended to be read-only post-init remains writable.
+  C1e.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/i386/i386at/model_dep.c (no kernel_text_ro call)"
+      - "sources/hurd/kern/startup.c (no protect pass at end of boot)"
+      default_state: >-
+        No pmap_protect call on kernel text or rodata at end of boot. CR0.WP is set
+        by default but since all kernel pages have WRITE=1 in the page table it is
+        moot. No securelevel-style lockdown transition.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: kernel text remains writable at runtime — a rootkit can patch any
+      function without hardware-level resistance.
+  C1e.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/i386/i386/proc_reg.h:57-72 (CR4 bit defines stop at CR4_OSXSAVE; no CR4_SMEP/bit 20)"
+      - "sources/hurd/i386/intel/pmap.c:3322 (CR4 writes OR only PAE/PGE/OSFXSR/OSXSAVE)"
+      - "sources/hurd/i386/i386at/model_dep.c:480 (same bits)"
+      - "sources/hurd/i386/i386/mp_desc.c:219-224 (APIC CR4 setup — no SMEP)"
+      default_state: >-
+        The CR4_SMEP macro (bit 20) is not defined anywhere in gnumach. CPUID leaf 7
+        (where the SMEP feature bit resides) is never queried. No CR4 write across
+        the tree sets SMEP or SMAP. User-space pages remain executable from kernel
+        mode. Classic ret2usr is fully feasible on hardware that has supported SMEP
+        since Ivy Bridge (2012).
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: architecturally absent. The distinction matters — unlike a Kconfig that
+      could be flipped, adding SMEP to gnumach requires source-level work
+      (feature-probe, CR4 write, handling of ret2usr attempts). Same architectural
+      state on amd64 and i386.
+  C1e.5:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/kern/thread.c:298-307 (separate thread_cache and thread_stack_cache)"
+      - "sources/hurd/i386/i386/pcb.c:66-82 (thread->kernel_stack as separate allocation)"
+      default_state: >-
+        struct thread is allocated from its own slab cache, not embedded at the
+        top/bottom of the kernel stack. A linear stack-buffer overflow cannot
+        directly corrupt thread fields (task pointer, credentials, refcount). This
+        is the inverse of the classic thread_info-on-stack layout Linux spent years
+        moving away from (CONFIG_THREAD_INFO_IN_TASK).
+    commits:
+    - hash: "f07a4c844da9f0ecae5bbee1ab94be56505f26f7"
+      date: "1997-02-25"
+      description: "Initial source (1997 gnumach CVS import of the Utah Mach 4-based kernel; mechanism inherited as ancestral Mach functionality)"
+    - hash: "844fb104f5c0c50b94cbf6ab8fb2e97caa4bc7b3"
+      date: "2016-03-09"
+      description: "Fix stack allocation on Xen (introduces the dedicated thread_stack_cache slab — kernel stacks stay decoupled from struct thread, which lives in its own thread_cache)"
+    discussions: []
+    rationale: >-
+      P=1: struct-thread/stack decoupling is a real control-metadata isolation.
+      D=3 mandatory by design. S=2 moderate: protects against direct
+      stack-to-thread corruption; but absent stack guard pages (C1a.2) means
+      overflow can still clobber adjacent slab objects. A=3 core design (Mach
+      3-era decision). T_age=3 (decades-old), T_maintained=2 (stable, minor
+      touches). T=2. No amd64/i386 divergence.
+  C1f.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am (kernel build consists of C and assembly; no memory-safe-language integration)"
+      default_state: >-
+        GNU Mach is implemented entirely in C and assembly with MIG-generated C RPC
+        stubs. No Rust or other memory-safe language integration. Hurd servers are
+        also C.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no memory-safe-language adoption in the kernel or servers.
+  C2a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am (AM_CFLAGS — no CFI flags)"
+      default_state: >-
+        gnumach is built with GCC (not Clang) per the default Debian toolchain and
+        passes no -fsanitize=cfi or equivalent flag. No PaX RAP out-of-tree patch.
+        Indirect calls are unconstrained.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no forward-edge CFI of any kind. Combined with the absence of W^X
+      (C1e.1), indirect-call targets in kernel memory are fully
+      attacker-directable.
+  C2a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am (no -fcf-protection)"
+      default_state: >-
+        gnumach does not pass -fcf-protection=branch and does not set IA32_S_CET MSR
+        to enable Intel IBT. ENDBR instructions are not emitted. amd64 despite CPUID
+        availability does not use IBT.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no hardware indirect-branch tracking enforcement.
+  C2a.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/x86_64/Makefrag.am (amd64 primary build; ARM BTI is not applicable)"
+      default_state: >-
+        ARM Branch Target Identification is ARM64-specific. gnumach supports amd64
+        and i386; the aarch64/ directory is a stub not used by Debian packaging.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A on x86 architectures.
+  C2b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am (no shadow-call-stack CFLAGS)"
+      default_state: >-
+        No software shadow call stack / return-address duplication / PaX-like
+        return-address guard. Return addresses live on the single kernel stack with
+        no integrity check.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no backward-edge CFI. Stack-based return-oriented programming is
+      unimpeded (and simplified by absence of KASLR, SMEP, W^X).
+  C2b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am (compiler and kernel build contain no CET shadow-stack support)"
+      default_state: >-
+        gnumach does not pass -fcf-protection=return, does not allocate a shadow
+        stack region, does not set IA32_S_CET MSR SH_STK_EN. No WRSS instruction
+        usage. Same on amd64 and i386 (CET is x86-64-only in practice but not
+        enabled on amd64 here either).
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: hardware shadow stack not used.
+  C2b.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/x86_64/Makefrag.am (amd64 primary build; ARM PAC is not applicable)"
+      default_state: >-
+        ARM Pointer Authentication is ARM64-specific; N/A on amd64/i386.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A on x86 architectures.
+  C2b.4:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/i386/ (one of the two buildable architecture implementations)"
+      - "sources/hurd/x86_64/ (one of the two buildable architecture implementations)"
+      - "sources/hurd/aarch64/ (15-file header/MIG-def stub: ABI headers + mach_aarch64.defs only, no kernel .c/.S; vs 161 files for i386)"
+      default_state: >-
+        FEAT_GCS (Guarded Control Stack) is an ARMv9.4-A feature. GNU Mach supports
+        only amd64 and i386; the aarch64/ directory is a bare stub (machine-type and
+        exception-vector headers plus a MIG .defs, no kernel sources) that does not
+        produce a running ARM kernel, and Debian GNU/Hurd ships amd64/i386 only.
+        There is no FEAT_GCS / GCS wiring anywhere in the tree.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: the mechanism presupposes an ARMv9.4-A target, and GNU Mach has no
+      buildable ARM port at all (the aarch64/ tree is header stubs) — the strongest
+      N/A case in the cohort, even more clear-cut than the x86-primary argument used
+      for the other ARM-feature N/As here (C2a.3 BTI, C2b.3 PAC). P=null, all
+      numerics 0 per the rubric. Consistent with the openbsd/netbsd/fuchsia/zephyr/
+      freertos/tock C2b.4 N/A treatment.
+  C2c.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am (complete kernel subsystem list contains no runtime code generator/JIT)"
+      default_state: >-
+        GNU Mach has no eBPF JIT, no BPF JIT (only classical interpreted BPF on the
+        network read path — see C5a.3), and the Hurd servers include no JIT
+        compilation. Same OpenBSD/NetBSD/Fuchsia treatment.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no JIT target to harden.
+  C3a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/i386/ldscript:14 (. = _START — fixed base address)"
+      - "sources/hurd/x86_64/ldscript:15 (same)"
+      - "sources/hurd/i386/i386at/model_dep.c:133 (boot-time real-mode relocation only)"
+      default_state: >-
+        gnumach is linked at a configure-time-fixed virtual address _START and a
+        fixed physical load address _START_MAP. No decompression-time randomization,
+        no relocation pass, no KASLR stub. Debian packaging forces -no-pie -fno-PIE
+        -fno-pie, so even generating a relocatable kernel would require build
+        changes.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: kernel base address is predictable. Trivially defeats any
+      address-leak-resistant exploit strategy that KASLR would otherwise raise the
+      bar for. Same on amd64 and i386.
+  C3a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/x86_64/boothdr.S (fixed image load/entry path with no randomized function layout)"
+      default_state: >-
+        FG-KASLR requires KASLR as a baseline. Since gnumach has no base-address
+        randomization (C3a.1) and no -ffunction-sections randomization pass,
+        per-function randomization is absent.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: depends on C3a.1 which is absent. No per-function randomization
+      infrastructure exists independently either.
+  C3b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/i386/intel/pmap.c:3310-3327 (pmap_set_page_dir — single set_cr3() per pmap)"
+      - "sources/hurd/x86_64/ (no cr3_user/cr3_kernel, no KPTI trampoline)"
+      default_state: >-
+        gnumach uses a single CR3 per task and loads it at pmap_activate time. There
+        is no entry-trampoline infrastructure that swaps CR3 on user↔kernel
+        transitions, no shadow-cr3, no PTI-aware IDT. The only user-CR3 machinery
+        in the tree (user_l4base / hyp_set_user_cr3, i386/intel/pmap.h:214,247-249)
+        is gated behind MACH_HYP — the Xen hypervisor-guest build, a guest-ABI
+        requirement, not a Meltdown mitigation (the pmap.c user-L4 allocation
+        additionally sits under MACH_PV_PAGETABLES, pmap.c:1428-1447) — and is
+        dead on the bare-metal amd64 target, whose path is a single set_cr3 with
+        kernel PDEs mapped into every task's table.
+        Meltdown (CVE-2017-5754) is unmitigated on affected CPUs.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: page-table isolation is architecturally absent, not toggled.
+      Retrofitting KPTI would require a new CR3 pair per task plus entry/exit
+      trampolines — non-trivial source change. Same on amd64/i386.
+  C3b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/i386/i386/proc_reg.h:57-72 (CR4 bits — no CR4_SMAP/bit 21)"
+      - "sources/hurd/i386/ (grep for stac|clac returns zero functional hits)"
+      default_state: >-
+        The CR4_SMAP macro (bit 21) is not defined in gnumach. No CR4 write sets
+        SMAP. No STAC/CLAC instructions surround copyin/copyout. CPUID leaf 7 is not
+        probed. ARM PAN inapplicable (no aarch64 support). This compounds with C1e.4
+        (SMEP absent): both halves of supervisor-mode access prevention are
+        unimplemented.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: SMAP is architecturally absent. Any kernel bug that dereferences an
+      attacker-controlled pointer reaches userspace-backed memory without hardware
+      interdiction.
+  C3c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/kern/slab.c:1204 (kmem_cache_free — no memset on default path)"
+      - "sources/hurd/kern/slab.c:1200-1216 (KMEM_FREE_PATTERN 0xdeadbeef is gated on KMEM_CF_VERIFY)"
+      - "sources/hurd/configfrag.ac:124 (SLAB_VERIFY=0 hardcoded, no configure switch)"
+      - "sources/hurd/kern/slab.h:203 (KMEM_CACHE_VERIFY 0x4 — zero call-site hits)"
+      default_state: >-
+        Default kfree/kmem_cache_free returns the buffer to the CPU pool/slab
+        without scrubbing. No init_on_free equivalent. The 0xdeadbeef poison path is
+        dead (see C1a.5): framework exists but no production cache sets the
+        KMEM_CACHE_VERIFY flag, and SLAB_VERIFY is hardcoded to 0.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: freed kernel buffers retain their prior contents. The existence of a
+      dead debug-only poison framework does not change the production behavior;
+      information leaks on subsequent allocation are unmitigated.
+  C3c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/i386/i386/locore.S:637-643 (thread_syscall_return — no stack scrub)"
+      - "sources/hurd/x86_64/locore.S (syscall return — same pattern)"
+      default_state: >-
+        The syscall/trap return path switches ESP/RSP to the PCB and issues iret. No
+        memset or scrub loop clears the kernel stack region that was used during the
+        syscall. No STACKLEAK-equivalent plugin (grep
+        stackleak|stack_erase|erase_stack returns zero).
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: kernel stack slots retain syscall-local data across syscalls, enabling
+      information-leak primitives to read arbitrary prior kernel stack state.
+  C3c.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am (AM_CFLAGS list — no -fzero-call-used-regs)"
+      default_state: >-
+        The kernel build does not pass -fzero-call-used-regs. Register residues from
+        kernel-internal calls may leak to subsequent callers. No
+        latent_entropy/ZERO_CALL_USED_REGS equivalent.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: kernel register state is not scrubbed across calls.
+  C3d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/ipc/mach_debug.c:249-285 (mach_port_kernel_object returns the raw kernel address of any port's backing kobject, on the caller's OWN ipc_space — no privilege check)"
+      - "sources/hurd/configfrag.ac:70 (MACH_IPC_DEBUG hardcoded 1 — the leaking RPC is live in every default build)"
+      - "sources/hurd/kern/ipc_host.c:238-250 (convert_port_to_host accepts IKOT_HOST as well as IKOT_HOST_PRIV — host_slab_info and friends work unprivileged)"
+      - "sources/hurd/kern/printf.c (no %pK pointer-filtering format)"
+      - "sources/hurd/device/kmsg.c:62-77 (kmsgopen enforces only exclusive open; reachable only via master_device_port — xref C3d.2)"
+      default_state: >-
+        The primary leak is the mach_debug RPC family, live by default
+        (MACH_IPC_DEBUG hardcoded 1): mach_port_kernel_object returns the raw
+        kernel address (ip_kobject) of the object behind any port right the
+        caller holds, operating on the caller's own IPC space with no privilege
+        check — direct kernel-layout disclosure to any task. host_slab_info and
+        other host-based debug RPCs accept the UNPRIVILEGED host name port
+        (convert_port_to_host admits IKOT_HOST). printf has no %pK-style
+        pointer-hiding format and there is no kptr_restrict/dmesg_restrict
+        equivalent — kernel diagnostic paths do log raw %p kernel pointers (e.g.
+        the kern/sched_prim.c:376 panic). The kmsg kernel log is
+        master-device-port-gated (xref C3d.2), but the unrestricted mach_debug
+        surface makes that moot for layout secrecy. Ownership rule for the
+        mach_debug surface: its address-VALUE disclosure is scored here (and
+        zeroes this P); its lack of interface GATING is scored only as a
+        coverage gap in C3d.2's S — C3d.2's P=1 rests on the device-layer gate,
+        not on mach_debug.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no kernel-pointer or log exposure restriction. The decisive evidence
+      is mach_port_kernel_object: any unprivileged task can
+      read the raw kernel address of every kobject behind its port rights, in
+      every default build (MACH_IPC_DEBUG=1 hardcoded) — so kernel layout is
+      disclosed by API design, not merely by sloppy printf. Combined with C3a.1
+      absence this gives attackers kernel-memory layout for free. (The
+      device-master-port gating of kmsg is scored under C3d.2; it does not
+      restrict this RPC surface.)
+  C3d.2:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "--enable-kdb (MACH_KDB, default 0 — in-kernel debugger compiled out)"
+      source_files:
+      - "sources/hurd/device/ds_routines.c:142-150 (ds_device_open rejects any open whose port is not master_device_port)"
+      - "sources/hurd/kern/bootstrap.c:350-352 (device master port handed only to the bootstrap task)"
+      - "sources/hurd/i386/i386at/mem.c:30-40 (memmmap refuses main RAM — MMIO-only; no /dev/kmem analogue exists)"
+      - "sources/hurd/configfrag.ac:135-145 (MACH_KDB defaults to 0, opt-in --enable-kdb)"
+      - "sources/hurd-servers/procfs/proclist.c:31-61 (proclist_get_contents — no credential gate; the unrestricted side)"
+      default_state: >-
+        The kernel's own diagnostic devices ARE restricted by design: ds_device_open
+        rejects any open request not arriving on the device master port, a
+        privileged capability handed only to the bootstrap task at boot — so kmsg
+        (kernel log) and mem are unreachable for unprivileged tasks. The mem device
+        additionally refuses main RAM (MMIO only); no /dev/kmem analogue exists. The
+        in-kernel debugger (MACH_KDB) is compiled out by default. The RESTRICTION
+        DOES NOT COVER everything: the mach_debug RPC family (host_slab_info etc.)
+        accepts the unprivileged host port, and the procfs translator enumerates
+        every PID to every reader with no credential check (hidepid=0 equivalent).
+    commits:
+    - hash: "f07a4c844da9f0ecae5bbee1ab94be56505f26f7"
+      date: "1997-02-25"
+      description: "Initial source (1997 gnumach CVS import of the Utah Mach 4-based kernel; mechanism inherited as ancestral Mach functionality)"
+    discussions: []
+    rationale: >-
+      P=1: gnumach's diagnostic devices (kmsg kernel log, mem) are gated behind
+      the device master port — a privileged capability — by design, and MACH_KDB
+      defaults to off. The sel4 precedent (capability-gated
+      debug interfaces = P=1) and the netbsd/freebsd precedent (a restriction
+      mechanism exists even if partial/permissive = P=1, D per default) apply.
+      D=2 default-on: the device-port gate and KDB-off are unconditional defaults
+      (not D=3: a large part of the diagnostic surface has no restriction
+      mechanism at all). S=1 weak: coverage is partial — the mach_debug RPC
+      family accepts the UNPRIVILEGED host port (host_slab_info, and
+      mach_port_kernel_object works on the caller's own space — xref C3d.1), and
+      procfs is world-readable with no hidepid knob; well below linux/openbsd S=2
+      (dmesg_restrict + kptr_restrict + sysctl coverage). A=2 in-tree design (the
+      gate is a consequence of the device-layer port model; scoring it A=3 would
+      double-count C4.2's capability architecture). T_age=3 (ancestral, 1997);
+      T_maintained=2 (device layer sporadically maintained); T=2. No amd64/i386
+      divergence.
+  C4.2:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/include/mach/port.h (MACH_PORT_RIGHT_SEND/RECEIVE/SEND_ONCE)"
+      - "sources/hurd/ipc/ipc_space.c (per-task IPC name space)"
+      - "sources/hurd/ipc/ipc_entry.c (ipc_entry_alloc — right insertion)"
+      - "sources/hurd/ipc/ipc_right.c (right manipulation, transfer, revocation)"
+      - "sources/hurd-servers/libports/create-port.c"
+      - "sources/hurd-servers/libports/get-send-right.c"
+      - "sources/hurd-servers/libports/claim-right.c"
+      default_state: >-
+        Every Mach task has a per-task ipc_space_t table of port rights. Userspace
+        sees only opaque mach_port_name_t indices scoped to its own space; rights
+        cannot be fabricated — they can only be received from another task via
+        mach_msg, mach_port_insert_right, or task-creation inheritance. This is the
+        central architectural primitive of all Mach IPC, not an add-on. Caveats:
+        port names are raw reused indices (PORT_GENERATIONS is unsupported —
+        ipc_entry.h #errors — so no generation tags against stale-name rebinding),
+        a send right carries no rights mask (only the right type), and the
+        unconditionally compiled mach_debug interface (configfrag.ac hardcodes
+        MACH_IPC_DEBUG=1) exposes mach_port_kernel_object, returning the raw
+        kernel address of any port object the caller holds, with no privilege
+        check.
+    commits:
+    - hash: "a6f82b9d63d88072693024404a981b19a5c1e7eb"
+      repo: "hurd_servers"
+      date: "1995-06-20"
+      description: "Initial revision (libports import: the shared server-side library managing Mach port rights per server — buckets, classes, reference counting — used by every Hurd server)"
+    - hash: "5b845f34e5dca3e87b92045c870244aaad4b875d"
+      repo: "hurd_servers"
+      date: "1996-03-05"
+      description: "Initial revision (adds libports/create-port.c — ports_create_port allocates each new receive right inside the server's own bucket/class, keeping right management scoped per server)"
+    - hash: "f07a4c844da9f0ecae5bbee1ab94be56505f26f7"
+      date: "1997-02-25"
+      description: "Initial source (1997 gnumach CVS import of the Utah Mach 4-based kernel; mechanism inherited as ancestral Mach functionality)"
+    discussions: []
+    rationale: >-
+      P=1 (port rights are the kernel's capability mechanism). D=3 mandatory:
+      there is no path to resources that bypasses port rights; all IPC,
+      task/thread/VM operations funnel through the capability check. S=2:
+      rights are genuinely unforgeable (kernel-managed per-task table) and
+      access mediation is complete, but authority is coarse in exactly the
+      decisive places — a single task port is simultaneously task_t /
+      vm_task_t / ipc_space_t with no diminished flavor (no
+      task_read/inspect/name split), master_device_port is an all-devices
+      capability, kernel rights carry no attenuation mask (server-side
+      io_restrict_auth covers io objects only), and the unauthenticated
+      mach_port_kernel_object kernel-address leak plus uid-0 override
+      checks throughout the servers are incomplete object mediation; the
+      per-reference-attenuation S=3 group (Zircon ZX_RIGHT_*, Capsicum
+      cap_rights_t, seL4 mint-diminished, Fiasco cap flags) all provide
+      what GNU Mach lacks, and the profile matches Redox C4.2 S=2. A=3
+      core design: Mach
+      ports predate the Hurd and are the defining primitive of the Mach
+      microkernel architecture (CMU Mach 1989). T=2: T_age=3 (35+ years);
+      T_maintained=2 (ipc/ has 6 commits in the 18-month window — sporadic;
+      the ipc_right.c 2022-12 and syscall_sw.c 2024-04
+      touches predate the window). No amd64/i386 divergence — IPC layer is
+      arch-independent.
+  C4.3:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/kern/syscall_sw.c (mach_trap_table[] — 130 slots, 25 functional traps; +mach_print under MACH_KDB; +6 null_port placeholders)"
+      - "sources/hurd/kern/ipc_mig.c (mach_msg path — the 'one true syscall')"
+      default_state: >-
+        GNU Mach exposes ~25 functional kernel traps in a production build
+        (exact count in the source_files annotation: mach_msg_trap,
+        mach_port_*_trap variants, a few VM ops, thread_switch,
+        swtch, task_* specials, evc_wait*, device_write*, plus the 2024
+        thread_set_self_state addition; mach_print is MACH_KDB-only and a few
+        slots are null_port placeholders). Most kernel services reach userspace via
+        mach_msg to a server port, so the practical attack surface is the server
+        set a task holds send rights to. No seccomp/pledge-equivalent per-task
+        trap filter exists.
+    commits:
+    - hash: "f07a4c844da9f0ecae5bbee1ab94be56505f26f7"
+      date: "1997-02-25"
+      description: "Initial source (1997 gnumach CVS import of the Utah Mach 4-based kernel; mechanism inherited as ancestral Mach functionality)"
+    discussions: []
+    rationale: >-
+      P=1 (syscall surface is structurally reduced by the microkernel design; the
+      trap table is structurally small — ~25 live entries, exact count in
+      source_files — vs hundreds on Linux). D=3 mandatory: the small
+      surface is baked into the build, not an opt-in filter. S=2 moderate:
+      reduction is real, but there is no runtime mechanism to further narrow the
+      set a specific task may invoke — a compromised task retains access to all
+      traps and any ports it holds, so no per-task attack-surface shrinkage
+      comparable to seccomp-bpf or pledge. A=3: the trap-count reduction follows
+      from the Mach microkernel architecture. T=2: T_age=3 (long-established) but
+      T_maintained=2 — the cited trap-table/mach_msg files saw one substantive
+      commit in the 18-month window (mig_strncpy NUL-termination). No
+      amd64/i386 divergence — shared kern/ code.
+  C4.5:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/kern/bootstrap.c (loads boot tasks from ELF, no .ko equivalent)"
+      - "sources/hurd/linux/ (vendored Linux driver glue — compile-time only)"
+      default_state: >-
+        GNU Mach has no runtime loadable-module infrastructure. Drivers are built
+        into the kernel image; the only 'module' subsystem is the compile-time Linux
+        driver-glue layer under linux/. The extensibility axis is user-space
+        translators launched via settrans, whose authorization is mediated by port
+        rights to the parent translator/node — not a kernel policy.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: the mechanism (kernel-module signing/lockdown) presupposes a
+      kernel-module subsystem that GNU Mach lacks by construction. No attack
+      surface of this class exists, analogous to the framework's treatment of
+      Fuchsia.
+  C4.6:
+    P: 1
+    D: 2
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/kern/task.c (task_create — per-task IPC space allocation)"
+      - "sources/hurd/ipc/ipc_space.c (ipc_space_t: per-task right table)"
+      - "sources/hurd-servers/boot/boot.c (Subhurd runtime: nested Hurd as boot task)"
+      - "sources/hurd-servers/proc/main.c (subhurd-aware process server)"
+      default_state: >-
+        Every Mach task has a private ipc_space_t — port names in one task are
+        meaningless in another, so IPC isolation is the default. Subhurds
+        (neighborhurds) provide a container-analogue: a nested Hurd with its own
+        proc/auth/root-translator, launched via the boot server (optionally
+        --privileged). Flat task hierarchy (no job tree like Fuchsia's jobs). No
+        cgroup-like resource quotas.
+    commits:
+    - hash: "c40087796e06f79c58365fb86e9f0c024a565759"
+      repo: "hurd_servers"
+      date: "1993-11-03"
+      description: "Initial revision (boot server import, boot/boot.c — the Subhurd runtime: boots a nested Hurd instance as ordinary user tasks)"
+    - hash: "f07a4c844da9f0ecae5bbee1ab94be56505f26f7"
+      date: "1997-02-25"
+      description: "Initial source (1997 gnumach CVS import of the Utah Mach 4-based kernel; mechanism inherited as ancestral Mach functionality)"
+    - hash: "8c0e65b6b2db9946153ed736e66d4e613875deb6"
+      repo: "hurd_servers"
+      date: "2016-11-01"
+      description: "boot: Allow unprivileged users to boot Subhurds. (stops handing privileged kernel ports to Subhurds — pseudo host/processor-set/kernel ports instead, so a Subhurd can no longer wreak havoc on the host system)"
+    - hash: "34a94ce86b1bada9c0768f631540735d44f41100"
+      repo: "hurd_servers"
+      date: "2017-03-11"
+      description: "proc: Hierarchical proc servers. (connects the Motherhurd proc server with a Subhurd's, embedding the nested process hierarchy instead of showing opaque tasks)"
+    discussions: []
+    rationale: >-
+      P=1 (per-task IPC-space partitioning + Subhurds as coarser containers). D=2:
+      per-task isolation is mandatory on every task_create; Subhurds are opt-in.
+      S=2 moderate: strong isolation at capability level but coverage is narrower
+      than Linux namespaces + cgroups (no PID/net/uid namespace equivalents beyond
+      what a nested Hurd instance provides; no resource quotas). A=3 core design.
+      T_age=3 (multi-decade Subhurd concept), T_maintained=2 (boot.c and proc
+      stable but sporadically touched), T=min(3,2)=2. Arch-independent.
+  C4.7:
+    P: 1
+    D: 2
+    S: 1
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd-servers/auth/auth.c (authhandle: effective/available UID/GID vecs)"
+      - "sources/hurd-servers/proc/info.c:46-101 (check_owner: S_proc_pid2task hands out a foreign task port only if the caller holds all UIDs of the target, or is root)"
+      - "sources/hurd/kern/task.c (task_threads — gated by task port)"
+      - "sources/hurd/ipc/mach_port.c (port-right transfers)"
+      - "sources/hurd/kern/ipc_tt.c (task_get_special_port etc.)"
+      default_state: >-
+        Credentials are carried by auth ports (exchangeable between processes via
+        auth server). Debugging authority = possession of the task's control port.
+        Obtaining a FOREIGN task port through the proc server is uid-gated:
+        S_proc_pid2task/S_proc_pid2proc call check_owner, which requires the
+        caller to hold all UIDs of the target (or be root) — a real uid filter
+        analogous to a ptrace uid check. But there is no ptrace_scope ANCESTRY
+        restriction on top of it, no YAMA-equivalent filter: any same-uid process
+        can debug any other, and a task port once delegated carries full debug
+        authority wherever it travels.
+    commits:
+    - hash: "d08efc4f73ff782a83d676611474af0068ecb843"
+      repo: "hurd_servers"
+      date: "1994-09-07"
+      description: "entered into RCS (original auth server implementation, auth/auth.c — credentials held by a dedicated userspace server and conveyed via auth ports)"
+    - hash: "8598722868278021a84b4e9145f5da0e573c8b51"
+      repo: "hurd_servers"
+      date: "1996-04-25"
+      description: "Rewritten. (auth.c rewrite to the authhandle model — per-handle effective/available uid/gid vectors and the trusted auth_user_authenticate rendezvous protocol)"
+    - hash: "f07a4c844da9f0ecae5bbee1ab94be56505f26f7"
+      date: "1997-02-25"
+      description: "Initial source (1997 gnumach CVS import of the Utah Mach 4-based kernel; mechanism inherited as ancestral Mach functionality)"
+    discussions: []
+    rationale: >-
+      P=1 (auth server + task-port-based debug authorization exists as a
+      credential hardening model — different shape from Yama but recognisable as
+      the same family). D=2 default-on: every task has a control port whose holder
+      can introspect, and the proc server's check_owner uid gate applies to every
+      pid2task lookup without opt-in. S=1 weak: the uid gate (proc/info.c
+      check_owner) is real but there is no ancestry restriction on top — any
+      same-uid process can debug any other, matching the netbsd C4.7 S=1
+      precedent (uid-gated ptrace without Yama-style scope); linux/openbsd earn
+      S=2 by adding the ancestry/scope filter. A=3 core design (auth server +
+      port model). T_age=3; T_maintained=2 (auth.c rarely modified); T=2.
+      Arch-independent.
+  C5a.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd-servers/rumpdisk/main.c (userspace NetBSD-rump disk driver)"
+      - "sources/hurd-servers/rumpnet/main.c (userspace rump networking)"
+      - "sources/hurd-servers/pci-arbiter/main.c (userspace PCI bus server)"
+      - "sources/hurd-servers/acpi/main.c (userspace ACPI firmware server)"
+      - "sources/hurd-servers/libmachdev/ds_routines.c (userspace device_t emulation)"
+      - "sources/hurd/i386/configfrag.ac:114-120 (enable_linux_groups=no forced for non-i?86 hosts and for SMP)"
+      - "sources/hurd/linux/Makefrag.am:23-28 (all of liblinux.a — every in-kernel disk/net/SCSI driver incl. ahci.c — gated behind CODE_linux)"
+      - "sources/hurd/i386/i386at/conf.c:80-170 (always-built in-kernel devices: console/serial/kbd/mem/kmsg/timer only — no disk, no net)"
+      default_state: >-
+        Split by architecture. On the PRIMARY TARGET (debian-hurd-amd64) the entire
+        vendored Linux 2.0 in-kernel driver stack (including the AHCI driver) is
+        excluded at build time: i386/configfrag.ac forces enable_linux_groups=no for
+        any non-i?86 host (and for SMP), and linux/Makefrag.am links liblinux.a only
+        under CODE_linux. The always-built in-kernel device list contains no disk or
+        network driver, so userspace rumpdisk/rumpnet via libmachdev are the
+        default — and only — disk/net path on amd64. On the i386 comparator the
+        in-kernel Linux 2.0 glue still builds by default and the rump translators
+        are genuinely opt-in.
+    commits:
+    - hash: "a830bef66e689f6f1defa9988f257a7ec2bb034d"
+      repo: "hurd_servers"
+      date: "2018-10-30"
+      description: "PCI Arbiter (userspace PCI bus server mediating config-space access for userspace drivers)"
+    - hash: "33421955afb21c5e89a85f0b8f19c3644b18c8ae"
+      repo: "hurd_servers"
+      date: "2019-03-02"
+      description: "ACPI tables translator (firmware-table access via a userspace translator instead of kernel code)"
+    - hash: "47682aaf93b85b3d00fad5426cf9c5a1c7f610ea"
+      repo: "hurd_servers"
+      date: "2020-03-29"
+      description: "libmachdev: Add common machdev (shared userspace device_t emulation letting translators implement the Mach device interface)"
+    - hash: "78f3d3ee0b18456f28a4605e62a3057a6b0b64c5"
+      repo: "hurd_servers"
+      date: "2020-04-11"
+      description: "rumpdisk: Add userspace disk support via librump (NetBSD rump-kernel ATA/SATA disk driver running as a Hurd translator)"
+    - hash: "1d5c92654b2ebd95bee4f2bc4690b883c468b1a4"
+      repo: "hurd_servers"
+      date: "2025-08-01"
+      description: "rumpnet: Add device translator for (Intel) NICs (NetBSD rump-kernel network drivers as a userspace translator)"
+    discussions: []
+    rationale: >-
+      P=1 (userspace driver framework exists via libmachdev/rump). D=2
+      default-on: on the primary amd64 target the build system excludes the
+      whole in-kernel Linux driver stack (enable_linux_groups=no forced for
+      non-i?86), so rumpdisk/rumpnet are
+      the default and only disk/net path — not an opt-in alternative (not D=3:
+      console/serial/keyboard remain in-kernel on both arches, and the i386
+      comparator still defaults to in-kernel drivers). S=2 moderate: the rump
+      path gives real crash isolation — a crashing rumpdisk does not panic
+      gnumach — but NOT compromise isolation: rumpdisk holds the host-privileged
+      port and obtains physically-contiguous DMA buffers via
+      vm_allocate_contiguous with no IOMMU mediation (xref C5c.1), so a
+      compromised driver can still DMA over kernel memory; and i386 keeps
+      in-kernel drivers that crash the kernel. A=3 core design: the microkernel
+      intends drivers-in-userspace; libmachdev is purpose-built for this. T_age=3
+      (rump work ≥5y, since 2020); T_maintained=3 (2024 AHCI fixes, 2026
+      designated-initializer sweep). Arch divergence: amd64 rump-only for
+      disk/net; i386 retains the legacy in-kernel stack.
+  C5a.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am (single statically linked GNU Mach image; no module loader)"
+      default_state: >-
+        GNU Mach ships as a single statically-linked gnumach.gz image. There is no
+        loadable kernel module subsystem; therefore module-loading isolation does
+        not apply. See C4.5 for the same finding from the privilege-boundary angle.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no module subsystem exists in GNU Mach. Same as Fuchsia.
+  C5a.3:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/device/net_io.c (bpf_validate + parse_net_filter at filter-set time; bpf_do_filter interpreter)"
+      - "sources/hurd/include/device/bpf.h"
+      default_state: >-
+        GNU Mach has classic Berkeley Packet Filter bytecode for
+        network-device read filtering (bpf_do_filter). Every filter is
+        statically checked at registration: net_set_filter runs
+        bpf_validate() (and parse_net_filter for the native NETF
+        language) before accepting a program. No extensible in-kernel
+        VM beyond that: no JIT, no programmable attachment points, no
+        BPF_PROG_LOAD, no maps.
+    commits:
+    - hash: "f07a4c844da9f0ecae5bbee1ab94be56505f26f7"
+      date: "1997-02-25"
+      description: "Initial source (1997 gnumach CVS import of the Utah Mach 4-based kernel; mechanism inherited as ancestral Mach functionality)"
+    discussions: []
+    rationale: >-
+      P=1: classic BPF is an in-kernel VM that runs user-supplied
+      programs under a real verifier - net_set_filter calls
+      bpf_validate() (net_io.c) on every program before it may run,
+      guaranteeing sandboxed, terminating execution. This follows the
+      FreeBSD C5a.3 precedent (classic-BPF-with-validator = P=1/D=2/S=1
+      "present, limited"); OpenBSD/NetBSD score on the same grounds. D=2:
+      validation is unconditional for every attached filter. S=1: weak
+      relative to the eBPF reference point - a narrow packet-filter
+      instruction set (plus Mach's native NETF language) with no program
+      types, maps or register-state tracking. A=2: in-tree device-layer
+      subsystem. T_age=3 (ancestral CMU Mach code, in gnumach since the
+      1997 import); T_maintained=1 (net_io.c saw only janitorial commits in the window —
+      janitorial-only is dormant under the measurement rule); T = min(3,1) = 1. No amd64/i386 divergence.
+  C5b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/xen/xen.c (Xen PV guest support, i386 only)"
+      - "sources/hurd/xen/block.c (Xen paravirtual block driver)"
+      - "sources/hurd/xen/net.c (Xen paravirtual network driver)"
+      - "sources/hurd/xen/console.c (Xen paravirtual console driver)"
+      - "sources/hurd/xen/store.c (Xen store integration)"
+      default_state: >-
+        GNU Mach can boot as a Xen PV guest on i386 (no amd64 Xen port), but the
+        hypervisor is used only for driver backends (disk/net/console). There is no
+        altp2m-style enforcement of Mach code-page immutability, no HEKI/IKG design,
+        no PKRS-backed kernel-data lockdown.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no hypervisor-enforced kernel integrity. The Xen support is a
+      driver-virtualization feature, not an integrity monitor. amd64 has no Xen
+      path at all.
+  C5b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am (complete device/kernel inputs contain no TPM, TEE, or sealed-key subsystem)"
+      default_state: >-
+        No TPM driver, no AMD SEV/SEV-SNP attestation, no Intel SGX/TDX, no
+        sealed-key support in GNU Mach. The only 'TPM' reference is an unused Xen
+        vTPM ring-buffer header (xen/public/io/tpmif.h). Kernel secrets (random
+        pool) live in plain kernel memory. Same on amd64/i386.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no enclave or sealed-key facilities. Kernel key material is
+      unprotected.
+  C5c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/device/ds_routines.c (DMA-capable device surface has no IOMMU-domain enforcement)"
+      default_state: >-
+        GNU Mach does not program Intel VT-d (DMAR) or AMD-Vi (IVRS). All
+        DMA-capable devices — legacy Linux-glue drivers, AHCI, rumpdisk's SATA path
+        — issue bus-physical DMA via identity or direct-map addresses. A compromised
+        device or userspace driver holding DMA capability can corrupt kernel memory.
+        Same on amd64 and i386. Debian gnumach packaging enables no IOMMU-related
+        flag.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no IOMMU enforcement. This significantly weakens the userspace-driver
+      isolation story (C5a.1): rumpdisk can DMA anywhere in kernel memory. A
+      critical gap for a microkernel whose security thesis partly depends on
+      driver isolation.
+  C5c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/i386/intel/pmap.c (single kernel mapping domain; no PKS/MPK subdomains)"
+      default_state: >-
+        No PKU/PKRU/PKS or similar intra-kernel memory-protection domains inside the
+        GNU Mach kernel. The kernel runs with a single flat page table and a shared
+        address space for all in-kernel code. Isolation of kernel services is
+        instead achieved by pushing them into separate userspace servers (see C5d.1
+        — architectural separation), not by sub-kernel domains.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no intra-kernel protection keys / domains. The value that this
+      mechanism aims to capture (limiting blast radius within the kernel TCB) is
+      delivered by C5d.1 / C5d.2 in the Hurd architecture — scored there to avoid
+      double-count. Same on amd64 and i386.
+  C5c.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/x86_64/Makefrag.am (amd64 primary build; ARM MTE domains are not applicable)"
+      default_state: >-
+        ARM MTE is not applicable to supported GNU Mach architectures (amd64, i386).
+        The aarch64/ directory is a very early stub; no MTE logic exists.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: MTE is ARM-only; GNU Mach supports x86 only in practice (aarch64 stub
+      unused in Debian).
+  C5d.1:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd-servers/auth/auth.c (authentication server)"
+      - "sources/hurd-servers/proc/main.c (process server)"
+      - "sources/hurd-servers/exec/exec.c (ELF loader)"
+      - "sources/hurd-servers/ext2fs/ (filesystem translator)"
+      - "sources/hurd-servers/pfinet/ (TCP/IP stack as translator)"
+      - "sources/hurd-servers/lwip/ (lwIP-based TCP/IP stack)"
+      - "sources/hurd-servers/pflocal/ (PF_LOCAL socket translator)"
+      - "sources/hurd-servers/term/Makefile (terminal server)"
+      - "sources/hurd-servers/console/Makefile (console server)"
+      - "sources/hurd-servers/boot/boot.c (boot server)"
+      - "sources/hurd-servers/startup/startup.c (startup server)"
+      - "sources/hurd-servers/init/init.c (init server)"
+      - "sources/hurd-servers/doc/hurd.texi (architecture documentation)"
+      default_state: >-
+        The gnumach kernel TCB is intentionally tiny (IPC, scheduling, VM, legacy
+        device layer). VFS per filesystem (ext2fs/isofs/fatfs/tmpfs/nfs), TCP/IP
+        (pfinet or lwip), local sockets (pflocal), process table (proc), credentials
+        (auth), ELF loading (exec), PCI/ACPI enumeration (pci-arbiter, acpi), and
+        increasingly disk/net drivers (rumpdisk, rumpnet) all run in separate Mach
+        tasks with independent address spaces. A bug in ext2fs crashes ext2fs, not
+        the kernel.
+    commits:
+    - hash: "a2e14dc11cdd72f366a0e0058375ab5a34bc15af"
+      repo: "hurd_servers"
+      date: "1994-03-22"
+      description: "Initial revision (proc server import — the Unix process table implemented as a separate userspace Mach task)"
+    - hash: "92829291625814a46a0b9c8eaf74b89ff1ffd7f8"
+      repo: "hurd_servers"
+      date: "1995-04-10"
+      description: "Initial revision (ext2fs translator import — the primary filesystem as a userspace Mach task)"
+    - hash: "c7923f6aa252a29ccb4f16bd91469c9000a2bd94"
+      repo: "hurd_servers"
+      date: "1995-07-12"
+      description: "Initial revision (pfinet import — the TCP/IP stack as a userspace translator)"
+    - hash: "d3594ddad8fdd4f28f2362ad288acd03ed60eb41"
+      repo: "hurd_servers"
+      date: "2017-12-18"
+      description: "lwip: Add LwIP-based TCP/IP translator (modern alternative userspace network stack, continuing the multi-server model)"
+    discussions: []
+    rationale: >-
+      P=1 (multi-server architecture is the defining property of Hurd). D=3
+      mandatory: you cannot 'turn off' server separation — it is how the system is
+      built and booted. S=3 strong: services run in separate Mach tasks with
+      distinct address spaces and per-task IPC name spaces; a crash in one does
+      not affect another. No practical bypass within the software contract. A=3
+      core design (the architecture). T=3: T_age=3 (decades), T_maintained=3
+      (active: 2026 design sweeps across servers, new rump-based servers added
+      2020–2024). Same on amd64/i386.
+  C5d.2:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd-servers/libports/create-port.c"
+      - "sources/hurd-servers/libports/create-bucket.c"
+      - "sources/hurd-servers/libports/claim-right.c"
+      - "sources/hurd-servers/libports/destroy-right.c"
+      - "sources/hurd-servers/libports/begin-rpc.c"
+      - "sources/hurd-servers/auth/auth.c (auth delegation protocol)"
+      - "sources/hurd/ipc/ipc_space.c (per-task IPC namespace)"
+      default_state: >-
+        Each server has its own port namespace and can only reach other services it
+        was explicitly handed send-rights to. The auth server implements a trusted
+        rendezvous protocol that prevents a compromised non-auth server from forging
+        credentials. libports' bucket/class model scopes lifetime and refcounting
+        per server, so port exhaustion is local. Lateral movement requires
+        exploiting the specific RPC surface of the next target server.
+    commits:
+    - hash: "a6f82b9d63d88072693024404a981b19a5c1e7eb"
+      repo: "hurd_servers"
+      date: "1995-06-20"
+      description: "Initial revision (libports import: the shared server-side library managing Mach port rights per server — buckets, classes, reference counting — used by every Hurd server)"
+    - hash: "5b845f34e5dca3e87b92045c870244aaad4b875d"
+      repo: "hurd_servers"
+      date: "1996-03-05"
+      description: "Initial revision (adds libports/create-port.c — ports_create_port allocates each new receive right inside the server's own bucket/class, keeping right management scoped per server)"
+    - hash: "8598722868278021a84b4e9145f5da0e573c8b51"
+      repo: "hurd_servers"
+      date: "1996-04-25"
+      description: "Rewritten. (auth.c rewrite to the authhandle model — per-handle effective/available uid/gid vectors and the trusted auth_user_authenticate rendezvous protocol)"
+    discussions: []
+    rationale: >-
+      P=1 (capability-based inter-server isolation + auth-mediated delegation).
+      D=3 mandatory: enforced by the per-task IPC namespace and port-right
+      semantics. S=2 moderate: lateral movement is gated at the RPC surface but
+      compromising high-trust servers (auth, proc, bootstrap) still confers broad
+      authority — mitigation is narrower than true sandboxing of every peer. A=3
+      core design. T_age=3 (libports/auth from the 90s); T_maintained=1 (dormant:
+      libports/ and auth/ have zero non-trivial commits in the 18-month
+      window). T=min(3,1)=1.
+  C6.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/i386/i386at/model_dep.c (multiboot_raw_info handoff from GRUB)"
+      default_state: >-
+        gnumach is loaded via GRUB Multiboot (legacy multiboot header). Debian
+        deployments can chain signed shim → signed GRUB → gnumach, but gnumach
+        itself is not a UEFI application and does not participate in UEFI Secure
+        Boot verification or require a signed kernel image. There is no in-kernel
+        signature check for the image itself, boot modules, or early-userland
+        servers loaded from multiboot modules.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: kernel image is not subject to an OS-enforced verified-boot chain. The
+      boot-module list (auth, proc, root translator) is trusted on faith from
+      GRUB. Same on amd64 and i386.
+  C6.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am (complete device list contains no TPM/PCR measurement path)"
+      default_state: >-
+        GNU Mach has no TPM driver, no IMA measurement list, no PCR extension, no
+        attestation protocol implementation. The Xen vTPM header
+        (xen/public/io/tpmif.h) is unused.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no measured boot or remote attestation capability. Remote parties
+      cannot verify the integrity of a running Hurd kernel.
+  C6.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am (fixed kernel image and no loadable-code signing surface)"
+      default_state: >-
+        GNU Mach has no runtime module loader (see C4.5, C5a.2). Kernel code signing
+        does not apply because there is no post-boot kernel code to sign and load.
+        The monolithic gnumach ELF is supplied as a Debian package whose signature
+        is enforced at apt-level (supply chain), not at kernel runtime.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no module subsystem; nothing to sign at kernel runtime.
+  C6.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/i386/intel/pmap.c (runtime mappings have no lockdown/immutable integrity transition)"
+      default_state: >-
+        There is no Lockdown/LKRG/securelevel-equivalent transition that locks down
+        kernel-introspection interfaces at runtime. Kernel text remains writable
+        (see C1e.3), and there is no kern.securelevel sysctl or kern.allowkmem knob
+        that would restrict privileged-user kernel access.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no runtime kernel integrity protection. A privileged user (or holder of
+      master_device_port) has unmediated access to kernel internals via kmem and
+      similar devices.
+  C6.5:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd-servers/libdiskfs/file-exec.c (executable-object path has no signature or Merkle verification)"
+      default_state: >-
+        The Hurd offers no OS-level integrity verification of executables or
+        filesystem objects. No IMA/EVM/IPE, no fs-verity hash trees, no Veriexec
+        signature lists. Each translator trusts its own on-disk data; compromise of
+        ext2fs or rumpdisk yields file content unchecked.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no runtime verification of executable or object integrity. Coupled with
+      C6.1 absence, the trust chain bottoms out at the GRUB-loaded multiboot image
+      and proceeds on faith thereafter.
+  C7a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/x86_64/locore.S (kernel entry/return path has no Spectre-v1 barrier/index masking)"
+      default_state: >-
+        gnumach contains no speculation-barrier primitives. Grep for spectre,
+        lfence, array_index_nospec returns zero functional hits (the one VERW match
+        is a disassembler opcode string). No CVE-2017-5753 mitigation.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: unmitigated Spectre v1 on affected CPUs.
+  C7a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/x86_64/cswitch.S (context switch has no IBPB/IBRS/retpoline handling)"
+      default_state: >-
+        No -mindirect-branch=thunk or -mretpoline flag in AM_CFLAGS. No
+        MSR_IA32_SPEC_CTRL writes, no IBPB on context switch, no BHB clear.
+        Branch-target injection attacks are unmitigated on vulnerable hardware.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no Spectre v2 / Retbleed / BHI mitigation. Affects all recent Intel/AMD
+      CPUs exposed to the kernel.
+  C7a.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/i386/i386/msr.h (architectural MSR definitions omit SSBD control)"
+      default_state: >-
+        No SSBD bit written to MSR_IA32_SPEC_CTRL, no prctl-equivalent to toggle
+        speculative-store-bypass per thread. Spectre v4 unmitigated.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no Spectre v4 mitigation.
+  C7a.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am (compiler flags contain no straight-line-speculation hardening)"
+      default_state: >-
+        No -mharden-sls compiler flag in AM_CFLAGS. No INT3 padding on unconditional
+        branches/returns. Straight-line speculation is unmitigated.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no SLS mitigation at compile time.
+  C7b.1:
+    status: xref
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files: []
+      default_state: >-
+        Meltdown mitigation is scored under C3b.1 (Kernel Page Table Isolation) —
+        absent in gnumach as documented there. Cross-referenced here to avoid
+        double-counting.
+    commits: []
+    discussions: []
+    rationale: >-
+      xref: Meltdown is mitigated by KPTI; see C3b.1. KPTI absent in gnumach, so
+      Meltdown unmitigated on affected CPUs.
+  C7b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/i386/intel/pmap.c (PTE handling has no L1TF inversion or L1D-flush path)"
+      default_state: >-
+        No PTE inversion trick to render invalid PTEs non-speculatable, no
+        conditional L1D cache flush on VM exit / kernel entry. gnumach has no KVM
+        host role so the VMX-exit side of the mitigation is N/A, but the host-kernel
+        side is still absent.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: Foreshadow / L1TF unmitigated on affected CPUs.
+  C7c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/x86_64/locore.S (return path has no VERW/MD_CLEAR buffer flush)"
+      default_state: >-
+        No VERW-with-writable-segment-descriptor trick to flush CPU buffers on
+        kernel entry or VM exit. No MDS/TAA/MMIO-Stale-Data mitigation. The VERW hit
+        in db_disasm.c is a disassembler opcode table, not functional code.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no microarchitectural-data-sampling mitigation.
+  C7c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options:
+      - "--enable-ncpus=N (configure flag; default N=1)"
+      source_files:
+      - "sources/hurd/configfrag-first.ac:29-33 (NCPUS default = 1; SMP is opt-in)"
+      - "sources/hurd/i386/configfrag.ac:98-112 (APIC/SMP paths gated on mach_ncpus>1)"
+      default_state: >-
+        No STIBP bit set in MSR_IA32_SPEC_CTRL. No SMT-disable boot option.
+        gnumach's default build (Debian gnumach-image-*-up) is uniprocessor (NCPUS=1
+        in configfrag-first.ac); SMP is a separate -smp variant built with
+        --enable-ncpus=8. The default uniprocessor posture incidentally removes SMT
+        exposure, but this is not a deliberate mitigation.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no cross-thread speculation isolation. The default uniprocessor variant
+      reduces attack surface as a side effect of SMP being opt-in, not as security
+      policy.
+  C1e.6:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/i386/intel/pmap.c (page-protection implementation has no execute-only encoding)"
+      default_state: >-
+        gnumach's vm_protect interface uses VM_PROT_READ /
+        VM_PROT_WRITE / VM_PROT_EXECUTE bits but offers no
+        execute-only encoding for amd64 mappings.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no execute-only memory primitive.
+  C1e.7:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/vm/vm_map.c (mapping protection/deallocation has no immutable-map state)"
+      default_state: >-
+        gnumach has no mimmutable/mseal equivalent; vm_deallocate
+        and vm_protect are unconditionally available on user
+        mappings.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no immutable-mapping primitive.
+  C1e.8:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/Makefile.am (link/compiler flags contain no trap-padding pass)"
+      default_state: >-
+        Hurd's link-time and compile-time defaults do not emit
+        int3/ud2 trapsled fills.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no trapsled mechanism.
+  C4.8:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - kern/syscall_sw.c (mach_trap_table)
+      - x86_64/locore.S
+      default_state: >-
+        GNU Mach dispatches traps through mach_trap_table by trap number;
+        the entry path never validates the caller PC. RPC stubs conventionally
+        live in glibc, but nothing enforces that convention - any executable
+        mapping may execute the trap instruction.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no syscall/trap-origin pinning in GNU Mach; the libc-only-entry
+      property OpenBSD enforces with pinsyscalls(2) has no Mach counterpart.
+  C5e.1:
+    P: 1
+    D: 2
+    S: 1
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "settrans -p / --passive (sets a persistent passive translator that the parent FS re-starts on access)"
+      - "gnumach boot flag -H (clears reboot_on_panic -> halt instead of auto-reboot on kernel panic)"
+      source_files:
+      - "sources/hurd-servers/doc/hurd.texi:2026-2033 (passive translators 'are only activated by the underlying filesystem when clients try to use the node' and 'persist between system reboots')"
+      - "sources/hurd-servers/libfshelp/fetch-root.c:48-160 (fshelp_fetch_root: if box->active==MACH_PORT_NULL, (re)start the translator from its passive setting)"
+      - "sources/hurd-servers/libfshelp/set-active.c:25-60 (fshelp_set_active detects a dead translator port via MACH_PORT_RIGHT_DEAD_NAME / dead_refs==0)"
+      - "sources/hurd-servers/libdiskfs/dir-lookup.c:218-340 (on-access lookup path that calls fshelp_fetch_root to start the translator)"
+      - "sources/hurd-servers/startup/startup.c:1597-1616 (do_mach_notify_dead_name: an essential task dying -> crash_system())"
+      - "sources/hurd-servers/startup/startup.c:67-336 (crash_flags=RB_AUTOBOOT; crash_system calls reboot_system)"
+      - "sources/hurd/kern/debug.c:133-181 (Panic: ~1000 s delay then halt_all_cpus(reboot_on_panic))"
+      - "sources/hurd/kern/startup.c:73-110 (reboot_on_panic is true by default and false only with the -H flag)"
+      - "sources/hurd/i386/i386at/model_dep.c:280-300 (halt_all_cpus: reboot==TRUE -> kdreboot())"
+      default_state: >-
+        Three layers, only the first two of which recover. (1) ARCHITECTURAL
+        CONTAINMENT: filesystems, TCP/IP, drivers and most services are ordinary
+        userspace Mach tasks, so a translator/server fault does not crash gnumach
+        (xref C5d.1 multi-server). (2) ON-DEMAND RECOVERY: a node carrying a passive
+        translator setting is re-started by its parent filesystem on the next access
+        after the translator exits or dies — fshelp_set_active recognises the dead
+        port and fshelp_fetch_root re-spawns from the persisted command; active-only
+        translators (no passive backing) die and stay dead until re-accessed via a
+        passive setting. (3) NO SUPERVISOR FOR CRITICAL SERVERS: proc, auth, exec and
+        the root filesystem are registered as 'essential tasks'; their death triggers
+        do_mach_notify_dead_name -> crash_system() -> whole-system reboot (RB_AUTOBOOT)
+        rather than a restart. A gnumach kernel panic prints, waits ~1000 s, then
+        auto-reboots (reboot_on_panic=TRUE default; the -H flag halts instead). There
+        are no soft/hard-lockup or hung-task detectors and no kernel self-watchdog
+        (the only 'watchdog' symbols are NIC TX-timeout handlers in the vendored Linux
+        driver glue).
+    commits:
+    - hash: "ce415d0a078bf4cc69ada749a890c30f41dc52de"
+      repo: "hurd_servers"
+      date: "1994-09-06"
+      description: "Initial revision (libfshelp/fetch-root.c — fshelp_fetch_root (re)starts a node's translator from its passive setting on access: the on-demand restart path)"
+    - hash: "d583c2bf9159456ec145a99eacf29d6df4331f2b"
+      repo: "hurd_servers"
+      date: "1996-02-21"
+      description: "(fshelp_set_active):   When EXCL, make sure the active translator is really active. (detects a dead translator control port via MACH_PORT_RIGHT_DEAD_NAME on the EXCL set-active path, unblocking replacement of a crashed translator; the restart itself is the fshelp_fetch_root path)"
+    - hash: "43347f8e5f17cf246d2199b4db5b899e8bb08557"
+      date: "2009-11-28"
+      description: "Add -H option to halt on panic (gnumach: introduces the reboot_on_panic switch; the translator/essential-task recovery machinery itself predates the git window)"
+    discussions: []
+    rationale: >-
+      P=1 (two genuine availability mechanisms exist: microkernel containment of
+      server faults, and on-demand restart of passive translators by their parent
+      filesystem — real fault recovery by design, not an add-on). D=2 default-on:
+      the containment and the passive-translator restart are inherent behaviour of
+      the translator architecture every Debian GNU/Hurd boot relies on; no opt-in
+      needed (kernel auto-reboot is also default-on via reboot_on_panic=TRUE).
+      S=1 weak: there is no fault detection at all (no lockup/hung-task detector, no
+      kernel watchdog), the recovery is limited to leaf translators with a passive
+      setting, and the high-value single points of failure — proc, auth, exec, the
+      root filesystem and the kernel itself — are not restarted but instead reboot
+      the whole system (crash_system / halt_all_cpus). This sits below Linux
+      (S=2, lockup detectors) and openbsd (S=1 likewise no detector, comparable
+      auto-reboot), and well below fuchsia/tock (S=2, in-kernel lockup detector or
+      mandatory per-process fault policy). A=3 core design: the userspace-translator
+      architecture is THE defining property of the Hurd (xref C5d.1 A=3, C4.2 port
+      capabilities); fault containment is a structural consequence, and passive
+      translators are a first-class part of that design. T=3: T_age=3 (the
+      translator/passive-restart model and the essential-task/reboot machinery are
+      foundational Hurd from the 1990s; the gnumach panic/-H path dates to 2009-2011,
+      commit 43347f8e); T_maintained=3 (gnumach actively maintained — 154 commits in
+      the last 12 months, latest 2026-04; hurd-servers libfshelp/startup carried
+      through the 2026-04 codebase-wide sweep). Scores only the availability facet;
+      the isolation facet of the server architecture is C5d.1/C4.6 (no double-count).
+      No amd64/i386 divergence — shared kern/ and server code.
+  C5e.2:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/kern/sched_prim.c:64-172 (min_quantum controls the preemptive context-switch rate)"
+      - "sources/hurd/kern/mach_clock.c:245-248 (clock tick drives thread_quantum_update -> per-quantum preemption)"
+      - "sources/hurd/kern/priority.c:68-186 (thread_quantum_update + update_priority: timesharing CPU-usage aging)"
+      - "sources/hurd/kern/thread.c:338 (thread_template.max_priority = BASEPRI_USER)"
+      - "sources/hurd/kern/thread.c:2043-2083 (thread_priority: 'priority < max_priority' -> KERN_FAILURE — cannot self-elevate above the cap)"
+      - "sources/hurd/kern/thread.c:2115-2158 (thread_max_priority takes the processor_set CONTROL port; raising the cap is privileged)"
+      - "sources/hurd/include/mach/mach_host.defs (thread_max_priority signature: processor_set_t = control port)"
+      - "sources/hurd/kern/sched.h:140-141 (BASEPRI_SYSTEM=6 favoured over BASEPRI_USER=25)"
+      default_state: >-
+        GNU Mach runs a fixed-priority preemptive timesharing scheduler. A periodic
+        clock tick (mach_clock.c) decrements the running thread's quantum and forces
+        a reschedule at quantum expiry (sched_prim.c min_quantum), so a same-priority
+        CPU hog is round-robined rather than allowed to monopolise a CPU; timesharing
+        threads additionally have their priority aged by accumulated CPU usage
+        (priority.c update_priority). An unprivileged thread is capped at
+        max_priority = BASEPRI_USER (25) and thread_priority() returns KERN_FAILURE
+        if it tries to set a more-favourable (numerically lower) priority than its
+        cap; raising the cap via thread_max_priority requires the privileged
+        processor-set CONTROL port. What is absent is any CPU-TIME BUDGET: there is no
+        bandwidth/quota scheduler, no SCHED_DEADLINE-style admission control, and
+        RLIMIT_CPU is not enforced (no SIGXCPU machinery in the proc server or
+        gnumach). Mach's documented inability to account CPU time per principal is
+        described in the open_issues resource_management page.
+    commits:
+    - hash: "f07a4c844da9f0ecae5bbee1ab94be56505f26f7"
+      date: "1997-02-25"
+      description: "Initial source (1997 gnumach CVS import of the Utah Mach 4-based kernel; mechanism inherited as ancestral Mach functionality)"
+    discussions: []
+    rationale: >-
+      P=1 (a real temporal-isolation mechanism exists: preemptive time-slicing with
+      CPU-usage aging plus a max_priority cap that blocks unprivileged priority
+      self-elevation — the same shape as zephyr/freertos "fairness + blocked
+      elevation", not a true budget). D=2 default-on: the scheduler and the
+      max_priority cap apply to every task with no opt-in. S=1 weak: there is no
+      enforced per-task CPU budget and no admission control, so N cooperating or
+      forked hogs at the default priority still divide the CPU among themselves and
+      starve other work proportionally; RLIMIT_CPU does not fire a kill. This matches
+      the zephyr/freertos S=1 band and the fuchsia "deadline class, no admission
+      control" S=1; it is below the openbsd/netbsd S=1-but-budgeted RLIMIT_CPU
+      (SIGXCPU/SIGKILL is an actual kill the Hurd lacks) and below Linux S=2 (cgroup
+      cpu.max bandwidth). A=2 in-tree: the timesharing scheduler is a standard
+      in-kernel Mach component rather than a purpose-built isolation primitive (vs
+      fuchsia/tock A=3 where scheduling reservations are a core design property; cf.
+      the seL4 MCS scheduling-context design). T=3: T_age=3 (the Mach timesharing scheduler and max_priority
+      model are present since the 1990s — kern/thread.c traced to 1997);
+      T_maintained=3 (gnumach actively maintained, scheduler files touched through
+      2025-06). No amd64/i386 divergence — shared kern/ scheduler. (Not scored
+      P=0: unlike openbsd/netbsd C5e.2 — scored P=1 on
+      RLIMIT_CPU — Hurd lacks RLIMIT_CPU but DOES have an elevation-blocked
+      preemptive-fairness mechanism, so P=1 S=1 via the zephyr/freertos rationale is
+      the consistent placement.)
+  C5e.3:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 1
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "vm_set_size_limit RPC (host-privileged port required to raise the max; per-task current/max VM limit)"
+      source_files:
+      - "sources/hurd/vm/vm_map.c:203-209 (every non-kernel map initialised with size_cur_limit = size_max_limit = vm_page_mem_size() — total physical RAM)"
+      - "sources/hurd/vm/vm_map.c:283-307 (vm_map_enforce_limit: returns KERN_NO_SPACE when committed VM would exceed size_cur_limit)"
+      - "sources/hurd/vm/vm_map.c:864-3174 (limit enforcement in vm_map_find_entry, vm_map_enter, and vm_map_copyout)"
+      - "sources/hurd/vm/vm_user.c:817-861 (vm_set_size_limit: raising max_limit needs IKOT_HOST_PRIV)"
+      - "sources/hurd-servers/proc/hash.c:33-40 (process table is a growable hurd_ihash — no fixed cap)"
+      - "sources/hurd-servers/proc/mgt.c (no maxuprc / per-user process count; EAGAIN at :171/:436 is a task-death race, not a quota)"
+      - "sources/hurd/ipc/ipc_space.h:222-226 (per-task port name table grows toward the name-space ceiling; no security quota)"
+      default_state: >-
+        One concrete, default-on, enforced quota exists: a per-task virtual-memory
+        limit (commit 9ae4d99c, 2025-09). Every user task's vm_map is initialised
+        with size_cur_limit = size_max_limit = vm_page_mem_size() (total physical
+        RAM), and vm_map_enforce_limit() rejects (KERN_NO_SPACE) any allocation on
+        the vm_map_enter / find_entry / copyout paths that would push the task's
+        committed (non-PROT_NONE) memory past the limit; raising the cap requires the
+        host-privileged port. Everything else is unbounded: the proc server keeps the
+        process table in a growable hash with no maxuprc / per-user process count
+        (fork bombs are unmitigated), there is no per-task IPC-port quota (the name
+        table grows toward the name-space ceiling), and there is no kernel
+        zone/zalloc cap — the open_issues resource_management page documents that
+        "zalloc panics upon user space processes allocating too many ports", i.e. a
+        port-flood is a kernel-panic DoS. No quotas on memoryuse/openfiles/maxproc
+        comparable to FreeBSD RCTL or Linux memcg/pids.
+    commits:
+    - hash: "9ae4d99c1d1e7c9c0977cebb4df9b86fa92cca94"
+      date: "2025-09-22"
+      description: "Implement per-task virtual memory limit (vm_set_size_limit + vm_map_enforce_limit; default cap = physical RAM)"
+    discussions: []
+    rationale: >-
+      P=1 (a concrete enforced quota exists — the per-task VM cap is checked on the
+      live allocation path and defaults on). D=2 default-on: the cap is installed on
+      every task_create without opt-in (raising it is host-privileged). S=1 weak:
+      the single quota's default value is total physical RAM, so one task barely
+      binds and several tasks can still collectively exhaust memory; more
+      importantly the headline exhaustion DoS vectors are uncovered — no per-user
+      process limit (fork bomb), no IPC-port quota (port flood -> zalloc panic), no
+      kernel-zone cap. This places Hurd below openbsd/netbsd (S=2: default-on
+      rlimits + per-uid proc counting + quotas), below Linux (S=2: hierarchical
+      memcg + pids.max), and below fuchsia (S=1 too, but with a job handle cap and
+      kill-on-OOM that Hurd lacks). A=2 in-tree: the VM limit is a recently-added
+      in-kernel option bolted onto vm_map, not a core resource-accounting design
+      (contrast sel4 Untyped / tock grant-region S=3 A=3 where quota IS the memory
+      model, and fuchsia job hierarchy A=3). T=min(T_age, T_maintained)=min(1,3)=1:
+      T_age=1 (the only real quota mechanism landed 2025-09, <1 year before the
+      2026-06 evaluation); T_maintained=2 (8 non-trivial commits on the cited vm/proc files in the
+      window; the earlier 3 rested on repo-wide gnumach counts
+      in the last 12 months). The low T reflects that Hurd's sole enforced quota is
+      young. No amd64/i386 divergence — vm_map is arch-independent.
+  C7d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/hurd/vm/ (no page-colouring-for-security; vm_page uses a global LRU, no colour buckets)"
+      - "sources/hurd/i386/ (no Intel CAT/RDT/resctrl driver in the i386 implementation)"
+      - "sources/hurd/x86_64/ (no Intel CAT/RDT/resctrl driver in the x86_64 implementation)"
+      default_state: >-
+        GNU Mach on amd64 runs on multi-core x86 with a shared last-level cache
+        across tasks, so the steady-state microarchitectural timing-channel surface
+        exists. gnumach implements no deliberate partitioning of that shared state:
+        no Intel CAT/MBA/RDT (resctrl) support, and no security page-colouring (a
+        grep for colour/CAT/partition in vm/ finds only red-black-tree node colours
+        and unrelated framebuffer-palette fields; vm_page eviction is a single global
+        LRU, not colour-bucketed). No flush-on-domain-switch for timing isolation.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0 (the surface exists — shared LLC across security domains on the amd64
+      target — but no time-protection mechanism is present; per the rubric this is
+      P=0, NOT N/A, exactly as for openbsd/netbsd/fuchsia C7d.1). With P=0,
+      D=S=A=T=0. Even a hypothetical performance-oriented page-colouring (as in
+      NetBSD UVM) would still score P=0 here because it would not be a security
+      partition — and gnumach has none anyway. Below Linux (P=1, resctrl opt-in).
+      N/A is reserved for cacheless single-core MCUs (the Cortex-M RTOSes); GNU Mach
+      is not one. No amd64/i386 divergence (i386 likewise has no resctrl driver).

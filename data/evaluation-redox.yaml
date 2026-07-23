@@ -1,0 +1,2640 @@
+# yaml-language-server: $schema=schema/evaluation.schema.json
+# Redox OS (Rust microkernel) kernel hardening evaluation.
+# Primary target: x86_64. Comparators: aarch64, riscv64.
+# Arch-divergent mechanisms carry an arm64: overlay (materialized as the
+# derived os redox-arm64).
+# Primary kernel source: gitlab.redox-os.org/redox-os/kernel.git (`sources/redox/`).
+# Design-intent reference: gitlab.redox-os.org/redox-os/book.git
+#   (`sources/redox-book/src/`: security.md, microkernels.md, kernel.md,
+#    memory.md, schemes.md, scheme-operation.md).
+# Kernel revision: 4531e15ba1f32ef53f126c70ace906f2a850adb7
+# (2026-04-16), kernel crate version 0.5.12 in the Redox OS 0.9.0
+# evaluation baseline; Redox Book revision:
+# 3369933750e6a6f8b0328f47df0310bf1c762e29.
+# Toolchain: Rust nightly-2025-10-03, edition 2024, -Z build-std.
+os: redox
+schema_version: 1
+baseline_class: shipped-default
+default_config: "Redox OS 0.9.0; kernel crate 0.5.12 snapshot 4531e15ba1f32ef53f126c70ace906f2a850adb7, x86_64 release build, default cargo features (acpi, multi_core, serial_debug, self_modifying, x86_kvm_pv); design evidence uses Redox Book 3369933750e6a6f8b0328f47df0310bf1c762e29"
+comparator_configs:
+- "aarch64 (ARM64) — Raspberry Pi 3B+ target"
+- "riscv64 — recently added"
+arm64_default_config: >-
+  Redox OS 0.9.0; kernel crate 0.5.12 snapshot
+  4531e15ba1f32ef53f126c70ace906f2a850adb7, aarch64 release build
+  (targets/aarch64-unknown-kernel.json: +strict-align,-neon,-fp-armv8,+tpidr-el1,
+  rust-lld, no branch-protection), same default cargo features as x86_64;
+  QEMU virt (qemu-system-aarch64, qemu-efi/u-boot) and Raspberry Pi 3B+
+  targets — "limited support" per the book. The port boots through the
+  generic rmm/startup paging path (W^X kernel sections, NX data), but
+  enables none of the aarch64 hardware hardening features: no PAN, no PXN
+  on user-executable pages (rmm couples PXN to UXN), no
+  UNMAP_KERNEL_AT_EL0/KPTI analogue, no PAC/BTI/MTE/GCS (no
+  -Zbranch-protection; MAIR has no Tagged-Normal attribute), no SCTLR_EL1
+  hardening writes at all, and no speculation defenses (no SMCCC
+  ARCH_WORKAROUND_1/2, CSDB, or SSBS use).
+arm64_comparator_configs:
+- "QEMU -cpu max (FEAT_MTE/PAC/BTI-capable upper bound — unused by the kernel)"
+- "riscv64 port (other secondary architecture, similar early stage)"
+
+mechanisms:
+
+  # =========================================================================
+  # C1 — Memory Corruption Prevention
+  # =========================================================================
+
+  C1a.1:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/targets/x86_64-unknown-kernel.json (no stack-protector field)"
+      - "sources/redox/Makefile:33-44 (cargo rustc invocation has no -Z stack-protector or -C control-flow-guard flags)"
+      - "sources/redox/Cargo.toml:110-116 (panic = \"abort\" in both profiles — a bounds-check violation halts the kernel rather than unwinding)"
+      default_state: >-
+        Rust's `stack-protector` option is unstable and not enabled by the
+        kernel's build; no `__stack_chk_*` symbols are linked. Protection of
+        stack buffers in safe code comes from the compiler's mandatory bounds
+        checking, which cannot be disabled. Stack frames in `unsafe` sections
+        (e.g. naked asm in the usercopy path, interrupt entry macros) have
+        neither bounds checks nor a canary.
+    commits:
+    - hash: "8c0be73224731eb217e1bc7a8c3c606eb918635f"
+      date: "2023-07-04"
+      description: "Build the kernel with panic=abort (a violated language-level check now halts the kernel instead of unwinding — the fail-stop behaviour the mandatory bounds checks rely on)"
+    - hash: "28ba26cc2b739bc4c9774286f9deba83ff7aa104"
+      date: "2026-02-20"
+      description: "move lints to Cargo.toml file (records the indexing_slicing kernel-coding rule; the underlying bounds checks long predate it — Rust since the 2015 kernel inception, xref C1f.1)"
+    discussions: []
+    rationale: >-
+      P=1: real stack-buffer-overflow prevention exists — Rust's mandatory
+      bounds checks make a stack-allocated buffer in safe code impossible to
+      overflow (the same grounds on which tock scores this row; one
+      implementation realising several abstract properties is the framework's
+      C4.1/C4.2 Fuchsia-handles pattern, so this does not double-count
+      C1a.5). D=3: unconditional — the checks cannot be built out. S=2:
+      strong for safe code, but the kernel carries a material uncovered
+      residue (~970 unsafe occurrences plus hand-written asm entry paths)
+      with neither bounds checks nor a canary, and unlike tock the unsafe
+      code is not capability-gated. A=3: language-level, structural. T=3:
+      property of the kernel since inception, actively maintained.
+  C1a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/context/context.rs:590-617 (Kstack::new allocates order-4 p2frame = 16 pages, no guard)"
+      - "sources/redox/src/allocator/mod.rs:7-48 (KERNEL_HEAP_SIZE=1MiB mapped contiguously, extended in-place on OOM)"
+      - "sources/redox/src/allocator/linked_list.rs:9-50 (first-fit linked_list_allocator, no guard/canary)"
+      default_state: >-
+        Kernel stacks are 64 KiB (16 × 4-KiB) blocks pulled from the physical
+        p2frame allocator; no unmapped guard page is reserved below the stack,
+        so a stack overflow silently clobbers adjacent frame data. The kernel
+        heap uses the `linked_list_allocator` crate: on OOM it maps additional
+        pages contiguously rather than inserting guards between allocations.
+        The address-space design leaves large holes between the kernel image
+        and kernel-heap regions (`PML4_SIZE = 512 GiB` slots), but that is
+        coarse-grained isolation, not per-allocation guards.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no per-stack or per-heap-chunk guard page. Mitigation relies on
+      Rust's safety rather than on trapping overflows. Userspace grant
+      allocations go through `AddrSpace::map` which validates ranges, but the
+      kernel-internal stack/heap has no such guards.
+  C1a.3:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "cargo feature smap = \"auto\" (config.toml.example:2) — enables STAC/CLAC around copies when CPU reports SMAP"
+      source_files:
+      - "sources/redox/src/syscall/usercopy.rs:13-215 (UserSlice<const READ, const WRITE> type-state, `new()` bounds base and base+len against crate::USER_END_OFFSET, zero-size slice guard)"
+      - "sources/redox/src/arch/x86_64/mod.rs:21-49 (`arch_copy_to_user` naked asm; alternative! inserts STAC/rep movsb/CLAC under SMAP, plain rep movsb otherwise; symbol `__usercopy_start`/`__usercopy_end` is used by page-fault recovery)"
+      - "sources/redox/src/arch/x86_64/consts.rs:26 (USER_END_OFFSET = 256 × PML4_SIZE — entire lower half)"
+      - "sources/redox/src/memory/mod.rs:989-1042 (recover_and_efault: kernel page-fault handler cancels the copy and returns EFAULT when the userspace access traps)"
+      - "sources/redox/src/syscall/usercopy.rs:225-236 (validate_region requires page-aligned non-zero size)"
+      default_state: >-
+        Every syscall argument that points into user memory is parsed into a
+        `UserSliceRo`/`UserSliceWo`/`UserSliceRw` at the syscall entry (see
+        `src/syscall/mod.rs:88-223`), meaning bounds are enforced at the
+        type-system boundary. The asm primitive brackets the copy with
+        STAC/CLAC so the kernel can touch user memory only inside the
+        `__usercopy_start..__usercopy_end` text range; faults there are
+        recovered by the page-fault handler rather than panicking. SMAP is
+        `auto` by default and engaged on every CPU that advertises it.
+    commits:
+    - hash: "56f88e80c21d8c60676675d7ac8ba74218f9a1b6"
+      date: "2023-07-06"
+      description: "Usercopy migration (introduces the typed UserSlice usercopy layer with page-fault EFAULT recovery and zero-initialized AlignedBox buffers, and creates arch/x86_64/misc.rs enabling SMEP, UMIP and — with the smap feature — SMAP via CR4)"
+    - hash: "40605e643e8bf24c91866bf400d8d1dbb9e7a5d3"
+      date: "2025-09-11"
+      description: "Move stac/clac for SMAP in debugger to just around the stack read loop (narrows the SMAP-open window during debugger reads of user stacks)"
+    discussions: []
+    rationale: >-
+      P=1 strong design. D=3 mandatory: there is no kernel path that touches
+      user memory outside the `UserSlice` wrapper, enforced by the type
+      system. S=3 strong: typed ownership + SMAP gate + length and wraparound
+      check (`base.saturating_add(len) >= USER_END_OFFSET`). A=3 core design
+      property — the entire syscall ABI is phrased in terms of UserSlice.
+      T_age=2 (UserSlice refactor landed in the 0.5.x series, 2-3 years old),
+      T_maintained=3 (touched in recent commits e.g. `40605e64` moving
+      stac/clac around the debugger read loop). T = min(2,3) = 2.
+  C1a.4:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/Cargo.toml:47-48 (clippy lint indexing_slicing = \"warn\" — bare `[i]` indexing flagged)"
+      default_state: >-
+        FORTIFY_SOURCE wraps glibc functions (memcpy/strcpy/etc.) with
+        compile-time-known-size checks. The Redox kernel uses `core::slice`
+        and Rust's `&[u8]` copy primitives which always check bounds at
+        runtime, so the C string/mem-function surface that FORTIFY hardens
+        does not exist. No C-style fortify shim is applicable.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A — FORTIFY_SOURCE is a C-library compile-time mechanism
+      (_FORTIFY_SOURCE wrappers around memcpy/strcpy and friends), and the
+      Redox kernel is pure Rust with no C string/mem builtins to fortify:
+      the attack surface the mechanism defends does not exist. The
+      equivalent guarantees come from Rust's own bounds checks, scored at
+      C1a.5/C1f.1 — the same treatment as tock, the other Rust kernel in
+      the set.
+  C1a.5:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "Cargo.toml lint arithmetic_side_effects = \"warn\" — compile-time nudge, not a runtime sanitizer"
+      source_files:
+      - "sources/redox/Cargo.toml:110-116 (panic = \"abort\" in dev and release — a bounds-check violation halts the kernel)"
+      - "sources/redox/Cargo.toml:37-62 (lints: arithmetic_side_effects/indexing_slicing/unwrap_used all \"warn\" — not errors)"
+      - "sources/redox/src/allocator/linked_list.rs (no redzones, no poison, no quarantine for the unsafe-side residue)"
+      default_state: >-
+        Rust's runtime bounds checking is always active: every indexed
+        slice/array access in safe code is checked and a violation aborts the
+        kernel. There is no address-sanitizer or KFENCE-like canary-page
+        allocator on top of it: bugs inside `unsafe` blocks and hand-written
+        asm have no dedicated detector in release builds. KFX (FPU state)
+        storage uses `AlignedBox::try_zeroed_slice` for correctness, not as a
+        sanitizer.
+    commits:
+    - hash: "8c0be73224731eb217e1bc7a8c3c606eb918635f"
+      date: "2023-07-04"
+      description: "Build the kernel with panic=abort (a violated language-level check now halts the kernel instead of unwinding — the fail-stop behaviour the mandatory bounds checks rely on)"
+    - hash: "28ba26cc2b739bc4c9774286f9deba83ff7aa104"
+      date: "2026-02-20"
+      description: "move lints to Cargo.toml file (records the indexing_slicing kernel-coding rule; the underlying bounds checks long predate it — Rust since the 2015 kernel inception, xref C1f.1)"
+    discussions: []
+    rationale: >-
+      P=1: Rust's intrinsic runtime bounds checking is a genuine, always-on
+      spatial-safety mechanism — the same grounds on which tock scores this
+      row (the taxonomy treats the language's mandatory checks as the
+      C1a.5 realization for Rust kernels). D=3: unconditional; the checks
+      cannot be built out. S=2: no practical bypass within safe code, but
+      the protected fraction is smaller than tock's — the kernel carries
+      ~970 unsafe occurrences that are not capability-gated, plus asm entry
+      paths, and there is no KASAN/KFENCE-style detector for that residue
+      (tock's audited, capability-gated unsafe earns it S=3; redox's
+      broader residue caps at S=2). A=3: core language property. T=3:
+      since inception, actively maintained. Distinct from C1f.1, which
+      scores the language choice as a whole.
+  C1a.6:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/targets/x86_64-unknown-kernel.json (x86_64 primary target; ARM MTE is not applicable)"
+      default_state: >-
+        The primary evaluation target is x86_64, which has no MTE hardware.
+        The aarch64 port's state is recorded in the arm64 overlay below.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A on x86_64. Scored separately in the supplementary ARM64
+      column (see the arm64 overlay below).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/rmm/src/arch/aarch64.rs:104-135 (MAIR_EL1 is programmed with only Device-nGnRnE / Normal-NC / Normal-WB attributes — no Tagged-Normal (0xF0) attribute, so MTE tag storage is never configured)"
+        - "sources/redox/src/arch/aarch64/ (no IRG/STG/LDG instructions, no TCF/TCO control, no ID_AA64PFR1_EL1.MTE probing)"
+        default_state: >-
+          MTE-capable hardware is reachable for the generic aarch64 port
+          (QEMU -cpu max exposes FEAT_MTE), but the kernel configures no
+          tagged memory attribute in MAIR_EL1, never probes
+          ID_AA64PFR1_EL1.MTE, and contains no tag-checked allocator. ARM
+          MTE (ARMv8.5) is unsupported.
+      rationale: >-
+        arm64: P=0 — MTE-capable aarch64 hardware exists in the ecosystem
+        (and Linux scores spatial-mode MTE here), but Redox ships no MTE
+        support of any kind: the MAIR setup has no Tagged-Normal attribute
+        and the tree has zero MTE references. Attack surface exists,
+        mechanism absent (netbsd-arm64 precedent).
+  C1a.7:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "Cargo.toml lints.clippy indexing_slicing = \"warn\" — style nudge to prefer `.get()`+error over panicking `[]`; does NOT disable the underlying bounds check (set to \"warn\", with a TODO to eventually \"deny\")"
+      source_files:
+      - "sources/redox/Cargo.toml:48-51 (indexing_slicing = \"warn\": comment \"Indexing a slice can cause panics and that is something we always want to avoid in kernel code. Use .get and return an error instead\")"
+      - "sources/redox/rust-toolchain.toml (nightly toolchain — bounds checks are part of the language, present in every build profile incl. release)"
+      - "sources/redox/src/main.rs (#![no_std] Rust kernel — safe code throughout is bounds-checked)"
+      default_state: >-
+        Array/slice bounds checking is intrinsic to the Rust language and
+        applies to all safe code in the kernel in every build profile,
+        including release. Unlike Linux's CONFIG_UBSAN_BOUNDS or the BSD
+        KUBSAN debug option, there is nothing to enable: an out-of-range
+        index panics deterministically. The clippy `indexing_slicing` lint
+        merely encourages replacing panicking `[]` with fallible `.get()`;
+        it is set to "warn" (not "deny") and does not weaken the check.
+    commits:
+    - hash: "28ba26cc2b739bc4c9774286f9deba83ff7aa104"
+      date: "2026-02-20"
+      description: "move lints to Cargo.toml file (records the indexing_slicing kernel-coding rule; the underlying bounds checks long predate it — Rust since the 2015 kernel inception, xref C1f.1)"
+    discussions: []
+    rationale: >-
+      P=1: Rust's array-index bounds checking is present kernel-wide for
+      all safe code. D=3 mandatory: it is a language property, not a
+      config knob — it cannot be disabled and runs in release builds (the
+      same language guarantee for which Tock scored D=3). A=3 core design:
+      flows directly from the all-Rust kernel (xref C1f.1, the flagship
+      memory-safe-language entry). S=2 (not 3): unlike Tock, whose `unsafe`
+      is capability-gated and minimized, the Redox kernel uses raw `unsafe`
+      far more liberally and without capability gating — ~970 `unsafe`
+      tokens across 126 of ~183 kernel source files — and raw-pointer / slice
+      reconstruction inside those blocks (usercopy, MMU, IPC capture) is
+      not covered by the compiler's bounds check, so a residual class of
+      out-of-bounds bugs survives in the unsafe surface (xref C1f.1 on the
+      localized-but-non-trivial unsafe footprint; cf. C1a.5, which records
+      that there is NO sanitizer to catch that unsafe residual — that
+      sanitizer gap is distinct from, and does not negate, the intrinsic
+      bounds checks scored here). This places Redox one level below Tock
+      (S=3) and above Linux's opt-in/default UBSAN_BOUNDS (S=1) on the
+      strength axis. T_age=3 (bounds checking is intrinsic to Rust, present
+      since the 2015 kernel inception), T_maintained=3 (active; lint policy
+      tightened 2026-02). Effective T=3.
+  C1b.1:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/context/memory.rs:86-132 (AddrSpaceWrapper behind Arc<RwLock>)"
+      - "sources/redox/src/scheme/mod.rs:215-271 (SchemeList behind Arc<UserInner>; drop only after last ref)"
+      - "sources/redox/src/memory/mod.rs:786-839 (page-frame refcount with saturating add/sub and explicit overflow check, see C1b.3)"
+      - "sources/redox/src/context/context.rs:88-212 (Context fields behind Arc where cross-thread, RwLock-guarded otherwise)"
+      default_state: >-
+        The kernel is entirely in Rust, so classic C-style UAF via freed
+        heap objects does not apply to safe code. Shared mutable state is
+        held behind `Arc` (reference-counted) and `RwLock`, so the backing
+        allocation is freed only after the last reference drops. `unsafe`
+        blocks (syscall entry, IPC buffers, page-table manipulation) are
+        where UAF can still occur — those rely on review, not on allocator
+        quarantine. No SLAB_TYPESAFE_BY_RCU analogue.
+    commits:
+    - hash: "156017a25dc65b9ca09f883a8448b3e0fd45dbd2"
+      date: "2024-03-04"
+      description: "Refactor: wrap RwLock<AddrSpace>. (introduces AddrSpaceWrapper — each per-context address space is held behind Arc<RwLock>, freed only after the last reference drops)"
+    - hash: "dc33c67997b01bf7de55fa898bd2b010db13a777"
+      date: "2025-11-14"
+      description: "Fix potential refcount underflow from fetch_sub. (hardens the PageInfo page-frame refcount against underflow during concurrent remove_ref)"
+    discussions: []
+    rationale: >-
+      P=1, D=3 (ownership/borrow semantics are compiler-enforced and cannot
+      be disabled), S=2 moderate (covers safe code fully but `unsafe`
+      sections remain a residual risk; no allocator quarantine backs up
+      those), A=3 core design. T_age=2, T_maintained=3 (active).
+  C1b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/allocator/linked_list.rs:1-50 (global heap = linked_list_allocator crate, first-fit, intrusive freelist with no XOR/encoding)"
+      - "sources/redox/Cargo.toml:20 (linked_list_allocator = 0.9.0)"
+      default_state: >-
+        The kernel uses the upstream `linked_list_allocator` crate. Free
+        blocks are threaded through an intrusive freelist whose next pointer
+        sits inside the freed memory — plain pointer, no canary or XOR
+        obfuscation, no freelist randomization. There is a single
+        undifferentiated heap rather than separate caches by object type.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no allocator-metadata hardening. The risk is mitigated in
+      practice by Rust preventing most of the corruption primitives that
+      would reach the allocator metadata, but the allocator itself has none
+      of the Linux/OpenBSD hardening features (canaries, freelist XOR,
+      pool-type separation).
+  C1b.3:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 2
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/memory/mod.rs:786-840 (PageInfo::add_ref: fetch_add then compare against RC_MAX, fetch_sub on overflow, returns AddRefError::RcOverflow; remove_ref asserts that the decremented value did not wrap past RC_USED_NOT_FREE)"
+      - "sources/redox/src/memory/mod.rs:853-857 (refcount load with packed kind bits)"
+      default_state: >-
+        For kernel page frames, which are heavily shared across contexts
+        (COW, shared grants), the kernel uses a hand-rolled checked
+        refcount: `add_ref` reverses the fetch_add when the count would
+        exceed `RC_MAX` and returns an error; `remove_ref` asserts that the
+        post-decrement value is not the "used but zero refs" pattern. For
+        the generic `Arc<T>` used everywhere else, Rust's std library
+        aborts the process on overflow (abort-on-overflow is the documented
+        contract for `Arc::clone`).
+    commits:
+    - hash: "9b68d4de80bd731fb64308e439cc44a6151ae930"
+      date: "2024-07-15"
+      description: "Fix add_ref(Shared) refcounting bug. (corrects the checked add_ref path for shared page frames)"
+    - hash: "dc33c67997b01bf7de55fa898bd2b010db13a777"
+      date: "2025-11-14"
+      description: "Fix potential refcount underflow from fetch_sub. (hardens the PageInfo page-frame refcount against underflow during concurrent remove_ref)"
+    discussions: []
+    rationale: >-
+      P=1, D=3 (the check runs on every `add_ref`/`clone` call), S=2
+      moderate (checked add-with-back-out plus Arc abort-on-overflow is
+      the Linux refcount_t strength class; the underflow guard is an
+      assert that panics the kernel — detection, not graceful recovery.
+      The remaining raw `fetch_add` sites are monotonic ID generators
+      and stat counters, not lifetime refcounts, so coverage of actual
+      refcounts is complete), A=3 core design, T=2: T_age=2, T_maintained=2 (10
+      substantive memory/mod.rs commits in the window, top of the sporadic band;
+      mechanism-specific work is the 2025-11 RC_USED_NOT_FREE fix burst).
+  C1b.4:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/memory/mod.rs:425-433 (PageInfoFree { prev, next }: freelist links live in the PageInfo metadata array, not in the freed pages themselves)"
+      - "sources/redox/src/memory/mod.rs:870-895 (set_next/set_prev with alignment debug_asserts; mark_used stamps the prev slot with the RC_USED_NOT_FREE sentinel)"
+      - "sources/redox/src/context/mod.rs:72 (static CONTEXTS: Mutex<BTreeSet<ContextRef>>)"
+      - "sources/redox/src/scheme/mod.rs:19-128 (HashMap<usize, T> HandleMap built on hashbrown)"
+      - "sources/redox/src/context/context.rs:620-635 (FdTbl uses Vec<Option<FileDescriptor>>, no intrusive list)"
+      default_state: >-
+        The classic unlink write-what-where primitive is structurally
+        absent: the buddy freelist's prev/next links are stored
+        out-of-band in the PageInfo[] array (a heap overflow into a
+        freed page body cannot reach them), are typed P2Frame indices
+        rather than raw pointers, and cannot be fabricated from safe
+        Rust. There is no additional poisoning or release-mode link
+        validation (set_next/set_prev alignment checks are
+        debug_assert-only); mark_used stamps the prev slot with the
+        RC_USED_NOT_FREE sentinel. Every other kernel container
+        (BTreeMap/BTreeSet, Vec, ArrayVec, hashbrown::HashMap) is a
+        safe Rust structure whose invariants the type system enforces.
+    commits:
+    - hash: "2ba9ff720c977ff4419424a8b3dc66da7e1b0c3f"
+      date: "2024-03-22"
+      description: "Doubly-linked list. (introduces the buddy-allocator freelist as PageInfoFree { prev, next } over out-of-band PageInfo metadata — the link-integrity-by-construction design scored here)"
+    - hash: "dc33c67997b01bf7de55fa898bd2b010db13a777"
+      date: "2025-11-14"
+      description: "Fix potential refcount underflow from fetch_sub. (hardens the PageInfo page-frame refcount against underflow during concurrent remove_ref)"
+    discussions: []
+    rationale: >-
+      P=1: the physical-frame buddy allocator maintains a real
+      intrusive doubly-linked freelist. Integrity comes from
+      construction, the
+      same grounds on which Tock scores this row P=1: links are
+      out-of-band type-safe indices, so the heap-overflow→unlink
+      primitive does not exist. D=3 unconditional. S=2 (strong against
+      memory-corruption-driven list attacks; no poisoning/validation in
+      release builds against logic errors, and the surrounding allocator
+      code is unsafe-heavy). A=3 structural. T_age=2 (freelist design
+      landed 2024-03-22, 2ba9ff72), T_maintained=3 (hardened 2025-11,
+      dc33c679) → T=2. The generic safe-container benefit remains
+      captured under C1f.1.
+  C1b.5:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/targets/x86_64-unknown-kernel.json (x86_64 primary target; ARM MTE temporal mode is not applicable)"
+      default_state: >-
+        See C1a.6. ARM MTE temporal tagging is not available on the primary
+        target; the aarch64 port's state is recorded in the arm64 overlay
+        below.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A on x86_64. Scored separately in the supplementary ARM64
+      column (see the arm64 overlay below).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/rmm/src/arch/aarch64.rs:104-135 (no Tagged-Normal MAIR attribute)"
+        default_state: >-
+          Same evidence as the C1a.6 arm64 overlay: no MAIR tagged
+          attribute, no tag-checked allocator, no MTE references anywhere —
+          temporal (retag-on-free) use of MTE is equally absent.
+      rationale: >-
+        arm64: P=0 — same evidence as the C1a.6 arm64 overlay; the heap
+        allocator performs no retag-on-free and the hardware feature is
+        never enabled.
+  C1c.1:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/syscall/usercopy.rs:109-120 (`read_exact<T>` uses `core::mem::zeroed()` before copy — explicit zero rather than MaybeUninit, for defense-in-depth)"
+      default_state: >-
+        Rust's ownership/initialization analysis rejects any read of an
+        uninitialized local. The kernel uses `core::mem::zeroed` or
+        `AlignedBox::try_zeroed_slice` to obtain zeroed buffers where raw
+        byte buffers must be constructed (FPU state, syscall head/tail
+        buffers). No -ftrivial-auto-var-init switch is needed because the
+        compiler enforces init-before-use as a language rule.
+    commits:
+    - hash: "56f88e80c21d8c60676675d7ac8ba74218f9a1b6"
+      date: "2023-07-06"
+      description: "Usercopy migration (introduces the typed UserSlice usercopy layer with page-fault EFAULT recovery and zero-initialized AlignedBox buffers, and creates arch/x86_64/misc.rs enabling SMEP, UMIP and — with the smap feature — SMAP via CR4)"
+    discussions: []
+    rationale: >-
+      P=1, D=3 (mandatory, language-level), S=3 (stronger than
+      INIT_STACK_ALL_ZERO because it rejects the pattern at compile time
+      rather than silently zeroing), A=3, T_age=3 (Rust language feature
+      since 1.0, 2015), T_maintained=3.
+  C1c.2:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/memory/mod.rs:139-142 (allocate_p2frame_complex: unconditional `write_bytes(0, PAGE_SIZE << min_order)` on every frame allocation — the sole frame-alloc path)"
+      - "sources/redox/src/memory/mod.rs:1043-1069 (the_zeroed_frame / init_frame: a pre-zeroed reference frame CoW-shared into lazy RO anon mappings)"
+      - "sources/redox/src/allocator/linked_list.rs:22-40 (kernel-heap alloc returns first-fit block without zeroing — the residual gap)"
+      default_state: >-
+        Zero-on-allocation is unconditional for the physical-frame
+        allocator — the kernel's primary allocation path, backing user
+        pages, page tables and kernel stacks: there is no config knob
+        and no non-zeroing fast path (a TODO at memory/mod.rs:423-424
+        notes that even a zeroed-tracking flag to skip redundant zeroing
+        does not exist yet). The `#[global_allocator]` kernel heap
+        (`linked_list_allocator`) recycles blocks without zeroing;
+        zeroing there is the caller's responsibility via `mem::zeroed`,
+        `Box::new([0; N])`, or `try_zeroed_slice`.
+    commits:
+    - hash: "fe88b23d09e03b167f57bc6ba874200335128fd9"
+      date: "2023-08-01"
+      description: "Use a single cow zeroed page for RO maps + eager mapping. (introduces the_zeroed_frame — read-only anon faults map a shared pre-zeroed frame)"
+    - hash: "bb01f0af663d60a6620fee3c22ffceb89b952506"
+      date: "2024-03-22"
+      description: "More allocation progress (part of the PageInfo allocator rework: adds the unconditional write_bytes(0) of every allocated frame in allocate_p2frame — the zero-on-alloc choke point scored here)"
+    discussions: []
+    rationale: >-
+      P=1: the unconditional write_bytes(0) in allocate_p2frame_complex
+      zeroes every allocated frame, alongside the CoW zeroed frame.
+      Same shape as Fuchsia's C1c.2 (P=1:
+      primary allocation path zeroed, kernel heap not) and Tock's (P=1:
+      the memory class that matters is zeroed). D=3: hardcoded,
+      unconditional, no knob (cf. Tock D=3; Linux D=2 is a distro
+      default). S=2: covers all frame allocations — the
+      stale-data-to-userspace vector — but the kernel heap recycles
+      blocks without zeroing, so intra-kernel stale-heap-data exposure
+      remains (the same "kernel heap gap" that caps Fuchsia and Linux
+      at S=2). A=3: single choke point in the core frame allocator.
+      T_age=2 (unconditional zeroing landed 2024-03-22, bb01f0af; the
+      CoW zeroed frame 2023-08-01), T_maintained=3 (allocator actively
+      maintained through 2026) → T=2.
+  C1d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/context/context.rs:590-606 (Kstack deterministic alloc at `initial_top`)"
+      default_state: >-
+        Kstack's top is always `base + 16*PAGE_SIZE`; no random offset is
+        applied on syscall entry. Because there is no KASLR (see C3a.1),
+        kstack virtual addresses also do not shift per boot.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0. No entry randomization; predictable layout for any attacker who
+      can influence context creation.
+  C1d.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/allocator/linked_list.rs:22-40 (allocate_first_fit — deterministic)"
+      default_state: >-
+        The heap allocator always picks the first fit in the free list, in
+        allocation-order. There is no cache-selector randomization analogous
+        to `RANDOM_KMALLOC_CACHES` and no slab-offset randomization.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+  C1d.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/Cargo.toml (kernel features contain no randomize-layout hardening option)"
+      - "sources/redox/rust-toolchain.toml (pinned Rust toolchain without a per-build layout seed)"
+      default_state: >-
+        Rust kernels get some randstruct-style benefit "for free" because
+        rustc is free to reorder fields of `#[repr(Rust)]` types. But this
+        reordering is deterministic given the compiler version — it is not
+        a per-build/per-boot seed, and `repr(C)` structs (ABI boundary,
+        syscall args, hardware layouts) keep C order. There is no
+        `-Zrandomize-layout` or CONFIG_RANDSTRUCT equivalent enabled.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0. The "default Rust layout" benefit is a side effect, not a
+      hardening choice: attackers with access to the binary can read the
+      layout. Scoring as absent.
+  C1e.1:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/linkers/x86_64.ld:23-49 (separate .text/.rodata/.data sections with 4-KiB alignment; symbols __text_start/__text_end/__rodata_start/__rodata_end exported)"
+      - "sources/redox/src/startup/memory.rs:291-306 (kernel_page_flags: .text → execute(true); .rodata → readonly no-exec; else → write(true) no-exec)"
+      - "sources/redox/src/asm/x86_64/trampoline.asm:54 (EFER.NXE set during early boot: `or eax, 1 << 11 | 1 << 8`)"
+      - "sources/redox/src/arch/x86_64/alternative.rs:150-265 (self-modifying altcode path re-locks pages to W=false X=true after patch)"
+      default_state: >-
+        EFER.NXE is set before paging is enabled; the kernel linker script
+        forces 4-KiB alignment at section boundaries so that
+        `kernel_page_flags` can apply exactly one of {execute, write}. The
+        only writable-and-executable window is transient during boot-time
+        alternative patching, after which pages are remapped R-X. No
+        runtime mechanism (module loader, JIT) introduces W+X.
+    commits:
+    - hash: "f5ac405db67469478a6c32ee94fc4778b3fcd58c"
+      date: "2020-11-27"
+      description: "Support for RMM (the rmm-based startup remap assigns mutually exclusive per-section flags: .text read-only+execute, .rodata read-only+NX, everything else writable+NX — the kernel W^X layout)"
+    - hash: "0f540e6f15c53421fc83e5236236cd75e40bda23"
+      date: "2026-04-02"
+      description: "Don't physmap the kernel itself (removes the writable physmap alias of the kernel image — per the commit message, safer against memory corruption)"
+    discussions: []
+    rationale: >-
+      P=1, D=3 mandatory, S=3 strong (enforced by the MMU + NX), A=3 core
+      design, T_age=3, T_maintained=3 (actively touched — e.g. recent
+      altcode remap code).
+  C1e.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/linkers/x86_64.ld:28-42 (.rodata section, includes altcode/altrelocs/altfeatures)"
+      - "sources/redox/src/startup/memory.rs:298-300 (.rodata mapped no-execute, no-write — read-only from the start, not after init)"
+      default_state: >-
+        There is no `__ro_after_init` macro in Redox. Genuinely-constant
+        `const` / `static` items are placed in .rodata by the linker and are
+        read-only from the first instruction — that is static W^X layout,
+        not a post-init transition. Data that is initialized once at boot
+        and then never written (spin::Once-guarded pointers, `static mut`
+        state flagged by `static_mut_refs = "warn"`) remains in writable
+        .data/.bss for the life of the kernel; no phase transition re-maps
+        such tables to read-only.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: the surface (data written once at init and never again) exists,
+      but Redox has no mechanism that demotes such data to read-only after
+      initialization — once-initialized mutable tables stay writable
+      forever. Compile-time constants living in .rodata are immutable from
+      the start, which is the static-layout property already counted under
+      C1e.1/C1e.3, not the dynamic ro_after_init transition this row
+      measures; tock's C1e.2 records the identical situation (RO flash
+      constants, no transition) as P=0. D=S=A=T=0 follow from P=0.
+  C1e.3:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/startup/memory.rs:291-306 (immutable assignment of kernel page flags after early boot)"
+      - "sources/redox/src/arch/x86_64/alternative.rs:254-263 (altcode page locked back to non-writable after patch)"
+      default_state: >-
+        Because the kernel has no loadable-module mechanism and no kmem
+        device, the notion of a securelevel that prevents raising kernel
+        writability after boot does not apply. Kernel .text is sealed by
+        construction. `/scheme/memory` allows userspace (uid 0) to mmap
+        physical memory via the memory scheme, which *can* be used to
+        overwrite physical kernel text, but that requires root and the
+        memory scheme grants (see C4.5).
+    commits:
+    - hash: "f581c71c7c5925402fc51e0dc137d92d5b672db4"
+      date: "2023-09-14"
+      description: "Allow code-overwriting optimizations, use for smap. (boot-time alternatives engine patches STAC/CLAC SMAP gates into the usercopy paths, then re-maps the patched pages write(false)+execute(true) — the only transient W+X window, sealed after patching)"
+    - hash: "0f540e6f15c53421fc83e5236236cd75e40bda23"
+      date: "2026-04-02"
+      description: "Don't physmap the kernel itself (removes the writable physmap alias of the kernel image — per the commit message, safer against memory corruption)"
+    discussions: []
+    rationale: >-
+      P=1, D=3, S=2 moderate: the kernel image is immutable, but
+      `/scheme/memory` offers root a direct physical-memory door that is
+      not available on e.g. OpenBSD at securelevel 2. A=3, T=2.
+  C1e.4:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 2
+    T_maintained: 1
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_64/misc.rs:8-28 (init: SMEP set via CR4 write when `has_smep()`; UMIP also enabled when available)"
+      - "sources/redox/src/arch/x86_shared/device/cpu.rs:215-217 (reports NX)"
+      default_state: >-
+        For SMEP: the kernel unconditionally writes `CR4.SMEP=1` in its
+        per-CPU init when the CPU feature bit is set; the check is against
+        the ext_feat CPUID leaf, so SMEP is live on every CPU. For x86_64
+        this is default-on, not an opt-in. There is no config option to
+        disable. (The analogous PXN is absent on aarch64 — scored
+        separately in the supplementary ARM64 column, see the arm64
+        overlay below.)
+    commits:
+    - hash: "56f88e80c21d8c60676675d7ac8ba74218f9a1b6"
+      date: "2023-07-06"
+      description: "Usercopy migration (introduces the typed UserSlice usercopy layer with page-fault EFAULT recovery and zero-initialized AlignedBox buffers, and creates arch/x86_64/misc.rs enabling SMEP, UMIP and — with the smap feature — SMAP via CR4)"
+    discussions: []
+    rationale: >-
+      P=1, D=3 mandatory, S=3 hardware-enforced, A=3 core, T=1: T_age=2,
+      T_maintained=1 (the cited CR4-SMEP code saw only janitorial
+      edition/clippy sweeps in the 18-month window; last substantive
+      change 2024-02).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/rmm/src/arch/aarch64.rs:27-36 (ENTRY_FLAG_NO_EXEC = 0b11 << 53 sets UXN+PXN together; ENTRY_FLAG_EXEC = 0 — an executable user mapping therefore has PXN=0 and remains fetchable at EL1)"
+        - "sources/redox/src/arch/aarch64/ (no SCTLR_EL1 writes — WXN never set)"
+        default_state: >-
+          The rmm aarch64 page-table backend has a single combined
+          execute-never flag: no-exec pages get UXN|PXN, executable pages
+          get neither bit. User text pages are therefore mapped without PXN,
+          so EL1 may execute user-controlled code — the protection SMEP
+          provides on the x86-64 primary (and per-page PXN provides in the
+          Linux/NetBSD aarch64 pmaps) is absent.
+      rationale: >-
+        arm64: P=0 — the SMEP analogue (PXN on user mappings, or
+        SCTLR_EL1.WXN) is never used: rmm couples PXN to UXN, so executable
+        user pages are kernel-executable too. The x86-64 column's P=1/D=3
+        does not carry over. Attack surface exists (ret2usr-style control
+        transfer), mechanism absent.
+  C1e.5:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_shared/gdt.rs:147-204 (`#[repr(C, align(4096))] pub struct ProcessorControlRegion` with self_ref, gdt, percpu, TSS, iobitmap; `pcr()` accessor reads through GS segment)"
+      - "sources/redox/src/arch/x86_shared/gdt.rs:369-385 (PCR allocated via allocate_p2frame — separate physical frame per CPU)"
+      - "sources/redox/src/context/context.rs:88-154 (Context struct is ordinary Rust, stored in an Arc — not embedded in the kstack, so it is not adjacent to stack overflow targets)"
+      default_state: >-
+        Control metadata (GDT, TSS, percpu variables, TLB-shootdown state)
+        lives in the PCR, a per-CPU structure that is not co-located with
+        kstacks or user memory. GSBASE points at the PCR in kernel mode;
+        the self_ref field provides a fast "get my own PCR" path. Context
+        state that on Linux would share a page with the kstack is held in
+        a heap-allocated `Context` referenced by `Arc`, so stack overflow
+        cannot directly corrupt Context fields. Comment at
+        `gdt.rs:152` flags that when KASLR+KPTI are both implemented, the
+        PCR may need to be split across two pages so that secret kernel
+        addresses live only on the protected half — this is a known gap
+        (only relevant once KPTI lands).
+    commits:
+    - hash: "a3583a10ce44f70e7df9e23f5c9296a5482da474"
+      date: "2021-02-15"
+      description: "Only swapgs when leaving/entering userspace code. (GSBASE discipline keeping the per-CPU PCR pointer valid throughout kernel execution)"
+    - hash: "019564ee0e6fccc0a2c1fd21c6a088f4fb8904fb"
+      date: "2025-09-15"
+      description: "Statically allocate PCR for the BSP (dedicated static allocation for the per-CPU ProcessorControlRegion holding GDT/TSS/percpu state)"
+    discussions: []
+    rationale: >-
+      P=1, D=3, S=2 moderate (PCR isolation is strong, but the
+      kstack+GSBASE pointer still leaks via SGDT/SIDT on CPUs without UMIP
+      — kernel does enable UMIP when available, partially mitigating), A=3
+      core, T=2.
+  C1f.1:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/Cargo.toml:5-9 (package name=kernel, edition=2024)"
+      - "sources/redox/rust-toolchain.toml (nightly-2025-10-03)"
+      - "sources/redox/src/main.rs:1-12 (#![no_std], #![no_main], Rust kernel entry)"
+      - "sources/redox/src/asm/ (assembly glue: trampoline.asm, context switch) — only low-level plumbing"
+      - "sources/redox-book/src/microkernels.md:108 (~40k LoC Rust kernel)"
+      default_state: >-
+        Unlike Linux/BSD/Fuchsia where memory-safe language is partial
+        (Rust-for-Linux drivers; Zircon userspace), Redox's entire kernel
+        is in safe Rust with `unsafe` for MMU/IPC/interrupt
+        primitives. Rust's ownership, lifetimes, and safe containers
+        eliminate the bulk of CWE-787/416/125 by construction in all
+        non-unsafe code. Unsafe accounting: ~970 `unsafe` occurrences
+        across the kernel (concentrated in src/arch ~570 and src/context
+        ~130), with no Tock-style capability gating of unsafe; the
+        Cargo.toml lints record an aspirational posture
+        (indexing_slicing/unwrap_used/static_mut_refs at "warn" with
+        TODO/FIXME notes; arithmetic overflow checked only in debug
+        builds). This does not break the S=3 language-safety equivalence
+        but is the residual surface.
+    commits:
+    - hash: "fb99ec7e6de04373507b7c4ee68fd8fe548f5e1a"
+      date: "2016-08-14"
+      description: "Strongly typed virtual/physical memory seperation. (second commit of the split-out kernel repo: the Rust type system makes physical/virtual address confusion unrepresentable; typo in the upstream subject)"
+    - hash: "28ba26cc2b739bc4c9774286f9deba83ff7aa104"
+      date: "2026-02-20"
+      description: "move lints to Cargo.toml file (records the indexing_slicing kernel-coding rule; the underlying bounds checks long predate it — Rust since the 2015 kernel inception, xref C1f.1)"
+    discussions: []
+    rationale: >-
+      P=1, D=3 mandatory, S=3 strong (the strongest possible for this
+      mechanism across any OS in the study: no OS other than Redox writes
+      100% of kernel code in a memory-safe language). A=3 core design,
+      T_age=3 (Redox kernel has been Rust since its 2015 inception),
+      T_maintained=3 (active).
+  C2a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/Makefile:33-44 (cargo rustc invocation — no sanitizer flags)"
+      - "sources/redox/targets/x86_64-unknown-kernel.json (no CFI fields)"
+      default_state: >-
+        rustc supports `-Zsanitizer=kcfi` for kernel CFI on nightly, but
+        Redox's build does not pass it. No indirect-call type-check
+        instrumentation is inserted. Mitigation relies on Rust's safe type
+        system (generic `fn()` pointers are type-checked at compile time
+        inside safe code), but raw function pointers in `unsafe` blocks
+        (e.g. interrupt vectors, syscall table) are not CFI-checked at
+        runtime.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+  C2a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/targets/x86_64-unknown-kernel.json (no `cf-protection: branch`)"
+      default_state: >-
+        No Intel IBT / CET-IBT. The target JSON does not set
+        `cf-protection: branch`, and there is no ENDBR64 emitted by the
+        kernel. CR4.CET bits are not toggled.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/targets/aarch64-unknown-kernel.json (AArch64 target; Intel CET-IBT is not applicable)"
+        default_state: >-
+          Intel IBT (CET indirect-branch tracking) is x86-only; the arm64
+          forward-edge hardware mechanism is BTI, scored at C2a.3.
+      rationale: >-
+        arm64: N/A — Indirect Branch Tracking is x86-only; x86-only
+        mechanisms receive N/A in the supplementary ARM64 column. arm64
+        forward-edge is scored under C2a.3 (BTI).
+  C2a.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/targets/x86_64-unknown-kernel.json (x86_64 primary target; ARM BTI is not applicable)"
+      default_state: >-
+        ARM BTI is an ARMv8.5+ hardware feature with no x86-64 analogue in
+        this row (Intel IBT is scored separately at C2a.2). The aarch64
+        port's state is recorded in the arm64 overlay below.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A — ARM-only hardware mechanism in the primary x86-64 evaluation:
+      linux, fuchsia, netbsd, and hurd all mark
+      C2a.3/C2b.3/C2b.4 na on their x86-64 primary columns even where an
+      aarch64 port exists, and redox's primary evaluation target is x86-64.
+      The row stays out of the x86 applicable-mechanism denominator and is
+      scored separately in the supplementary ARM64 column (see the arm64
+      overlay below).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/targets/aarch64-unknown-kernel.json (features: +strict-align,-neon,-fp-armv8,+tpidr-el1 — no branch-protection)"
+        - "sources/redox/Makefile:33-44 (cargo rustc invocation passes no -Zbranch-protection=bti)"
+        - "sources/redox/src/arch/aarch64/ (no SCTLR_EL1 writes at all, so SCTLR_EL1.BT0/BT1 are never set; vectors.rs and the entry stubs carry no `bti c` landing pads)"
+        default_state: >-
+          rustc supports -Zbranch-protection=bti for aarch64 targets, so the
+          mechanism is implementable with the kernel's own toolchain, but
+          neither the target JSON nor the kernel Makefile requests it and
+          the kernel never writes SCTLR_EL1 — guarded-page semantics are
+          never enabled for kernel text.
+      rationale: >-
+        arm64: P=0 — BTI-capable hardware exists in the ecosystem (FEAT_BTI
+        silicon; QEMU -cpu max) and the toolchain supports it, but the
+        kernel is built without branch protection and never enables guarded
+        pages. Attack surface (kernel JOP gadget reachability) exists,
+        mechanism absent.
+  C2b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/Makefile (rustc invocation has no shadow-call-stack instrumentation)"
+      default_state: >-
+        No RETGUARD-style return encryption on function exit; no Shadow
+        Call Stack (the aarch64 specifics are recorded in the arm64 overlay
+        below). Rust's control flow is safe by construction
+        for safe code, but the hand-written asm interrupt/syscall entry
+        paths (`push_preserved!` / `pop_preserved!` macros in
+        src/arch/x86_64/interrupt/handler.rs) are not instrumented.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/targets/aarch64-unknown-kernel.json (features: +strict-align,-neon,-fp-armv8,+tpidr-el1 — no reserve-x18, no -Zsanitizer=shadow-call-stack)"
+        default_state: >-
+          rustc supports -Zsanitizer=shadow-call-stack on aarch64 (the
+          mechanism Linux and Fuchsia use for their arm64 kernels), but the
+          target spec neither reserves x18 nor enables the sanitizer; no
+          software shadow stack exists.
+      rationale: >-
+        arm64: P=0 — unlike the x86-64 column (where no comparable software
+        SCS toolchain path exists), aarch64 SCS is implementable with the
+        kernel's own toolchain today and is simply unused. Score unchanged,
+        evidence re-grounded.
+  C2b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_shared/start.rs (CPU control setup never enables CET shadow stacks)"
+      default_state: >-
+        Intel CET shadow stack is not enabled. The CR4.CET bit is never
+        written.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/targets/aarch64-unknown-kernel.json (AArch64 target; Intel CET shadow stack is not applicable)"
+        default_state: >-
+          Intel CET shadow stack is x86-only; the arm64 hardware analogue is
+          GCS (C2b.4) and the software analogue is SCS (C2b.1).
+      rationale: >-
+        arm64: N/A — Intel CET shadow stack is x86-only; the arm64
+        backward-edge rows are C2b.1 (SCS), C2b.3 (PAC) and C2b.4 (GCS).
+  C2b.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/targets/x86_64-unknown-kernel.json (x86_64 primary target; ARM PAC is not applicable)"
+      default_state: >-
+        ARM pointer authentication (ARMv8.3 PAC) has no x86-64 analogue in
+        this row. The aarch64 port's state is recorded in the arm64 overlay
+        below.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A — ARM-only hardware mechanism in the primary x86-64 evaluation;
+      same treatment as C2a.3 (see its rationale —
+      linux/fuchsia/netbsd/hurd precedent). Scored separately in the
+      supplementary ARM64 column (see the arm64 overlay below).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/targets/aarch64-unknown-kernel.json (no branch-protection)"
+        - "sources/redox/src/arch/aarch64/ (no APIAKey/APIBKey/APDAKey register writes, no SCTLR_EL1 writes, no paciasp/autiasp in the entry asm)"
+        default_state: >-
+          rustc supports -Zbranch-protection=pac-ret for aarch64, but the
+          kernel build does not request it; the kernel never programs PAC
+          keys or sets SCTLR_EL1.EnIA/EnIB/EnDA/EnDB, and the hand-written
+          entry asm contains no paciasp/autiasp pairs.
+      rationale: >-
+        arm64: P=0 — PAC-capable hardware exists in the ecosystem (ARMv8.3+)
+        and the toolchain supports pac-ret, but the kernel ships without any
+        pointer authentication. Attack surface (kernel return-address
+        corruption) exists, mechanism absent.
+  C2b.4:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/targets/x86_64-unknown-kernel.json (x86_64 primary target; ARM GCS is not applicable)"
+      default_state: >-
+        ARMv9.4-A Guarded Control Stack (FEAT_GCS) has no x86-64 analogue
+        in this row (Intel CET shadow stack is scored separately at C2b.2).
+        The aarch64 port's state is recorded in the arm64 overlay below.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A — ARM-only hardware mechanism in the primary x86-64 evaluation;
+      same treatment as C2a.3/C2b.3, following the
+      linux/fuchsia/netbsd/hurd convention (all mark ARM-only hardware rows
+      na on x86-64 primary columns despite having ARM ports); the
+      x86 backward-edge analogue (Intel CET shadow stack) is scored
+      separately at C2b.2. Scored separately in the supplementary
+      ARM64 column (see the arm64 overlay below).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/src/arch/aarch64/ (no GCSPR_ELx/GCSCRE0_EL1 references anywhere)"
+        default_state: >-
+          ARMv9.4-A Guarded Control Stack is not referenced anywhere in the
+          kernel; no toolchain support is requested and no GCS exception
+          handling exists.
+      rationale: >-
+        arm64: P=0 — FEAT_GCS hardware is emerging in the ecosystem and
+        Linux carries (userspace-only) GCS support, but Redox has no GCS
+        code of any kind. Mirrors the linux-arm64 treatment (P=0 rather
+        than N/A).
+  C2c.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/Cargo.toml (complete kernel dependency/feature graph contains no JIT subsystem)"
+      default_state: >-
+        Redox has no in-kernel JIT analogue of eBPF. The only
+        code-overwriting surface is the build-time `self_modifying`
+        altcode system, which patches a curated set of instructions (STAC/
+        CLAC gates, RDGSBASE/WRGSBASE) at boot and then re-locks the pages
+        R-X. That is not a general-purpose JIT.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: the attack surface of interest (userspace-submitted bytecode
+      JITed inside the kernel) does not exist.
+  C3a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_64/misc.rs:11-14 (`// KASLR is currently not implemented, but this protects against leaking addresses` — UMIP is turned on as a partial mitigation)"
+      - "sources/redox/src/arch/x86_shared/gdt.rs:151-153 (`// TODO: When both KASLR and KPTI are implemented, the PCR may need to be split into two pages`)"
+      - "sources/redox/targets/x86_64-unknown-kernel.json (`position-independent-executables: false`, `relocation-model: static`)"
+      - "sources/redox/linkers/x86_64.ld:4 (KERNEL_OFFSET = 0xFFFFFFFF80000000 — fixed)"
+      default_state: >-
+        The kernel is not position-independent (per the target JSON) and
+        is linked to a fixed virtual base 0xFFFFFFFF80000000. There is no
+        bootloader-side base randomization either (the linker script even
+        notes that Limine maps the lowest-vaddr segment at the fixed
+        0xFFFFFFFF80000000 and "the redox kernel is not currently
+        relocatable"). UMIP is enabled when the CPU supports it, which
+        stops SGDT/SIDT leaks but does not substitute for KASLR.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0 unambiguously — code comments explicitly acknowledge KASLR is
+      not implemented.
+  C3a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/linkers/x86_64.ld (deterministic kernel section/function layout)"
+      default_state: >-
+        No FG-KASLR because there is no KASLR.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0 (follows from C3a.1).
+  C3b.1:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 2
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "Cargo feature `pti` (Cargo.toml:96-97) — off by default"
+      source_files:
+      - "sources/redox/Cargo.toml:96-97 (`#TODO: remove when threading issues are fixed; pti = []`)"
+      - "sources/redox/src/arch/x86_shared/pti.rs:1-86 (only the stack-switch trampoline is implemented; the page-table kernel-heap unmap/remap is commented out)"
+      - "sources/redox/src/arch/x86_shared/gdt.rs:206-224 (#[cfg(feature = \"pti\")] set_tss_stack uses PTI_CPU_STACK)"
+      - "sources/redox/src/startup/memory.rs:305 (kernel pages marked global only when pti feature is off — flagged global=true ⇒ no TLB flush on CR3 switch ⇒ no isolation)"
+      default_state: >-
+        The `pti` cargo feature is not in the default feature list and is
+        explicitly marked as broken in Cargo.toml. Even when compiled in,
+        its implementation switches only the kernel stack pointer between
+        a per-CPU trampoline stack and a per-context stack; the page-table
+        manipulation needed for true KPTI (unmap kernel ranges in the
+        user-visible PML4) is commented out. On Meltdown-vulnerable CPUs
+        the default build is exposed.
+    commits:
+    - hash: "a6550341bbe3614d595dd8ba8113517f3a25f637"
+      date: "2018-01-08"
+      description: "Add trampolines for PTI support (the Meltdown-response kernel page-table-isolation stack trampolines, x86)"
+    - hash: "fee95a040667d18411a1e2416fb7edd43f04a56c"
+      date: "2018-01-19"
+      description: "Disable PTI by default (PTI becomes an opt-in cargo feature — the off-by-default state this row records as D=1)"
+    - hash: "ca3ddcdeca5d9f4021216e5129130a218f8aafe1"
+      date: "2020-07-14"
+      description: "Add TODOs for mapping PTI properly (documents that the page-table remap half of PTI remains unimplemented — the stub state this row records)"
+    discussions: []
+    rationale: >-
+      P=1 (an API surface exists), D=1 opt-in *and* broken, S=1 weak
+      (stack-only isolation), A=2 in-tree option, T_age=2, T_maintained=1
+      (dormant, marked TODO/FIXME). T=1.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/src/arch/x86_shared/pti.rs (the only PTI code in the tree; compiled for x86 only)"
+        - "sources/redox/src/startup/memory.rs:291-306 (kernel_page_flags: kernel pages marked global only on x86_64; the aarch64 kernel half lives in TTBR1_EL1 and stays mapped while EL0 runs — no trampoline vector page, no ASID-switched unmap)"
+        default_state: >-
+          There is no UNMAP_KERNEL_AT_EL0 analogue: kernel mappings remain
+          valid in TTBR1_EL1 during user execution and exception entry goes
+          directly to the normally-mapped vector table. Even the broken x86
+          `pti` stub feature has no aarch64 counterpart.
+      rationale: >-
+        arm64: P=0 — the x86-64 column scores P=1/D=1 because a (broken,
+        opt-in) pti feature flag at least exists; on aarch64 there is no
+        kernel-unmap code at all. On Meltdown-vulnerable Arm cores
+        (Cortex-A75 class) the kernel would be fully exposed; the default
+        QEMU virt / Cortex-A53 (RPi 3B+) targets are architecturally
+        immune, but the mechanism itself is absent.
+  C3b.2:
+    P: 1
+    D: 2
+    S: 3
+    A: 3
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "config.toml.example:2 `smap = \"auto\"` — automatic on CPUID support"
+      source_files:
+      - "sources/redox/src/arch/x86_64/alternative.rs:55-70 (SMAP enabled via `cr4_write`, CLAC on boot, feature recorded in KcpuFeatures)"
+      - "sources/redox/src/arch/x86_64/mod.rs:21-48 (`arch_copy_to_user`: STAC / rep movsb / CLAC bracketed, only under SMAP; default-path without SMAP does a plain rep movsb)"
+      - "sources/redox/src/arch/x86_shared/interrupt/exception.rs:183-230 (page-fault handler and recover_and_efault chain)"
+      - "sources/redox/src/debugger.rs (`40605e64 Move stac/clac for SMAP in debugger to just around the stack read loop` — active maintenance)"
+      default_state: >-
+        SMAP is `auto` by default — engaged on every production-class CPU
+        (Broadwell+). When engaged, kernel memory accesses that would
+        touch user pages trap unless they are inside the `__usercopy`
+        code window. PAN would be its aarch64 counterpart — scored
+        separately in the supplementary ARM64 column (see the arm64
+        overlay below).
+    commits:
+    - hash: "56f88e80c21d8c60676675d7ac8ba74218f9a1b6"
+      date: "2023-07-06"
+      description: "Usercopy migration (introduces the typed UserSlice usercopy layer with page-fault EFAULT recovery and zero-initialized AlignedBox buffers, and creates arch/x86_64/misc.rs enabling SMEP, UMIP and — with the smap feature — SMAP via CR4)"
+    - hash: "f581c71c7c5925402fc51e0dc137d92d5b672db4"
+      date: "2023-09-14"
+      description: "Allow code-overwriting optimizations, use for smap. (boot-time alternatives engine patches STAC/CLAC SMAP gates into the usercopy paths, then re-maps the patched pages write(false)+execute(true) — the only transient W+X window, sealed after patching)"
+    - hash: "40605e643e8bf24c91866bf400d8d1dbb9e7a5d3"
+      date: "2025-09-11"
+      description: "Move stac/clac for SMAP in debugger to just around the stack read loop (narrows the SMAP-open window during debugger reads of user stacks)"
+    discussions: []
+    rationale: >-
+      P=1, D=2 default-on with auto detection (config says \"auto\", not
+      \"always\", but in practice every supported CPU has SMAP), S=3 strong
+      (HW-enforced), A=3 core, T_age=2, T_maintained=3.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/src/arch/aarch64/mod.rs:35-64 (arch_copy_to_user: plain ldrb/strb loop between __usercopy_start/__usercopy_end markers — no PAN toggle, because PAN is never enabled)"
+        - "sources/redox/src/arch/aarch64/mod.rs (architecture initialization has no SCTLR_EL1.SPAN clearing or PAN writes)"
+        - "sources/redox/rmm/src/arch/aarch64.rs (page-table backend has no PAN feature probing)"
+        default_state: >-
+          ARMv8.1 PAN is never enabled: the kernel performs no SCTLR_EL1
+          writes (SPAN is never cleared) and never sets PSTATE.PAN, so
+          kernel loads/stores can dereference user-accessible pages at any
+          time, not just inside the __usercopy window. The x86-64 column's
+          auto-enabled SMAP has no aarch64 counterpart in this port.
+      rationale: >-
+        arm64: P=0 — PAN-capable hardware exists in the ecosystem (ARMv8.1+;
+        default-on in the Linux and NetBSD aarch64 columns), but Redox never
+        enables PAN; the EFAULT-recoverable __usercopy window exists, yet
+        nothing prevents stray kernel dereferences of user memory outside
+        it. Mechanism absent.
+  C3c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/allocator/linked_list.rs:42-50 (dealloc — no poison/zero)"
+      - "sources/redox/src/memory/mod.rs:149-236 (deallocate_p2frame: buddy/freelist bookkeeping only — no scrub on free)"
+      - "sources/redox/src/memory/mod.rs:139-142 (the zeroing Redox performs happens at allocation time, not free time — xref C1c.2)"
+      default_state: >-
+        Neither the in-kernel heap deallocator nor the physical-frame
+        deallocator zeroes or poisons memory on free (deallocate_p2frame
+        does only buddy/freelist bookkeeping), so freed memory retains
+        its stale contents until reallocated. The "anon mmap reads zero"
+        property userspace observes is implemented at allocation time —
+        every frame is eagerly zeroed in allocate_p2frame_complex and RO
+        anon faults CoW-share a pre-zeroed frame — which is zero-on-alloc
+        (scored under C1c.2), not zero-on-free.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0 for the mechanism as defined (zero on free); the
+      allocation-time zeroing Redox does perform is credited under
+      C1c.2.
+  C3c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_64/interrupt/handler.rs:245-266 (push_preserved/pop_preserved macros)"
+      default_state: >-
+        There is no analogue of CONFIG_GCC_PLUGIN_STACKLEAK. Kernel stack
+        frames used during a syscall stay on the kstack until overwritten
+        by the next deeper call. Because Rust refuses uninit reads, these
+        leftovers cannot be read back in safe Rust — but they remain
+        visible to any kernel bug that reads past the current frame
+        (`unsafe` asm paths, info-leak via shared cache, etc.).
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+  C3c.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_64/interrupt/handler.rs:222-266 (pop_scratch!/pop_preserved! — syscall exit restores ALL GPRs from the user's saved entry frame)"
+      - "sources/redox/src/arch/x86_64/interrupt/syscall.rs:178-184 (iretq fallback explicitly zeroes rcx/r11; the sysretq fast path overwrites them architecturally)"
+      default_state: >-
+        On return to userspace the full register context is restored
+        from the user's saved entry frame (pop_scratch!/pop_preserved!),
+        and the iretq fallback zeroes rcx/r11, so GPRs carry user values
+        — not kernel data — across the syscall boundary. The absent
+        mechanism is scrubbing at internal function-return boundaries (a
+        -Zzero-call-used-regs analogue, cf. Fuchsia's
+        ZERO_COMMON_UNUSED_REGISTERS), which Redox does not implement.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+  C3d.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 2
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/scheme/debug.rs:60-80 (DebugScheme open requires uid==0)"
+      - "sources/redox-book/src/boot-process.md:41-44 (kernel.proc, debug, irq schemes live in root namespace only)"
+      - "sources/redox-book/src/schemes.md:140-155 (kernel schemes list)"
+      default_state: >-
+        Redox has no dmesg — kernel messages go to the serial debug port,
+        not into a ring buffer user processes can read. The `debug:`
+        scheme, which provides access to the serial console, requires
+        uid==0. The `logd` userspace logger runs on `log:` but only
+        exposes messages forwarded through it; kernel-internal printk
+        targets are not generally visible to unprivileged userspace.
+        Kernel pointers in panic/trace output are printed raw; there is
+        no `%pK`/kptr_restrict analogue.
+    commits:
+    - hash: "965941cd1ca3cd038d5cfc6fe83f269098ad9bac"
+      date: "2016-10-05"
+      description: "Implement unix permissions (plumbs uid/gid into every kernel scheme operation — the substrate for the root-only gates on the kernel schemes)"
+    - hash: "5fd8f0430ba2eea9a56530fbe4c79b5dcc889565"
+      date: "2020-04-19"
+      description: "Cleanup debug scheme (despite the subject, the diff adds the uid != 0 → EPERM gate to DebugScheme::open — the root-only kernel-console restriction cited in the evidence)"
+    discussions: []
+    rationale: >-
+      P=1, D=2 (default-on — debug scheme is root-only by design), S=2
+      moderate (no raw-pointer masking in panic/backtrace output, but
+      the dmesg-equivalent is not exposed), A=2 in-tree, T_age=2,
+      T_maintained=2 (sporadic).
+  C3d.2:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/scheme/sys/mod.rs (sys: scheme — system information)"
+      - "sources/redox/src/scheme/proc.rs:1-50 (proc: scheme — process manager; supports tracing and cross-process memory access)"
+      - "sources/redox/src/scheme/memory.rs:230-240 (memory: scheme — uid!=0 calls rejected)"
+      - "sources/redox/Cargo.toml:95 (`profiling = []` — the kernel profiler is an off-by-default cargo feature) + sources/redox/src/scheme/debug.rs:86-89 (profiling buffers exposed only through the root-only debug: scheme)"
+      - "sources/redox-book/src/boot-process.md:41-52 (per-namespace scheme lists)"
+      default_state: >-
+        Unlike /proc and /sys, Redox exposes kernel introspection only
+        through schemes that must be explicitly listed in a context's
+        namespace. By default, unprivileged contexts do not have `proc:`
+        or `memory:` in their namespace. `sys:` is present and shows
+        aggregate stats (uptime, context list), which is information
+        comparable to `/proc` but is not additionally filtered.
+    commits:
+    - hash: "244069cf43c28ee017959116430ec480b434dbd0"
+      date: "2017-10-09"
+      description: "Implement a capability namespace with no available schemes (the null namespace: a context can be confined to a scheme list containing nothing)"
+    - hash: "123918ed43535d58b110898a2301bba638fd872e"
+      date: "2020-04-19"
+      description: "Track the namespace that a description was opened from (namespace membership is recorded per file description and consulted on later operations)"
+    discussions: []
+    rationale: >-
+      P=1, D=2 (namespace-based default-restrict), S=1 weak (once `sys:`
+      is in the namespace, all-or-nothing — no hidepid-style per-user
+      filter), A=2 in-tree design, T_age=2, T_maintained=2.
+  C4.2:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox-book/src/security.md:1-17 (design doc: \"Capabilities are customized file descriptors that carry specific actions\" — namespaces + fd capabilities)"
+      - "sources/redox/src/scheme/mod.rs:1-10 (kernel dispatches syscalls to schemes; fd is the unforgeable reference)"
+      - "sources/redox/src/context/context.rs:134-135 (per-context fd table = LockedFdTbl; fds can only be obtained via valid `open` or inheritance/sendfd)"
+      - "sources/redox/src/context/context.rs:145-148 (but euid/egid still present as a legacy check; comment: `replace with capabilities!`)"
+      default_state: >-
+        Redox's primary authority model is scheme-based: to do anything
+        (IO, memory mapping, IPC, process inspection), a context must
+        hold an fd to a scheme, and the scheme it can `open` is
+        constrained by its namespace list. Fds are unforgeable usize
+        handles tracked in a per-context table and can be passed between
+        processes via SENDFD, matching the classic capability pattern.
+        However, the rollout is incomplete — the legacy euid==0 path is
+        still consulted in several kernel schemes, so capabilities are
+        not yet the *sole* authority check.
+    commits:
+    - hash: "244069cf43c28ee017959116430ec480b434dbd0"
+      date: "2017-10-09"
+      description: "Implement a capability namespace with no available schemes (the null namespace: a context can be confined to a scheme list containing nothing)"
+    - hash: "1546a4a08f6a36db4bce92b8d695a48a92c0fa23"
+      date: "2023-10-14"
+      description: "Implement SYS_SENDFD and SKMSG_FOBTAINFD. (capability transfer — file descriptors, the authority primitive, can be passed between processes)"
+    discussions: []
+    rationale: >-
+      P=1, D=3 mandatory, S=2 moderate (strong in principle; undermined
+      in places by legacy euid checks that coexist with the capability
+      check), A=3 core design, T_age=2, T_maintained=3.
+  C4.3:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/syscall/mod.rs:75-237 (the entire `match a` listing all top-level syscall numbers — 35 distinct SYS_ arms including SYS_READ/WRITE/FMAP/OPENAT/CALL/FUTEX/MPROTECT/MREMAP, with a single `_ => ENOSYS` fallthrough; process management is fd-dispatched via the proc: scheme)"
+      - "sources/redox/src/scheme/mod.rs (dispatch table: most syscalls boil down to scheme ops on an fd)"
+      default_state: >-
+        There is no seccomp/pledge-style runtime filter. But the kernel
+        ABI is tiny — for comparison, Linux has 400+ syscalls and OpenBSD
+        pledge works because its 300+ syscalls can be grouped into
+        promise classes. In Redox, most "syscalls" are fd operations
+        dispatched to schemes, so removing a scheme from a context's
+        namespace already removes a large swath of reachable kernel
+        code paths. The `/scheme/sudo` userspace service uses the
+        scheme-creation capability as a gate.
+    commits:
+    - hash: "875a1308430bbb9b536aa46841e4afc5748f23d4"
+      date: "2023-12-15"
+      description: "Remove SYS_PHYSALLOC* and SYS_PHYSFREE. (shrinks the syscall ABI by removing the raw physical-memory allocation calls)"
+    - hash: "eda462fd115ba3d9a4e52a918bfa3face4c59f44"
+      date: "2023-12-15"
+      description: "Remove SYS_PHYSMAP. (removes the raw physical-memory mapping syscall; physical mappings move behind the uid-gated memory: scheme)"
+    - hash: "d0e09d9e87c585e7ed5a0fa2bc8be8df316001c4"
+      date: "2025-04-19"
+      description: "Remove SYS_IOPL and SYS_VIRTTOPHYS debug. (removes the I/O-privilege-raising and address-disclosure debug syscalls)"
+    discussions: []
+    rationale: >-
+      P=1, D=3 (the narrowness is structural), S=2 (no per-context filter
+      — removing access is done by building a narrower namespace, which
+      is coarser-grained than seccomp-bpf), A=3 core, T_age=2,
+      T_maintained=3.
+  C4.5:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox-book/src/microkernels.md:1-41 (design: drivers and filesystems move to userspace and components are replaceable without a kernel module loader)"
+      - "sources/redox-book/src/drivers.md:1-6 (drivers are userspace daemons in restricted namespaces)"
+      - "sources/redox/Makefile:24-56 (build produces a single /boot/kernel ELF)"
+      default_state: >-
+        Because the kernel is a microkernel, it has no `insmod`, no
+        runtime code-loading of any kind. Drivers ship as userspace
+        programs loaded by the init process from the initfs; after
+        boot, the kernel's text segment is immutable (modulo
+        `/scheme/memory` for uid==0, covered in C1e.3). The mechanism
+        (restriction of kernel module loading) is vacuous: the attack
+        surface does not exist.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: subsystem does not exist on this OS (matches Fuchsia/Hurd
+      treatment for microkernels). The architectural benefit is
+      captured under C5a.1/C5d.1/C5d.2.
+  C4.6:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/context/context.rs:129-135 (Context::addr_space + files: Arc<LockedFdTbl>)"
+      - "sources/redox/src/context/memory.rs:86-132 (per-context AddrSpaceWrapper)"
+      - "sources/redox/src/syscall/process.rs:105-180 (usermode_bootstrap mints root scheme capabilities once, at boot, into the bootstrap process)"
+      - "sources/redox/src/scheme/mod.rs:159-205 (single global scheme registry since namespace removal; TODO comment: move global-namespace handling to userspace)"
+      default_state: >-
+        Isolation domain = (Context, AddrSpace, FdTbl). Address
+        spaces are unconditionally separate per Context — there is no
+        equivalent of `CLONE_VM` that would share kernel views. Since
+        commit 5ac00f55 the kernel no longer manages scheme namespaces
+        (src/scheme/root.rs and the mkns syscall were deleted); what
+        confines a context is its fd table: with no absolute open, a
+        context can reach only schemes for which it was delegated an fd,
+        and root capabilities for kernel schemes are minted once at boot
+        into the bootstrap process with no later minting syscall.
+        Partitioning granularity is the delegated-fd graph; there is no
+        fine-grained namespace-per-resource (mount ns, pid ns, user ns).
+    commits:
+    - hash: "244069cf43c28ee017959116430ec480b434dbd0"
+      date: "2017-10-09"
+      description: "Implement a capability namespace with no available schemes (the null namespace: a context can be confined to a scheme list containing nothing)"
+    - hash: "5ac00f553307145469198b594fc9d1b06bf69391"
+      date: "2026-01-20"
+      description: "Remove namespace management from the kernel. (namespace policy moves to userspace; kernel-side scheme creation becomes gated by the unforgeable SchemeCreationCapability handle)"
+    discussions: []
+    rationale: >-
+      P=1, D=3 (fd-graph confinement is unconditional — no absolute open
+      exists to bypass it), S=2 moderate (granularity is the delegated-fd
+      graph; coarser than Linux's per-resource namespaces), A=3,
+      T=2 (T_age anchored to the 2016-17 AddrSpace/FdTbl confinement
+      model, which survives the 2026 namespace removal; the deleted
+      namespace layer is not the scored mechanism).
+  C4.7:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 2
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/ptrace.rs:1-60 (ptrace backend — breakpoints, event queues)"
+      - "sources/redox/src/scheme/proc.rs:104-129 (ContextHandle::Authority — \"Opened by the process manager, after which it is locked\"; the capability used to open per-context handles)"
+      - "sources/redox/src/scheme/proc.rs:285-330 (open_inner — handle-based access dispatch; no in-kernel same-uid/root comparison)"
+      default_state: >-
+        The `proc:` scheme allows a process to inspect another — provided
+        proc: is reachable in its namespace and it holds the relevant
+        capability handle. The kernel itself performs no same-uid/uid==0
+        comparison on the access path (uid appears in proc.rs only where
+        the Attr handle sets or reports euid/egid); subject-vs-target
+        policy belongs to the userspace process manager, which opens and
+        locks the proc: authority at boot. There is no Yama-style
+        ptrace_scope toggle.
+    commits:
+    - hash: "788526a3b3586731023c5ee6b0bf5cdaae746828"
+      date: "2019-07-02"
+      description: "Bare-bones ptracing functionality (establishes the proc:-scheme tracing surface whose access this row's restrictions gate)"
+    - hash: "5ac00f553307145469198b594fc9d1b06bf69391"
+      date: "2026-01-20"
+      description: "Remove namespace management from the kernel. (namespace policy moves to userspace; kernel-side scheme creation becomes gated by the unforgeable SchemeCreationCapability handle)"
+    discussions: []
+    rationale: >-
+      P=1 (the kernel-enforced gate is possession of proc:
+      Authority/context handles — the seL4/Fuchsia capability model, not
+      the NuttX unenforced-credentials case: privileged verbs require
+      presenting an fd the kernel verifies is an Authority handle of this
+      scheme, proc.rs:253-278, and the proc: root capability is minted
+      once at boot), D=2 (default restriction comes from fd/handle
+      possession), S=1 weak (no ptrace_scope=restricted
+      mode and no in-kernel subject-vs-target credential check — the 2019
+      uid+ancestry checks were later removed; confinement depends
+      entirely on handle possession,
+      with policy delegated to the userspace process manager), A=2
+      in-tree, T=2.
+  C5a.1:
+    P: 1
+    D: 2
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox-book/src/microkernels.md:19-25 (rationale: drivers in user-space with separate address spaces)"
+      - "sources/redox-book/src/drivers.md (design: drivers are userspace daemons)"
+      - "sources/redox-book/src/schemes.md:102 (`serio: provides access to ps/2 devices (must stay in the kernel due to PS/2 protocol issues)` — documented exception)"
+      - "sources/redox-book/src/boot-process.md:77-86 (driver daemons: ahcid, ided, nvmed, virtio-blkd, virtio-gpud, pcid, …)"
+      default_state: >-
+        By design, a bug in the NVMe, AHCI, or USB stack crashes only the
+        driver process; the kernel schedules a replacement (or not, and
+        the device becomes unavailable, but no kernel panic). The PS/2
+        case is explicitly called out as the sole in-kernel driver.
+    commits:
+    - hash: "a771ca699aa47c825d0486354005a8207bf77a40"
+      date: "2021-05-06"
+      description: "Move all DMAR parsing to userspace. (removes ~300 lines of ACPI table parsing from the kernel — parsing happens in userspace daemons instead)"
+    - hash: "1f1a57e1f7cb47787f6905218553a3f4be6f4e38"
+      date: "2023-12-11"
+      description: "support userspace program ioremapping device memory (MMIO mapping via the memory: scheme — the primitive that lets device drivers run as userspace processes)"
+    - hash: "50c68cd7460af99e8de56b37cbe8c975fdbb56ff"
+      date: "2026-04-04"
+      description: "Remove ACPI search from the kernel (the bootloader now supplies the RSDP; further shrinks in-kernel device-discovery code in the same drivers-out-of-kernel direction)"
+    discussions: []
+    rationale: >-
+      P=1, D=2 (major driver classes — storage, network, USB, graphics —
+      are userspace by architecture, but device classes remain in-kernel:
+      PS/2 input via serio:, the UART/framebuffer console behind debug:,
+      platform timer/interrupt devices, and runtime ACPI parsing; the
+      taxonomy anchor caps this posture at D=2, same blocker as Hurd's
+      "console/serial/keyboard remain in-kernel"), S=3 strong
+      (address-space separation is hardware-
+      enforced), A=3 defining property of the microkernel, T=3.
+  C5a.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox-book/src/microkernels.md:39-41"
+      default_state: >-
+        No loadable modules at all — the category is vacuous.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A by construction (cf. C4.5).
+  C5a.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/Cargo.toml (complete kernel features contain no in-kernel programmable VM)"
+      default_state: >-
+        Redox has no eBPF analogue or other in-kernel bytecode VM; it
+        doesn't need one because packet-filter/tracing work happens in
+        userspace daemons.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A.
+  C5b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_shared/start.rs (bare-metal kernel entry has no external HEKI monitor protocol)"
+      default_state: >-
+        No HEKI-like policy, no SEV-SNP integration, no host-side page
+        validation mechanism.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+  C5b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_shared/start.rs (boot/CPU initialization has no TEE or sealed-key integration)"
+      default_state: >-
+        The kernel does not use a TPM to seal key material, has no
+        in-kernel keyring, and does not leverage SGX/TDX/SEV.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+  C5c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_shared/paging.rs (x86 page-table implementation contains no device-side IOMMU translation context)"
+      - "sources/redox/src/memory/mod.rs (physical-frame allocator maintains no IOMMU tables)"
+      default_state: >-
+        Because drivers are in userspace, DMA programming happens in
+        userspace too — but the kernel does not set up IOMMU page tables
+        for the device-side namespaces. A malicious or buggy userspace
+        driver with MMIO access can program its device to DMA-read/write
+        arbitrary physical memory.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0. This is a known gap in Redox's isolation model: drivers live
+      in userspace but DMA remains unconstrained.
+  C5c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/context/memory.rs (per-context AddrSpace — userspace isolation, scored at C5d.1, not an intra-kernel domain)"
+      - "sources/redox/src/arch/x86_64 (no pkru/pkey/PKS usage anywhere in the kernel)"
+      default_state: >-
+        This row scores intra-kernel memory-protection domains, and the
+        Redox kernel has none: no PKS/PKEY usage (a repo-wide grep finds
+        only a userspace execute-only TODO in context/memory.rs), no
+        language-based internal boundary of the Tock core/capsule sort —
+        the kernel is a single privileged domain in one address space.
+        The services-in-user-processes argument belongs to C5d.1 and is
+        scored there.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0 — no intra-kernel memory-protection domains exist; the former
+      rationale re-used the C5d.1 microkernel argument, double-counting
+      the same architectural fact (precedents: seL4 P=0 "kernel is a
+      single privileged domain", Hurd P=0 "scored at C5d.1/C5d.2 to
+      avoid double-count", Fiasco/NuttX P=0; Fuchsia moves to P=0 in the
+      same change). P=0 forces D=S=A=T=0.
+  C5c.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/targets/x86_64-unknown-kernel.json (x86_64 primary target has no ARM MTE domains)"
+      default_state: >-
+        Primary target has no MTE hardware.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A on x86_64. Scored separately in the supplementary ARM64
+      column (see the arm64 overlay below).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/rmm/src/arch/aarch64.rs:104-135 (no Tagged-Normal MAIR attribute)"
+        default_state: >-
+          No MTE enablement of any kind (see the C1a.6 arm64 overlay);
+          consequently no tag-domain separation between kernel objects or
+          isolation domains.
+      rationale: >-
+        arm64: P=0 — MTE-based domain separation requires MTE, which the
+        kernel never enables (see the C1a.6 arm64 overlay).
+  C5d.1:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox-book/src/microkernels.md (design — drivers and services in userspace)"
+      - "sources/redox-book/src/schemes.md:53-82 (userspace schemes table)"
+      - "sources/redox-book/src/boot-process.md (bootstrap loads service daemons after kernel)"
+      default_state: >-
+        Essentially every kernel-service-class (FS, net, graphics,
+        device driver, PRNG, logger) runs as a separate userspace
+        process. The kernel handles only scheduling, IPC, memory
+        management, and the minimal set of kernel schemes.
+    commits:
+    - hash: "283ada82a03057a4e1b7a0f049b19e2cd629e58a"
+      date: "2022-07-27"
+      description: "WIP: Remove SYS_CLONE (to be done in userspace). (process creation moves out of the kernel into userspace)"
+    - hash: "1d5f8fd46d71bcf923d22711882acba99cb91b3c"
+      date: "2025-04-19"
+      description: "Move proc code to userspace. (the process-manager service leaves the kernel — ~1200 lines of in-kernel process handling removed)"
+    discussions: []
+    rationale: >-
+      P=1, D=3, S=3, A=3, T=3 — architectural.
+  C5d.2:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/context/context.rs:129-135 (per-context FdTbl — the confinement boundary)"
+      - "sources/redox/src/scheme/mod.rs (kdup gated on uid==0; global scheme registry since namespace removal)"
+      - "sources/redox/src/syscall/process.rs:105-180 (root scheme capabilities minted once at boot into the bootstrap process)"
+      default_state: >-
+        Even if, say, the AHCI driver is RCE-ed, the attacker holds only
+        the fds the driver was delegated — with no absolute open
+        (SYS_OPENAT only) it cannot reach `file:`/`tcp:` or any scheme it
+        was not handed, and scheme creation is uid-0-gated. The
+        confinement graph is assembled by the userspace init/process
+        manager at spawn time; since commit 5ac00f55 the kernel no longer
+        implements namespace partitioning itself. This is fundamentally
+        stronger than Linux's "compromised kernel module = game over".
+    commits:
+    - hash: "244069cf43c28ee017959116430ec480b434dbd0"
+      date: "2017-10-09"
+      description: "Implement a capability namespace with no available schemes (the null namespace: a context can be confined to a scheme list containing nothing)"
+    - hash: "5ac00f553307145469198b594fc9d1b06bf69391"
+      date: "2026-01-20"
+      description: "Remove namespace management from the kernel. (namespace policy moves to userspace; kernel-side scheme creation becomes gated by the unforgeable SchemeCreationCapability handle)"
+    discussions: []
+    rationale: >-
+      P=1, D=3, S=3 strong (unforgeable fd capabilities + no absolute
+      open), A=3, T=3 (T_age anchored to the 2017 confinement property,
+      carried since by the fd-delegation model).
+  C6.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox-book/src/boot-process.md:1-27 (bootloader does not reference verification; loads /boot/kernel and /boot/initfs directly)"
+      default_state: >-
+        Images distributed by Redox-OS are not signed; UEFI Secure Boot
+        is not a supported configuration. Running under SB would require
+        a signed bootloader + signed kernel, neither of which is
+        produced by the current build. The boot loader hands control to
+        the kernel unverified.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: verified-boot mechanism absent — the kernel does not verify
+      its own image or initfs, and the build produces no signed boot
+      chain (an external signed shim could be wired up, but nothing
+      in-tree supports it). D/S/A/T=0, mechanism absent.
+  C6.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_shared/start.rs (boot path has no TPM PCR extension/attestation)"
+      default_state: >-
+        No TPM driver in the kernel, no userspace attestation stack
+        shipped in the default image.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+  C6.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/Cargo.toml (single statically linked Rust kernel; no runtime module loader)"
+      default_state: >-
+        Because there are no loadable modules (C4.5), kernel module
+        signing is vacuous. Userspace driver binary verification would
+        be C6.5.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A by construction.
+  C6.4:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/startup/memory.rs:291-306 (kernel pages set R-X / RO / RW-NX at boot)"
+      - "sources/redox/src/scheme/memory.rs:235 (memory: scheme requires uid==0)"
+      default_state: >-
+        There is no Lockdown LSM, but because the microkernel surface is
+        minimal — no kprobes, no perf_event, no BPF — the runtime attack
+        surface on kernel integrity is small. The remaining surface is
+        `/scheme/memory` which grants physical-memory mapping to uid==0
+        and is therefore gated by the root trust boundary, not by a
+        securelevel-style irrevocable toggle.
+    commits:
+    - hash: "eda462fd115ba3d9a4e52a918bfa3face4c59f44"
+      date: "2023-12-15"
+      description: "Remove SYS_PHYSMAP. (removes the raw physical-memory mapping syscall; physical mappings move behind the uid-gated memory: scheme)"
+    - hash: "0f540e6f15c53421fc83e5236236cd75e40bda23"
+      date: "2026-04-02"
+      description: "Don't physmap the kernel itself (removes the writable physmap alias of the kernel image — per the commit message, safer against memory corruption)"
+    discussions: []
+    rationale: >-
+      P=1, D=3, S=2 moderate (no lockdown-style irrevocable mode), A=3,
+      T=3 (T_age=3: the boot-time R-X seal is the same kernel_page_flags
+      code C1e.1 dates to pre-2020 — f5ac405d carries the remap-read-only
+      logic on both sides of its diff — and the 2023 SYS_PHYSMAP removal
+      deleted an already-root-gated alias rather than adding a new
+      restriction, so it does not reset the age clock; T_maintained=3
+      per the 2026-04 hardening commit).
+  C6.5:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox-book/src/boot-process.md (initfs and redoxfs loaded without integrity checking)"
+      default_state: >-
+        The kernel does not verify hashes of executables or blobs before
+        execution. Userspace `pkgar` (cookbook) provides package
+        signatures at install time, but there is no runtime load-time
+        verification akin to IMA or Fuchsia's blobfs.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+  C7a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_64/interrupt/handler.rs:268 (`// TODO: Spectre V1: LFENCE?`)"
+      - "sources/redox/src/arch/x86_64/interrupt/handler.rs:281 (same)"
+      - "sources/redox/src/arch/x86_64/interrupt/handler.rs:346 (same, inside conditional_swapgs_paranoid)"
+      - "sources/redox/src/arch/x86_64/mod.rs:22 (`// TODO: spectre_v1` in arch_copy_to_user)"
+      default_state: >-
+        There is no `array_index_nospec` / `lfence` barrier at sensitive
+        bounds-check sites. The kernel text has TODO comments
+        acknowledging the gap but no mitigation is compiled in.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0 — explicitly TODO in source.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/src/arch/aarch64/ (no csdb instruction, no nospec-style index masking in the syscall/scheme dispatch paths)"
+        default_state: >-
+          No bounds-check-bypass hardening exists on any architecture; on
+          aarch64 specifically there are no CSDB speculation barriers and no
+          nospec-style index masking in the syscall or scheme dispatch
+          paths.
+      rationale: >-
+        arm64: P=0 — Spectre v1 affects out-of-order Arm cores the generic
+        port can boot on (Cortex-A72 class and newer; the in-order
+        Cortex-A53 of the RPi 3B+ target is largely immune), and the kernel
+        ships no v1 hardening. Same score as the x86-64 column, re-grounded
+        in arm64 evidence.
+  C7a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_64/misc.rs:8-28 (complete x86_64 CPU-hardening initialization has no IBRS, IBPB, or SPEC_CTRL handling)"
+      - "sources/redox/Cargo.toml:82-99 (kernel feature list has no retpoline build mode)"
+      default_state: >-
+        The kernel does not set IA32_SPEC_CTRL, does not issue IBPB on
+        context switch, and is not built with retpoline thunks. The
+        compiler flags in Makefile don't request `-mretpoline` or
+        `-Zretpoline`.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/src/arch/aarch64/stop.rs (the only HVC calls in the port are PSCI power-off/reset; no firmware mitigation calls anywhere)"
+        - "sources/redox/src/arch/aarch64/vectors.rs (no branch-history clearing loops on EL0→EL1 entry)"
+        default_state: >-
+          The kernel makes no SMCCC ARCH_WORKAROUND_1 firmware calls,
+          performs no Spectre-BHB branch-history clearing on exception
+          entry, and never probes ID_AA64PFR0_EL1.CSV2 — there is no
+          branch-target-injection mitigation of any kind.
+      rationale: >-
+        arm64: P=0 — the x86 evidence (retpoline/IBRS/IBPB) is meaningless
+        on aarch64, and the Arm-equivalent mitigations (SMCCC workarounds,
+        BHB clearing) are equally absent. netbsd-arm64 precedent: P=0.
+  C7a.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_shared/start.rs (CPU initialization never sets SSBD)"
+      default_state: >-
+        IA32_SPEC_CTRL.SSBD is never written.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/src/arch/aarch64/ (no PSTATE.SSBS writes, no ARCH_WORKAROUND_2 firmware calls)"
+        default_state: >-
+          PSTATE.SSBS is never set and no SMCCC ARCH_WORKAROUND_2 firmware
+          calls exist; speculative store bypass is unmitigated, matching the
+          x86-64 column (no SSBD MSR writes there).
+      rationale: >-
+        arm64: P=0 — the Arm SSB controls (SSBS, SMCCC ARCH_WORKAROUND_2)
+        are never used.
+  C7a.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/Makefile (kernel rustc flags contain no SLS hardening)"
+      default_state: >-
+        No SLS mitigation compile flag; no int3 after ret in the asm.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/Makefile:33-44 (no harden-sls-style target features requested)"
+        default_state: >-
+          No SLS mitigation is requested from the toolchain and the
+          hand-written aarch64 asm places no speculation barriers after
+          ret/eret.
+      rationale: >-
+        arm64: P=0 — the SLS concept applies to Arm cores (Linux builds its
+        arm64 kernel with -mharden-sls when configured) but Redox ships no
+        such hardening. Mirrors the linux-arm64 P=0 treatment.
+  C7b.1:
+    status: xref
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: >-
+      xref → C3b.1: Meltdown mitigation on Redox is the `pti` cargo feature, which C3b.1
+      already scores (off by default, page-table remap half unimplemented). Scored once at
+      C3b.1 to avoid double-counting.
+  C7b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_shared/paging.rs (PTE implementation has no L1TF inversion/L1D flush)"
+      default_state: >-
+        The page-table code doesn't invert PTEs of non-present pages;
+        there is no conditional L1D flush on VM entry/exit (no KVM-host
+        functionality at all).
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/src/arch/aarch64/start.rs (ARM boot path; Intel L1TF is not applicable)"
+        default_state: >-
+          L1 Terminal Fault (Foreshadow) is an Intel-specific
+          microarchitectural vulnerability; Arm cores are not affected.
+      rationale: >-
+        arm64: N/A — L1TF/Foreshadow is an Intel uarch bug; arm64 is
+        unaffected, so there is no attack surface to mitigate.
+  C7c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_64/misc.rs:8-28 (x86_64 CPU initialization has no MD_CLEAR feature handling)"
+      - "sources/redox/src/arch/x86_shared/interrupt/irq.rs (interrupt-return paths contain no VERW buffer clear)"
+      default_state: >-
+        The kernel never issues VERW before returning to userspace; MDS/
+        TAA/MMIO-stale-data are not mitigated.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/src/arch/aarch64/start.rs (ARM boot path; Intel MDS/TAA is not applicable)"
+        default_state: >-
+          Microarchitectural data sampling (MDS/TAA/MMIO stale data) is
+          Intel-only; Arm cores have no equivalent buffer-sampling surface.
+      rationale: >-
+        arm64: N/A — MDS/TAA/MMIO sampling is Intel-only; no attack surface
+        on arm64.
+  C7c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_shared/start.rs (context setup has no STIBP or SMT-disable policy)"
+      default_state: >-
+        STIBP is not set. SMT disable is not a toggle the kernel
+        exposes; all logical CPUs reported by ACPI MADT are brought up.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0.
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/src/arch/aarch64/start.rs (scored ARM targets expose no SMT sibling-control surface)"
+        default_state: >-
+          The arm64 cores the port targets (QEMU virt / Cortex-A53/A72
+          class) have no simultaneous multithreading, so there is no
+          cross-thread speculation surface to isolate (a few server arm64
+          parts do have SMT — recorded as a caveat).
+      rationale: >-
+        arm64: N/A — STIBP / SMT cross-thread isolation does not apply: the
+        arm64 baseline cores have no SMT.
+  C1e.6:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/context/memory.rs:299-301 (TODO: \"Allow enabling/disabling read access on architectures which allow it … execute-only memory is also supported\" — explicitly unimplemented)"
+      default_state: >-
+        Redox's microkernel (Redox Kernel) maps user pages with
+        standard R/W/X bits; no execute-only encoding. Grant flags
+        expose only PROT_EXEC/PROT_WRITE toggles — there is no no-read
+        bit, and an in-source TODO records execute-only support as
+        future work.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no execute-only memory primitive.
+  C1e.7:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/context/memory.rs:2195-2204 (can_have_flags: only permission-downgrade monotonicity for file/shared grants; no grant carries a seal/immutable attribute checked by munmap/mprotect)"
+      default_state: >-
+        Redox has no mimmutable/mseal equivalent; FUNMAP and
+        FMPROTECT scheme calls are unconditionally available. The only
+        related check, can_have_flags, enforces permission-downgrade
+        monotonicity on file/shared grants — it cannot make a mapping
+        immutable.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no immutable-mapping primitive.
+  C1e.8:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/linkers/x86_64.ld (link layout has no trap-filled executable padding)"
+      default_state: >-
+        Redox toolchain (Rust) does not emit trapsled padding
+        between executable sections.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no trapsled mechanism.
+  C4.8:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - src/arch/x86_64/interrupt/syscall.rs
+      default_state: >-
+        The syscall interrupt handler accepts the syscall instruction from
+        any executable user mapping; relibc is the conventional entry point but
+        the kernel does not enforce it and performs no caller-PC validation.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no syscall-origin pinning; any executable mapping can issue
+      syscalls directly, so a ROP/JOP chain is not constrained to relibc
+      text.
+  C5e.1:
+    P: 1
+    D: 3
+    S: 1
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox-book/src/microkernels.md:9-51 (drivers use separate address spaces and component panics are contained to userspace)"
+      - "sources/redox/src/panic.rs:36-75 (kernel panic handler prints a trace and loops in interrupt::halt, with no auto-reboot or kdump)"
+      - "sources/redox/src/arch/x86_shared/idt.rs:187 (comment: NMI watchdogs like Linux's are explicitly NOT set up)"
+      - "sources/redox/src/scheme/user.rs:242-372 (caller blocks in `block(\"UserInner::call\")`; woken on response or on SIGKILL→EINTR; no kernel reap-and-error of pending callers when the provider context dies)"
+      - "sources/redox/src/scheme/user.rs:1355-1363 (provider teardown drops captured buffers without fail-completing callers already in State::Waiting)"
+      - "sources/redox-book/src/boot-process.md:56-60 (multi-staged init RAMdisk loads drivers once and transfers control — a one-shot loader, not a restart supervisor)"
+      default_state: >-
+        By design a bug in any driver/FS/network daemon crashes only that
+        userspace process; the kernel keeps running (the book's central
+        microkernel argument). But the kernel does not monitor liveness:
+        there is no lockup/hung-task detector and no watchdog driver
+        in-tree (the only in-kernel scheme is serio:, xref C5a.1). On a
+        kernel self-fault the panic handler HALTs the CPU in a busy
+        `interrupt::halt()` loop — no panic-reboot, no crash dump. When a
+        scheme provider dies, the kernel does not proactively error its
+        blocked clients: a caller waiting in UserInner::call is released
+        only by a response or by a signal (SIGKILL→EINTR), so a hung or
+        dead provider leaves clients blocked until externally signalled.
+        No init-level supervisor restarts crashed daemons.
+    commits:
+    - hash: "1a8016b985f81442e6303e095f356ea0461eb438"
+      date: "2021-02-15"
+      description: "Give NMI, #DF, and #MC handlers a special stack. (dedicated IST exception stacks so NMI/double-fault/machine-check are handled even with a corrupt kernel stack)"
+    - hash: "d3b17177b2c2d561d821c5828fa3e5deb621e661"
+      date: "2025-09-14"
+      description: "Avoid allocating during panics and infer kernel image size without explicitly storing it (panic path made allocation-free so heap-corruption faults can still be reported)"
+    discussions: []
+    rationale: >-
+      P=1: the availability facet exists — userspace-component fault
+      containment is real and hardware-enforced (xref C5a.1/C5d.1/C5d.2,
+      which score the isolation/lateral-movement facets of the same
+      architecture; C5e scores only the availability/blast-radius facet).
+      D=3: containment is mandatory and inherent — there is no per-driver
+      toggle, every driver/FS/net service is unconditionally a userspace
+      process (same basis as C5a.1 D=3). A=3: core microkernel design
+      property. S=1 (weak): containment WITHOUT detection or recovery.
+      A kernel self-fault HALTs forever (weaker even than the BSDs'
+      reboot-on-panic, openbsd S=1 baseline); there is no lockup/hung-task
+      detector and no watchdog (unlike Linux S=2 / Fuchsia S=2, both of
+      which ship default-on detectors, and Fuchsia adds a HW watchdog +
+      kill-on-OOM reboot); critical scheme daemons are single points of
+      failure with no supervisor/restart, and a dead provider does not
+      fail-complete its blocked callers. Redox therefore sits at the same
+      A=3 as Fuchsia (microkernel containment) but a full strength level
+      below it because it lacks every detection/recovery primitive Fuchsia
+      and Linux have. T_age=3 (microkernel architecture since the 2015
+      inception; panic.rs and the scheme layer date to 2017),
+      T_maintained=3 (active — panic/scheme code touched 2026-04).
+      Effective T=3.
+  C5e.2:
+    P: 1
+    D: 3
+    S: 1
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/context/switch.rs:1-130 (simple round-robin scheduler with no priority levels)"
+      - "sources/redox/src/context/switch.rs:88-100 (`tick()`: switches every 3 timer ticks ≈ 6.75 ms)"
+      - "sources/redox/src/arch/x86_shared/interrupt/irq.rs:186 (x86 timer IRQ calls context::switch::tick)"
+      - "sources/redox/src/arch/aarch64/interrupt/irq.rs:51 (aarch64 timer IRQ calls context::switch::tick)"
+      - "sources/redox/src/arch/riscv64/device/irqchip/clint.rs:40 (RISC-V timer IRQ calls context::switch::tick)"
+      - "sources/redox/src/context/context.rs (Context struct has no priority/policy/sched_class field — grep confirms none)"
+      default_state: >-
+        The scheduler is flat preemptive round-robin: every runnable
+        context gets an equal time slice and is preempted by the timer
+        regardless of behaviour. There are no scheduling priorities at all
+        (the only `nice` in-tree is a passive cpu_stats reporting counter
+        in src/cpu_stats.rs, not an enforcement knob), so a process cannot
+        starve others by elevating itself. But there is no per-context CPU
+        budget or bandwidth cap: a compute-bound process consumes its full
+        equal share indefinitely, and relibc/userspace provide no kernel
+        setrlimit(RLIMIT_CPU) enforcement (no RLIMIT machinery exists in
+        the kernel).
+    commits:
+    - hash: "bdd5c954dcb1cfc5d06fa28a037bfcb72a15534a"
+      date: "2023-08-08"
+      description: "Move PIT_TICKS to context::switch. (centralizes the fixed 3-tick ≈ 6.75 ms preemption quantum in the scheduler — the mandatory time-slicing scored here)"
+    - hash: "fde164b2a093278a532a3ed9d0692e31643a096e"
+      date: "2026-03-22"
+      description: 'Revert "Deficit based Weighted Round Robin Scheduler" (restores the flat equal-quantum round-robin policy whose structural no-priority-elevation property this row scores)'
+    discussions: []
+    rationale: >-
+      P=1: a temporal-isolation mechanism exists — mandatory preemption
+      plus the structural impossibility of priority self-elevation (there
+      are no priorities to raise). This matches the zephyr/freertos
+      precedent (P=1, S=1: preemptive time-slicing where user threads
+      cannot raise priority). D=3 (not 2): preemption is not a config
+      option (cf. zephyr/freertos CONFIG_TIMESLICING, scored D=2) — it is
+      hardwired into every arch's timer IRQ and the fixed 3-tick quantum
+      cannot be disabled, the same mandatory-preemptive-quanta basis on
+      which Tock scored D=3. A=3 (not 2): the scheduler is a core kernel
+      service of the microkernel with no pluggable policy, stronger than
+      the zephyr/freertos in-tree-option A=2; comparable to Tock's A=3.
+      S=1 (weak): like every member of the time-slicing-only cohort
+      (openbsd/fuchsia/zephyr/freertos/netbsd all S=1), there is NO CPU
+      budget/bandwidth enforcement — no cpu.max (Linux S=2), no MCS-style
+      (budget, period) reservation, no admission control — so an
+      adversary can still consume a full fair share on every CPU; round-
+      robin fairness alone bounds the share but does not enforce a budget.
+      T_age=3 (round-robin scheduler since the 2015 inception; switch.rs
+      dates to 2017), T_maintained=3 (active — 24 commits/18mo).
+      Effective T=3.
+  C5e.3:
+    P: 1
+    D: 2
+    S: 1
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/context/mod.rs:66 (`pub const CONTEXT_MAX_FILES: usize = 65_536;`)"
+      - "sources/redox/src/context/context.rs:693-815 (FdTbl insertion paths enforce CONTEXT_MAX_FILES with None or EMFILE)"
+      - "sources/redox/src/context/mod.rs:167-190 (spawn(): inserts a new context with no count cap — only allocation failure (Kstack/Context/AddrSpace ENOMEM) can fail it)"
+      - "sources/redox/src/memory/mod.rs:64-348 (allocate_frame returns Option and Enomem converts to ENOMEM; this is failure handling, not a quota)"
+      - "sources/redox/src/memory/mod.rs:1026-1032 (page-fault OOM path remains an unfinished todo)"
+      default_state: >-
+        The only resource for which the kernel enforces a hard per-context
+        ceiling is open file descriptors/handles: CONTEXT_MAX_FILES =
+        65 536, checked on every fd allocation. Memory is not quota-bound:
+        a context can map and fault in physical frames until the global
+        allocator is exhausted; exhaustion returns ENOMEM to most callers
+        (baseline graceful failure, not a per-principal limit), and one
+        page-fault OOM path is an unfinished todo!() that would panic.
+        Process creation is likewise uncapped — spawn() enforces no
+        per-user or global context count. No setrlimit/RLIMIT_* exists in
+        the kernel; login-class/quota frameworks are absent.
+    commits:
+    - hash: "8fc113adefe239cd1d156fc72132506bee38f786"
+      date: "2016-08-18"
+      description: "Refactor context list (introduces CONTEXT_MAX_FILES = 65536 and the per-context cap check on fd insertion — the quota primitive scored here)"
+    - hash: "e3d8ae1b79dd250b980cdd77e168dfebf73d7a4b"
+      date: "2025-07-30"
+      description: "feat: Introduce FdTbl and make Context.files use it for separate file tables. (the FdTbl whose add_file_min enforces the CONTEXT_MAX_FILES cap at HEAD)"
+    discussions: []
+    rationale: >-
+      P=1 (marginal): one concrete, always-bound quota primitive exists —
+      the per-context fd cap (CONTEXT_MAX_FILES), which genuinely prevents
+      handle-table exhaustion in a single context, the kind of concrete
+      primitive the rubric requires (cf. Fuchsia's handle-arena cap). It
+      clears P=1 on the handle facet alone. D=2: the cap is active by
+      default and cannot be raised by the process, but it is a single
+      hard-coded constant (not configurable, not hierarchical) and covers
+      only one of the three facets (handle), so it falls short of the
+      mandatory/comprehensive D=3 that Tock's design-enforced per-process
+      quota earns. A=3: the fd table is a core per-context kernel data
+      structure (not a bolt-on). S=1 (weak): the memory and PID facets are
+      entirely unguarded — no per-context memory quota and no process-count
+      limit — so an adversary can still exhaust physical memory or fork
+      unbounded contexts; and the single fd ceiling (65 536) is flat,
+      global and very high. This is weaker than Fuchsia (S=1 but WITH
+      kill-on-OOM + job memory policy + handle caps), weaker than Linux/
+      OpenBSD/NetBSD (S=2, hierarchical memcg/pids or rlimits+quotas), and
+      far below Tock (S=3, MPU-bounded self-confined grant). Do NOT read
+      the ENOMEM-on-allocation-failure behaviour as a quota — per the
+      rubric that is baseline correctness, not resource-exhaustion
+      enforcement. T_age=3 (context/fd bookkeeping since the 2015
+      inception; context.rs dates to 2017), T_maintained=3 (active —
+      touched 2026-04). Effective T=3.
+  C7d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/redox/src/arch/x86_shared/time.rs (timekeeping/scheduling support contains no cache-partition time protection)"
+      default_state: >-
+        The primary evaluation target is x86_64, where the last-level
+        cache is shared across cores and therefore across the separate
+        address spaces of mutually-distrusting scheme daemons — a steady-
+        state microarchitectural timing-channel surface that does exist.
+        The kernel implements no countermeasure: grep finds no resctrl,
+        CAT, MBA, CLOSID, or page/cache-colouring code anywhere in the
+        tree. Scheduling is flat round-robin (xref C5e.2) with no
+        cache-aware partitioning.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0, not N/A — mirroring the openbsd/netbsd/fuchsia
+      precedent ("surface exists → P=0, not N/A"): on the x86_64 primary
+      the shared-LLC timing-channel surface is present across isolation
+      domains, but Redox ships no time-protection or cache-partitioning
+      mechanism. This is unlike the Cortex-M RTOSes (N/A — no shared LLC
+      across domains) and weaker than Linux (P=1 D=1, opt-in resctrl/CAT)
+      and the seL4 time-protection design (cache colouring +
+      flush-on-switch, Ge et al. EuroSys 2019). The
+      microkernel's address-space separation (xref C5a.1) stops direct
+      memory access between components but does nothing about shared-cache
+      timing channels. P=0 ⇒ D=S=A=T=0.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age:
+      T_maintained:
+      implementation:
+        config_options: []
+        source_files:
+        - "sources/redox/src/arch/aarch64/mod.rs (architecture setup has no MPAM register programming)"
+        - "sources/redox/rmm/src/arch/aarch64.rs (frame/page-table backend performs no page or cache colouring)"
+        default_state: >-
+          The shared-LLC timing-channel surface across mutually distrusting
+          scheme daemons exists on Cortex-A class parts just as on x86-64;
+          the kernel implements no countermeasure (no ARMv8.4 MPAM
+          enablement, no page/cache colouring in rmm).
+      rationale: >-
+        arm64: P=0 — same posture as the x86-64 column, re-grounded: the
+        Arm-side partitioning mechanism (MPAM) is never probed or
+        programmed, and the allocator does no colouring.

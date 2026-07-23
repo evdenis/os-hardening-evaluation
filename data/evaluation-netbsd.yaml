@@ -1,0 +1,3119 @@
+# yaml-language-server: $schema=schema/evaluation.schema.json
+# NetBSD kernel hardening evaluation.
+# Scores for x86-64 primary architecture; arch-divergent mechanisms carry an
+# arm64: overlay (materialized as the derived os netbsd-arm64).
+os: netbsd
+schema_version: 1
+baseline_class: shipped-default
+default_config: "NetBSD 11.0 @ 7d25f256a2826e0a1945771090aceb98f7d2cf72, amd64 GENERIC kernel"
+arm64_default_config: >-
+  GENERIC64 kernel (evbarm/aarch64, NetBSD 11.0 @
+  7d25f256a2826e0a1945771090aceb98f7d2cf72). PAN (options ARMV81_PAN)
+  enabled by default; PAC (ARMV83_PAC) and BTI (ARMV85_BTI) implemented but
+  commented out in GENERIC64 (opt-in via makeoptions + options). No ARM MTE
+  support; no aarch64 KASLR; no SVS/KPTI equivalent (SVS is amd64-only).
+
+mechanisms:
+  C1a.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "USE_SSP?= yes (sys/arch/amd64/conf/Makefile.amd64:26 -- the amd64 kernel enabler)"
+      - "-fstack-protector --param ssp-buffer-size=1"
+      source_files:
+      - "sys/kern/kern_ssp.c"
+      - "share/mk/bsd.sys.mk"
+      - "sys/conf/ssp.mk"
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      default_state: >-
+        SSP enabled by default on amd64 since NetBSD 6.0, turned on by
+        "USE_SSP?= yes" in sys/arch/amd64/conf/Makefile.amd64:26. (The
+        unrelated USE_FORT knob defaults to "no" in share/mk/bsd.own.mk
+        and selects userland _FORTIFY_SOURCE, not kernel SSP.) Canary
+        initialized with random bytes from cprng_fast(). The compiler
+        flag is plain -fstack-protector, but sys/conf/ssp.mk pairs it
+        with --param ssp-buffer-size=1, so every function holding an
+        array of one byte or more is instrumented.
+    commits:
+    - hash: "a62de0296633a56a66c059c7079c4494ce5ae02b"
+      date: "2006-11-11"
+      description: "Add SSP support to the kernel (-fstack-protector, __stack_chk_guard)"
+    - hash: "160a37667a8130b0b9de3a1669ae46983ea440a6"
+      date: "2009-02-12"
+      description: "Unbreak ssp kernels (split ssp_init() into its own file built with -fno-stack-protector)"
+    - hash: "840a46601add3a19d82f8e7f5da4e1d9307b4c46"
+      date: "2009-11-11"
+      description: "Enable Stack Smash Protection (SSP) by default for NetBSD/amd64 and i386"
+    discussions: []
+    rationale: >-
+      Standard SSP/ProPolice with random canary. Default-on for amd64
+      kernel builds via "USE_SSP?= yes" in
+      sys/arch/amd64/conf/Makefile.amd64:26; USE_FORT is a separate
+      userland _FORTIFY_SOURCE knob that defaults to "no" in
+      share/mk/bsd.own.mk and does not gate kernel SSP. The flag is
+      plain -fstack-protector, but sys/conf/ssp.mk combines it with
+      --param ssp-buffer-size=1, which instruments any function holding
+      an array of one byte or more -- coverage comparable to
+      -fstack-protector-strong rather than the sparse stock heuristic.
+      Known bypass class: info-leak to read canary value. S=2.
+      T=1 (dormant): the complete SSP file set saw zero commits in the
+      18-month evaluation window -- sys/kern/kern_ssp.c was last touched
+      in 2016-12, sys/conf/ssp.mk in 2020 and
+      sys/arch/amd64/conf/Makefile.amd64 in 2023 -- so T_maintained=1
+      and T=min(T_age=3, T_maintained=1)=1.
+      P=1, D=2, S=2, A=2, T=1.
+  C1a.2:
+    P: 1
+    D: 3
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "UPAGES=6 (with SVS, includes 1 redzone page)"
+      source_files:
+      - "sys/arch/amd64/include/param.h"
+      - "sys/arch/x86/x86/vm_machdep.c"
+      default_state: >-
+        cpu_uarea_alloc() allocates USPACE+PAGE_SIZE, then pmap_kremove()s
+        and frees the physical pages of two redzone pages: Page[1] (between
+        the PCB and the kernel stack) and Page[UPAGES] (above the stack).
+        Both are genuinely unmapped guard pages that fault on access
+        (double-fault handler comment in amd64_trap.S). No VMAP_STACK
+        equivalent and no stack-clash protection for large frames.
+        At 11.0, amd64 param.h expresses UPAGES as a component sum
+        (UPAGES_PCB + UPAGES_RED + UPAGES_STACK + UPAGES_SVS +
+        UPAGES_KxSAN) with __CTASSERT(UPAGES == 6) under SVS, and
+        cpu_uarea_alloc() may allocate the FPU save area outside the PCB
+        page when the XSAVE state is large (AMX); neither change alters
+        the two unmapped guard pages.
+    commits:
+    - hash: "5d43782cf097e6c99e4b112d64060ceed67e03cf"
+      date: "2020-03-17"
+      description: "Add a redzone between the pcb and the kernel stack (amd64)"
+    - hash: "ff2d91f14898eed88f99fe8207ff02ad0203616c"
+      date: "2020-06-29"
+      description: "Increase UPAGES for SVS so the usable kernel stack matches non-SVS kernels"
+    discussions: []
+    rationale: >-
+      Kernel stacks are bracketed by two genuinely unmapped guard pages:
+      cpu_uarea_alloc() (sys/arch/x86/x86/vm_machdep.c) pmap_kremove()s
+      Page[1] (between PCB and stack) and Page[UPAGES] (top), freeing the
+      backing physical pages, so any access traps. D=3: the guard pages
+      are unconditional for every lwp -- there is no kernel option, no
+      sysctl and no boot parameter that turns them off (UPAGES=6 is a
+      stack-size constant, not a disable path). Under the disable-path
+      convention this matches OpenBSD C1a.2 (also D=3); FreeBSD stays at
+      D=2 because it exposes genuine knobs (KSTACK_GUARD_PAGES,
+      security.bsd.stack_guard_page). S=2 (moderate): a single fixed 4 KiB guard per
+      side can be jumped over by a large unchecked stack frame (no
+      -fstack-clash-protection, no VMAP_STACK), matching the S=2 scoring
+      of the equivalent Linux/OpenBSD/FreeBSD guard pages.
+      T_maintained=2 at 11.0: five non-trivial commits to
+      param.h/vm_machdep.c in the 18-month window (UPAGES component-macro
+      refactor, out-of-pcb FPU save area), sporadic cadence, so
+      T = min(3,2) = 2.
+  C1a.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/copy.S"
+      - "sys/arch/x86/x86/cpu.c"
+      default_state: >-
+        copyin/copyout validate against VM_MAXUSER_ADDRESS. SMAP
+        enforcement via clac/stac restricts kernel access to user
+        memory to narrow copy windows.
+    commits:
+    - hash: "41713064f04660fd63521ca48292240ad952e5b7"
+      date: "2017-10-17"
+      description: "Add support for SMAP on amd64 (clac/stac copy windows in copy.S)"
+    discussions: []
+    rationale: >-
+      copyin/copyout in copy.S validate user addresses against
+      VM_MAXUSER_ADDRESS before access. SMAP clac/stac macros restrict
+      kernel-user memory access windows. Solid bounds check + SMAP
+      combination. No Linux-style CONFIG_HARDENED_USERCOPY slab-cache
+      object size validation. S=2.
+      T_maintained=2 at 11.0: cpu.c received four non-trivial commits in
+      the 18-month window (VMware-compatible CPUID frequency detection),
+      but copy.S saw only comment-typo fixes and the SMAP/usercopy paths
+      themselves were untouched. T = min(3,2) = 2.
+  C1a.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - "_FORTIFY_SOURCE=2 (in bsd.sys.mk, excluded for kernel builds)"
+      source_files:
+      - "share/mk/bsd.sys.mk"
+      default_state: >-
+        FORTIFY_SOURCE=2 can be enabled for opt-in userland builds but is
+        explicitly excluded from kernel compilation via KERNSRCDIR/KERN checks.
+    commits:
+    - hash: "d307e496275cfa8209d7e0aab1baf7cbd1b2ff79"
+      date: "2007-05-22"
+      description: "Add -D_FORTIFY_SOURCE=2 where safely usable (not in the kernel, not in libssp)"
+    - hash: "4147a3c54a369fdf2775e8a91ce4916614e21d3b"
+      date: "2007-05-28"
+      description: "Add USE_FORT Makefile knob turning on FORTIFY_SOURCE for userland"
+    discussions: []
+    rationale: >-
+      _FORTIFY_SOURCE=2 is applied in bsd.sys.mk but explicitly excluded
+      from kernel builds (!defined(KERNSRCDIR) && !defined(KERN)). The
+      kernel does not benefit from compile-time buffer overflow detection.
+      P=0: bsd.sys.mk explicitly excludes _FORTIFY_SOURCE from kernel builds
+      (!defined(KERNSRCDIR) && !defined(KERN)); USE_FORT only enables the
+      userland wrapper path. The kernel attack surface exists but the mechanism
+      does not, so userland toolchain support cannot earn kernel Presence and
+      D=S=A=T=0.
+  C1a.5:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "options KASAN (commented out in GENERIC)"
+      - "options KMSAN (commented out in GENERIC)"
+      - "options KCSAN (commented out in GENERIC)"
+      - "options KUBSAN (commented out in GENERIC)"
+      - "options DIAGNOSTIC (POOL_REDZONE, commented out)"
+      source_files:
+      - "sys/kern/subr_pool.c"
+      default_state: >-
+        KASAN, KMSAN, KCSAN, KUBSAN all available on amd64 but commented
+        out in GENERIC config. POOL_REDZONE requires DIAGNOSTIC. All are
+        debug/testing tools, not enabled in production.
+    commits:
+    - hash: "40e89e3a3c65594838fc2b3e6dbefdf9251bbb38"
+      date: "2015-07-28"
+      description: "Introduce POOL_REDZONE"
+    - hash: "acb2576569c29ebf8ae110e7f4243fd158b220bd"
+      date: "2018-08-20"
+      description: "Add support for kASan on amd64"
+    - hash: "10c5b0232091c5643fb7fcc69b901d4009c696a7"
+      date: "2019-11-14"
+      description: "Add support for Kernel Memory Sanitizer (kMSan)"
+    discussions: []
+    rationale: >-
+      Comprehensive kernel sanitizer suite (KASAN, KMSAN, KCSAN, KUBSAN)
+      available on amd64, but ALL are opt-in debug tools, commented out
+      in GENERIC. POOL_REDZONE requires DIAGNOSTIC. S=2 when enabled
+      (full-featured implementations). D=1 (opt-in).
+      T_maintained=2 at 11.0: subr_pool.c saw three non-trivial
+      allocator-maintenance commits in the 18-month window (PR kern/59411
+      drain-hook deadlock), while the sanitizer runtimes (subr_asan.c,
+      subr_msan.c, subr_csan.c) saw zero, so T = min(3,2) = 2.
+  C1a.6:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/x86/x86/pmap.c"
+      - "sys/arch/amd64/include/vmparam.h"
+      default_state:
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM MTE does not exist on x86-64. N/A; scored separately in the
+      supplementary ARM64 column (see the arm64 overlay below).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/aarch64/include/armreg.h"
+        default_state: >-
+          NetBSD decodes the MTE field of ID_AA64PFR1_EL1 for CPU feature
+          identification but implements no tag-checked allocator, no EL1
+          MTE enablement, and no tagged-memory page attributes. ARM MTE
+          (ARMv8.5) is unsupported.
+      rationale: >-
+        arm64: P=0 — MTE-capable aarch64 hardware exists in the ecosystem
+        and Linux scores spatial-mode MTE here, but NetBSD ships no MTE
+        support of any kind (only the ID-register bitfield definition).
+        Attack surface exists, mechanism absent.
+  C1a.7:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "options KUBSAN (commented out in amd64 GENERIC)"
+      - "options UBSAN_ALWAYS_FATAL (optional: panic on reports; commented out)"
+      - "defflag KUBSAN + makeoptions kubsan CFLAGS+=-fsanitize=undefined (sys/kern/files.kern)"
+      source_files:
+      - "common/lib/libc/misc/ubsan.c"
+      - "sys/kern/files.kern"
+      - "sys/arch/amd64/conf/GENERIC"
+      default_state: >-
+        KUBSAN is NetBSD's kernel undefined-behavior sanitizer
+        (micro-UBSan, Kamil Rytarowski, kernel_sanitizers(7)). When the
+        kernel is built with options KUBSAN, files.kern compiles the MI
+        runtime common/lib/libc/misc/ubsan.c with clang/gcc
+        -fsanitize=undefined, instrumenting array-index accesses; the
+        out-of-bounds handler __ubsan_handle_out_of_bounds() reports
+        "UBSan: Undefined Behavior ... index N is out of bounds for type"
+        (it also covers shift-out-of-bounds, VLA-bound-not-positive,
+        etc.). This is NetBSD's analog to Linux UBSAN_BOUNDS array-index
+        instrumentation. KUBSAN is a build option only: the KUBSAN flag
+        is gated in sys/kern/files.kern but is commented out in the amd64
+        GENERIC config. By default reports are printed via the kernel
+        Report() path (vprintf), not trapped — vpanic() is taken only
+        when UBSAN_ALWAYS_FATAL is set (also off by default). There is no
+        __counted_by-style flexible-array hardening. (Trunk has received
+        only cosmetic typo fixes to ubsan.c since 2021.)
+    commits:
+    - hash: "9aff107674617dd7fc44d94a2c9bbb30308de7bf"
+      date: "2018-08-03"
+      description: "Import micro-UBSan (ubsan.c)"
+    - hash: "e1971882d1a6de3a16f17ead737b9a122bb69a0e"
+      date: "2018-08-03"
+      description: "Register kUBSan in the GENERIC amd64 kernel config"
+    discussions: []
+    rationale: >-
+      P=1: NetBSD ships KUBSAN, a UBSAN-style kernel sanitizer whose
+      __ubsan_handle_out_of_bounds handler implements array-index bounds
+      checking, satisfying the C1a.7 intent. (The taxonomy os_hint
+      "no kernel array-bounds instrumentation" is incorrect — see the
+      deviation note in the report.) D=1: KUBSAN is a debug/opt-in build
+      option, commented out in amd64 GENERIC, so the production kernel is
+      uninstrumented. S=1: the default KUBSAN path only
+      reports compiler-visible out-of-bounds indices (vprintf), matching the
+      OpenBSD and FreeBSD recoverable handlers; UBSAN_ALWAYS_FATAL (panic) is
+      opt-in. A=2: in-tree kernel build option wired through
+      files.kern, not a core design property. T_age=3 (first landed
+      2018, ~8y). T_maintained=1: the ubsan.c MI runtime was actively
+      developed 2018-2021 but has been dormant since RCS v1.11
+      (2021-09-19); the only later change reaching NetBSD 11.0 is a
+      comment-typo fix (v1.12, 2023-12-07), and ubsan.c saw zero commits
+      in the 18-month window.
+      T = min(3,1) = 1. This mirrors the OpenBSD C1a.7 (KUBSAN) shape.
+  C1b.1:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "POOL_QUARANTINE (commented out in GENERIC)"
+      - "PR_NOTOUCH / PR_USEBMAP (bitmap tracking)"
+      source_files:
+      - "sys/kern/subr_pool.c"
+      - "sys/sys/pool.h"
+      default_state: >-
+        Bitmap tracking (PR_USEBMAP) is unconditional for PR_NOTOUCH
+        pools, reducing UAF exploitability by not storing freelist
+        pointers in freed objects. POOL_QUARANTINE delays reuse but
+        is opt-in only (commented out in GENERIC).
+    commits:
+    - hash: "bd0b740739afe7cfc1b4c6329ec56b9358a4d3ed"
+      date: "2019-03-17"
+      description: "Introduce PR_USEBMAP: pool uses a bitmap to manage freed items"
+    - hash: "0bf8272f891b82006b1e6f3562acb09291303425"
+      date: "2019-04-13"
+      description: "Introduce POOL_QUARANTINE: delay reuse of freed buffers to catch use-after-free"
+    discussions: []
+    rationale: >-
+      Bitmap free-item tracking for off-page pools replaces linked-list
+      freelist pointers, reducing UAF attack surface (unconditional for
+      PR_NOTOUCH pools). Double-free detection via bitmap active for
+      bitmap-managed pools. POOL_QUARANTINE (delay reuse) is opt-in
+      only. D=1 (quarantine disabled by default), S=2 (bitmap tracking
+      provides meaningful protection when active).
+      T_maintained=2 at 11.0: three non-trivial pool-allocator commits in
+      the 18-month window (PR kern/59411), none altering the
+      bitmap/quarantine code itself, so T = min(3,2) = 2.
+  C1b.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/subr_pool.c"
+      - "sys/sys/pool.h"
+      default_state: >-
+        Bitmap-based free item tracking and pool header relocation are
+        always active in production kernels. Added by Maxime Villard
+        in NetBSD 9.0.
+    commits:
+    - hash: "3874dcc99925d0b721931c6f948ea9f0d0029510"
+      date: "2019-03-17"
+      description: "Kernel Heap Hardening: put the pool header at the beginning of the backing page"
+    - hash: "31589aab591b6b8cc991d1e40023f4792803f084"
+      date: "2019-08-17"
+      description: "Kernel Heap Hardening: use bitmaps on all off-page pools"
+    discussions: []
+    rationale: >-
+      Pool allocator hardening by Maxime Villard (NetBSD 9.0): bitmap-based
+      free tracking replaces freelist pointers for applicable pools
+      (unconditional for PR_NOTOUCH); pool header relocated to page
+      start (harder to overflow into). POOL_CHECK_MAGIC sentinels
+      available with DIAGNOSTIC. Bitmap and header changes are always
+      active in production. D=2 (default-on), S=2.
+      T_maintained=2 at 11.0: three non-trivial pool-allocator commits in
+      the 18-month window (PR kern/59411), sporadic cadence, so
+      T = min(3,2) = 2.
+  C1b.3:
+    P: 1
+    D: 3
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/sys_futex.c"
+      - "sys/kern/kern_auth.c"
+      - "sys/external/bsd/drm2/include/linux/refcount.h"
+      default_state: >-
+        futex_hold() unconditionally rejects fx_refcnt == ULONG_MAX before a
+        CAS increment. Coverage is narrow: credentials still use raw
+        atomic_inc_uint(), and the DRM compatibility refcount_inc() is a raw
+        atomic increment without saturation.
+    commits:
+    - hash: "276ef2237848f9276aa522fb1629389cf68b910f"
+      date: "2020-04-26"
+      description: "Add a NetBSD native futex implementation, mostly written by riastradh@. Map the COMPAT_LINUX futex calls to the native ones."
+    discussions: []
+    rationale: >-
+      P=1: futex_hold() has an unconditional fail-before-wrap guard on a real,
+      user-reachable kernel reference count. D=3 because the guard cannot be
+      disabled for native futex operations. S=1 per the
+      taxonomy C1b.3 precedent; decisive property: protection covers only the
+      futex family while credential and DRM counters can still wrap. A=2:
+      integrated in the native futex lifecycle, not a kernel-wide checked type.
+      T_age=3 (native futex landed 2020-04, ~6.3y at the 11.0 release
+      date). T_maintained=2: sys_futex.c received a sporadic batch of
+      futex(2) correctness fixes in the 18-month window (FUTEX_WAKE_OP
+      sign-extension, timeout handling, 2025-03), though the fx_refcnt
+      guard itself was untouched, so T = min(3,2) = 2.
+  C1b.4:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "options DIAGNOSTIC (enables QUEUEDEBUG in queue.h)"
+      source_files:
+      - "sys/sys/queue.h"
+      default_state: >-
+        QUEUEDEBUG macros in sys/sys/queue.h validate next->prev == &next
+        and *prev == elm on every LIST/TAILQ insert/remove and poison
+        removed entries to (void *)1L (QUEUEDEBUG_*_POSTREMOVE), panicking
+        on mismatch. Gated by defined(_KERNEL) && defined(DIAGNOSTIC);
+        DIAGNOSTIC is commented out in GENERIC, so the checks are
+        compiled out of the default kernel.
+    commits:
+    - hash: "24204a1ea2111cfecaf965a0bcd34ba380123c69"
+      date: "2001-06-22"
+      description: "for QUEUEDEBUG_*_POSTREMOVE(), set the pointers to 1 instead of 0 so that we'll crash instead of thinking we're at the end of the list"
+    - hash: "24f7115afd36c218e2d0a8dcb10bfe570a309cad"
+      date: "2019-03-23"
+      description: "Enable QUEUEDEBUG under DIAGNOSTIC (pointer-consistency checks on every LIST/TAILQ insert/remove)"
+    discussions: []
+    rationale: >-
+      P=1: QUEUEDEBUG in sys/sys/queue.h is real linked-list integrity
+      hardening - prev/next consistency validation on every LIST/TAILQ
+      insert/remove plus (void *)1L pointer poisoning of removed entries,
+      directly analogous to Linux CONFIG_DEBUG_LIST/LIST_HARDENED and to
+      FreeBSD's QMD_TRASHIT/INVARIANTS queue checks (scored P=1 there).
+      D=1: gated behind options DIAGNOSTIC, which is off in GENERIC.
+      S=1: catches corruption deterministically when enabled but is a
+      debug facility with no production deployment. A=2 (in-tree,
+      header-level option). T_age=3 (poisoning since 2001, checks
+      enabled under DIAGNOSTIC since 2019); T_maintained=1 (dormant:
+      sys/sys/queue.h saw zero commits in the 18-month window ending at
+      the 11.0 release -- the only 10.1-to-11.0 change is /*CONSTCOND*/
+      lint cleanup from 2024-05), so T = min(3,1) = 1.
+  C1b.5:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/x86/x86/pmap.c"
+      default_state:
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM MTE temporal mode does not exist on x86-64. N/A; scored
+      separately in the supplementary ARM64 column (see the arm64
+      overlay below).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/aarch64/include/armreg.h"
+        default_state: >-
+          No MTE support: no tag assignment on allocation, no tag check on
+          use-after-free, no kernel allocator integration. Only the
+          ID-register bitfield is decoded for feature identification.
+      rationale: >-
+        arm64: P=0 — temporal-mode MTE (retagging on free to catch UAF) is
+        not implemented; NetBSD has no MTE support at all. Consistent with
+        the C1a.6 arm64 overlay: attack surface exists on MTE-capable
+        hardware, mechanism absent.
+  C1c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/conf/Makefile.kern.inc"
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      default_state: "not available"
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: the NetBSD kernel does not use -ftrivial-auto-var-init=zero or any
+      equivalent. Stack variables are left uninitialized unless explicitly
+      zeroed by the programmer. KMSAN can detect uninitialized memory
+      at runtime but is a debug tool, not a production mitigation.
+  C1c.2:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "PR_ZERO flag for pool_get()"
+      source_files:
+      - "sys/kern/kern_malloc.c"
+      - "sys/kern/subr_pool.c"
+      default_state: >-
+        kmem_alloc() returns uninitialized memory. kmem_zalloc() and
+        pool_get(PR_ZERO) exist for explicit zero-fill but are opt-in
+        per call-site. No global default-on zero-fill option.
+    commits:
+    - hash: "576eed55123f0a1fc8c364f5a3821eb8819a8029"
+      date: "2001-11-17"
+      description: "Add malloc(9) flag M_ZERO that zeros memory before returning"
+    - hash: "9577643dd8fbb55a1cb22a34eee3d4c73b4c1e50"
+      date: "2019-02-10"
+      description: "Introduce PR_ZERO pool_get() flag to avoid open-coded memset() calls"
+    discussions: []
+    rationale: >-
+      kmem_zalloc() and pool_get(PR_ZERO) provide opt-in zero-fill
+      per call-site. No global CONFIG_INIT_ON_ALLOC_DEFAULT_ON equivalent.
+      kmem_alloc() returns uninitialized memory by design. P=1 (mechanism
+      exists), D=1 (opt-in per call-site), S=1 (weak: relies on programmer
+      discipline). T_maintained=2 at 11.0: three non-trivial
+      pool-allocator commits in the 18-month window (PR kern/59411
+      drain-hook deadlock fixes), no zero-fill semantics change, so
+      T = min(3,2) = 2.
+  C1d.1:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/machdep.c"
+      - "sys/uvm/uvm_km.c"
+      default_state: >-
+        init_slotspace() randomizes the kernel_map VA base unconditionally
+        at boot via slotspace_rand(SLAREA_MAIN, ...) seeded from
+        cpu_rng_early_sample - active in stock GENERIC (not gated by the
+        opt-in KASLR image randomization). Kernel stacks (uareas) allocate
+        from kernel_map, so their absolute VAs are unpredictable
+        boot-to-boot. No per-syscall stack offset randomization; uarea
+        placement within kernel_map is deterministic pool_cache order.
+    commits:
+    - hash: "31588fa0ffcbb115b62ecee5c43f074f5ee4a96e"
+      date: "2018-08-12"
+      description: "More ASLR: randomize the kernel main memory (VM_MIN_KERNEL_ADDRESS variable)"
+    discussions: []
+    rationale: >-
+      The default-on boot-time randomization of the kernel_map base
+      (slotspace_rand in init_slotspace, commit 31588fa0ffcb) makes
+      kernel stack VAs unpredictable across boots, including in stock
+      GENERIC - hence D=2. This is distinct from the opt-in prekern
+      image KASLR scored under C3a.1. No per-syscall stack offset
+      randomization (no CONFIG_RANDOMIZE_KSTACK_OFFSET equivalent) and
+      no per-thread placement randomness: once a thread is created, its
+      stack base is fixed for its lifetime, and uarea allocation order
+      is deterministic. S=1 (weak: boot-time only, no per-entry
+      randomization).
+  C1d.2:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/subr_pool.c"
+      - "sys/arch/x86/x86/pmap.c"
+      default_state: >-
+        The kernel heap VA base is randomized unconditionally at boot:
+        kernel_map starts at the slotspace_rand-randomized
+        vm_min_kernel_address, and pmap_init_directmap() additionally
+        randomizes the direct-map base (slotspace_rand(SLAREA_DMAP, ...)).
+        Both are active in stock GENERIC. Within pool pages, item
+        allocation follows deterministic bitmap/sequential order. No
+        RANDOM_KMALLOC_CACHES or slab offset randomization equivalent.
+    commits:
+    - hash: "31588fa0ffcbb115b62ecee5c43f074f5ee4a96e"
+      date: "2018-08-12"
+      description: "More ASLR: randomize the kernel main memory (VM_MIN_KERNEL_ADDRESS variable)"
+    discussions: []
+    rationale: >-
+      Default-on boot-time randomization of the heap VA base (kernel_map
+      and direct map, commit 31588fa0ffcb) is active in stock GENERIC -
+      hence D=2. This is distinct from the opt-in prekern image KASLR
+      scored under C3a.1. No intra-page allocation randomization; pool
+      allocator uses deterministic bitmap/sequential order. S=1 (weak:
+      no per-allocation randomization).
+  C1d.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/conf/Makefile.kern.inc"
+      - "sys/conf/files"
+      default_state: "not available"
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: not implemented. No GCC randstruct plugin or Clang
+      randomize_layout attribute used. Struct layouts are fixed and
+      known at compile time.
+  C1e.1:
+    P: 1
+    D: 3
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/x86/x86/pmap.c"
+      - "sys/kern/subr_kobj.c"
+      default_state: >-
+        Since NetBSD 8.0 (Maxime Villard, 2016): kernel text RX,
+        data/BSS RW+NX with per-segment granularity (bootspace segment
+        table set up during pmap bootstrap). Kernel modules get RX text
+        after load, but module text is transiently RWX during the
+        relocation phase (subr_kobj.c allocates with UVM_KMF_EXEC, then
+        downgrades to RX via uvm_km_protect once linked). (PAX_MPROTECT
+        in GENERIC is a userland mprotect restriction, scored separately
+        from kernel W^X.)
+    commits:
+    - hash: "b66511fdf2b1add61b4b1d50852dbeeb209a45ad"
+      date: "2017-09-30"
+      description: "Add a bootspace structure describing the kernel's physical/virtual space layout"
+    - hash: "383924280f06a4904d7b3e3522f2b4506b8561af"
+      date: "2017-12-28"
+      description: "Map kernel head/segments RO, killing the last writable mapping of .text"
+    discussions: []
+    rationale: >-
+      Fine-grained W^X since NetBSD 8.0: text RX, data/BSS RW+NX,
+      per-segment granularity for kernel and modules. D=3: no disable
+      path of any kind exists -- no kernel option, no sysctl and no boot
+      flag; the permissions are applied unconditionally while the
+      bootspace segment table is built during pmap bootstrap. The
+      hardware NX dependency does not cap D: FreeBSD ("mandatory on
+      NX-capable CPUs") and OpenBSD both hold D=3 with the identical
+      dependency, and only Linux drops to D=2, because it ships a
+      rodata=off boot parameter. S=3 with one
+      documented exception: module loading holds a transient RWX window
+      (UVM_KMF_EXEC mapping in subr_kobj.c during relocation, downgraded
+      to RX after linking) - a load-time-only race window analogous to
+      transient text-patching states on the other scored OSes (Linux,
+      FreeBSD and OpenBSD all hold S=3 for the steady-state W^X
+      guarantee). No known bypass of the steady-state enforcement when
+      combined with NX hardware support.
+      T_maintained=1 at 11.0 (dormant): zero commits on
+      sys/arch/x86/x86/pmap.c and sys/kern/subr_kobj.c in the 18-month
+      window ending at the release (pmap.c last touched 2024-10), so
+      T = min(3,1) = 1 -- the canonical battle-tested-but-dormant
+      case. The new 11.0 link flag -z noseparate-code does not affect
+      W^X: kernel permissions come from the bootspace segment table per
+      the custom kern.ldscript, which is byte-identical to 10.1.
+  C1e.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/sys/cdefs_elf.h"
+      default_state: "not available"
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: NetBSD has __read_mostly (.data.read_mostly section) but this is
+      purely a cache optimization hint -- it does NOT enforce write
+      protection after initialization. No equivalent of Linux's
+      __ro_after_init that marks pages read-only after boot.
+  C1e.3:
+    P: 1
+    D: 1
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "kern.securelevel sysctl"
+      - "options INSECURE in GENERIC (defaults securelevel to -1)"
+      source_files:
+      - "sys/secmodel/securelevel/secmodel_securelevel.c"
+      default_state: >-
+        GENERIC ships with options INSECURE. Securelevel starts at -1.
+        Must be explicitly raised via rc.conf and kernel recompiled
+        without INSECURE for protection.
+    commits:
+    - hash: "6887492c261e6d27ac6fa6294fb8552ffcfd0c49"
+      date: "2007-11-21"
+      description: "Make securelevel a secmodel of its own (secmodel_securelevel.c)"
+    discussions: []
+    rationale: >-
+      kern.securelevel at level >= 1 makes /dev/mem and /dev/kmem
+      read-only, prevents module loading, protects immutable file flags.
+      Level >= 2 makes all disks read-only. Powerful but GENERIC ships
+      with options INSECURE (securelevel -1). D=1 (requires explicit
+      opt-in). S=2 (effective when enabled but no cryptographic
+      integrity verification). A=3 (core 4.4BSD heritage design, deeply
+      integrated into VFS, device layer, networking, module loading --
+      30+ enforcement points across kernel subsystems).
+      T_maintained=1 at 11.0 (dormant): secmodel_securelevel.c is
+      byte-identical between 10.1 and 11.0 and saw zero commits in the
+      18-month window ending at the release, so T = min(3,1) = 1.
+  C1e.4:
+    P: 1
+    D: 2
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/x86/x86/cpu.c"
+      - "sys/arch/amd64/amd64/copy.S"
+      default_state: >-
+        SMEP and SMAP auto-enabled in cpu_init() when CPU supports them.
+        SMEP since NetBSD 8.0 (Dec 2015), SMAP since Aug 2017. Both
+        set in CR4 unconditionally on supporting hardware.
+    commits:
+    - hash: "e3befc155e9492e04e475c2666621b3582232bbf"
+      date: "2015-12-13"
+      description: "Implement amd64 support for SMEP (Supervisor Mode Execution Prevention)"
+    - hash: "41713064f04660fd63521ca48292240ad952e5b7"
+      date: "2017-10-17"
+      description: "Add support for SMAP on amd64 (clac/stac copy windows in copy.S)"
+    discussions: []
+    rationale: >-
+      SMEP prevents ret2usr (kernel executing userspace code). SMAP
+      prevents kernel read/write of userspace memory outside explicit
+      copy paths. Both hardware-enforced, auto-enabled on supporting
+      CPUs since NetBSD 8.0. S=3 (hardware enforcement, no known
+      practical bypass when properly implemented).
+      T_maintained=2 at 11.0: cpu.c saw four non-trivial commits in the
+      18-month window (VMware CPUID frequency detection), none touching
+      the SMEP/SMAP enablement (CR4 bits verified intact at cpu.c:674/678);
+      copy.S saw only comment typo fixes. T = min(3,2) = 2.
+    arm64:
+      P: 1
+      D: 3
+      S: 3
+      A: 2
+      T_age: 3
+      T_maintained: 1
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/aarch64/aarch64/pmap.c"
+        default_state: >-
+          On aarch64 the SMEP equivalent is PXN (Privileged eXecute Never):
+          the pmap sets both UXN and PXN on every mapping and clears only
+          the relevant bit for executable mappings, so user pages always
+          carry PXN and the kernel (EL1) can never fetch instructions from
+          EL0 pages. Applies unconditionally on all ARMv8 cores; no
+          configuration is needed or possible.
+      commits:
+      - hash: "fe33aa278688de076e4ce4f8a177b90465a62a21"
+        date: "2018-04-01"
+        description: "Add initial support for ARMv8 (AARCH64): pmap sets UXN/PXN on user mappings"
+      rationale: >-
+        arm64: P=1 — PXN provides kernel execute-never over userspace
+        mappings, the ret2usr defense this row scores (SMAP-equivalent
+        data-access protection is scored at C3b.2/PAN). D=3 — mandatory:
+        PXN is stamped into every user PTE by construction in _pmap_pte()
+        and cannot be disabled by any option or sysctl, unlike x86 SMEP
+        which depends on CPU support and a CR4 setting (D=2); matches the
+        Fuchsia arm64 precedent for the same reasoning.
+        S=3 — hardware-enforced; an EL1 instruction fetch from an EL0 page
+        faults. A=2 — MMU page-attribute integration in the pmap. T=1 —
+        present since the aarch64 port was added (2018; T_age=3), but the
+        aarch64 pmap.c recorded zero commits in the 18-month window
+        ending at the 11.0 release (last change 2024-02), so
+        T_maintained=1 and T = min(3,1) = 1.
+  C1e.5:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/sys/lwp.h"
+      - "sys/sys/proc.h"
+      default_state: "not available"
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no dedicated isolation of sensitive control metadata. struct lwp
+      is separately allocated from kernel stack (good practice) but no
+      equivalent of Linux CONFIG_THREAD_INFO_IN_TASK. The uarea
+      (kernel stack + PCB) is a single contiguous region.
+  C1f.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/conf/Makefile.kern.inc"
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      - "sys/conf/files"
+      default_state: "not available"
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: NetBSD has explicitly rejected Rust in the kernel, citing
+      portability concerns across 50+ architectures and build
+      complexity. Kernel is written entirely in C and assembly.
+      Lua scripting is supported in-kernel but is not a memory-safe
+      systems language.
+  C2a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      default_state: "not available"
+    commits: []
+    discussions: []
+    rationale: >-
+      NetBSD 11.0 does not implement any software forward-edge CFI for
+      the kernel. Kernel is built with GCC (not Clang), no -fcf-protection
+      flags are applied. Makefile.amd64 only adds -mindirect-branch=thunk
+      (retpoline for Spectre V2), which is a speculative execution
+      mitigation, not CFI. P=0.
+  C2a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/conf/GENERIC"
+      default_state: "not available"
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: NetBSD 11.0 does not support Intel IBT (Indirect Branch Tracking).
+      No -fcf-protection=branch flag, no endbr64 annotations, no CET
+      forward-edge options in GENERIC config or Makefile.
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/aarch64/aarch64/cpu.c"
+        - "sys/arch/aarch64/include/armreg.h"
+        default_state: >-
+          Intel IBT is an x86 ISA feature. On aarch64 the hardware
+          forward-edge mechanism is BTI, scored at C2a.3.
+      rationale: >-
+        arm64: N/A — Indirect Branch Tracking is x86-only; x86-only
+        mechanisms receive N/A in the supplementary ARM64 column. The
+        aarch64 forward-edge counterpart is scored under C2a.3 (BTI).
+  C2a.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/locore.S"
+      - "sys/arch/x86/x86/pmap.c"
+      default_state:
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM BTI does not exist on x86-64. N/A (ARM-specific
+      hardware feature on x86-64 evaluation); scored in the
+      supplementary ARM64 column (see the arm64 overlay below).
+    arm64:
+      P: 1
+      D: 1
+      S: 2
+      A: 2
+      T_age: 3
+      T_maintained: 2
+      implementation:
+        config_options:
+        - "makeoptions ARMV85_BTI=1 (commented out in GENERIC64)"
+        - "options ARMV85_BTI (commented out in GENERIC64)"
+        - "-mbranch-protection=bti (sys/arch/aarch64/conf/Makefile.aarch64)"
+        source_files:
+        - "sys/arch/aarch64/aarch64/aarch64_machdep.c"
+        - "sys/arch/aarch64/aarch64/vectors.S"
+        - "sys/arch/evbarm/conf/GENERIC64"
+        default_state: >-
+          Kernel BTI is implemented (compiled with -mbranch-protection=bti
+          when makeoptions ARMV85_BTI=1, enforcement enabled via options
+          ARMV85_BTI / SCTLR_BT1) but both lines ship commented out in
+          GENERIC64, so the default evbarm kernel has no forward-edge
+          enforcement. machdep.bti_enabled sysctl reports the state.
+      commits:
+      - hash: "2ddb9fdee7e268be27852745b96c6d08595d57de"
+        date: "2020-04-13"
+        description: "Add support for Branch Target Identification (BTI)."
+      - hash: "bc24da7eab998d60f2e00ce1c838e2bfa5709038"
+        date: "2021-05-27"
+        description: "fix build error with options ARMV85_BTI"
+      rationale: >-
+        arm64: P=1 — kernel-mode BTI is implemented for aarch64 (landing
+        pads via -mbranch-protection=bti, guarded pages, BTI traps). D=1 —
+        opt-in: ARMV85_BTI ships commented out in GENERIC64, unlike Linux
+        where CONFIG_ARM64_BTI=y is the Fedora default. S=2 —
+        coarse-grained forward-edge (any BTI landing pad is a valid
+        target), comparable to x86 IBT. A=2 — in-tree option requiring a
+        custom kernel config. T=2 — landed 2020-04 (T_age=3, 6 years) but
+        mechanism-specific maintenance is sporadic since 2021
+        (T_maintained=2).
+  C2b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/x86/x86/spectre.c"
+      default_state: "not available"
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: NetBSD 11.0 has no dedicated backward-edge CFI mechanism for the
+      kernel on x86-64. No shadow call stack (SCS), no RETGUARD (that
+      is OpenBSD-specific), no return address protection beyond SSP
+      stack canaries (scored under C1a.1). Retpoline is a Spectre V2
+      mitigation, not architectural CFI.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/aarch64/conf/Makefile.aarch64"
+        - "sys/arch/aarch64/aarch64/locore.S"
+        default_state: >-
+          No software shadow call stack on aarch64 either: the kernel is
+          not built with -fsanitize=shadow-call-stack and reserves no SCS
+          register convention. The backward-edge protections available on
+          aarch64 are the hardware PAC return-address signing (opt-in,
+          scored at C2b.3) and SSP canaries (C1a.1).
+      rationale: >-
+        arm64: P=0 — no software backward-edge CFI (shadow call
+        stack / return guard) on aarch64, same as the x86-64 base; only
+        the evidence differs (Linux ships a Clang SCS on arm64, NetBSD has
+        no equivalent). Hardware PAC is scored separately at C2b.3.
+  C2b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/locore.S"
+      - "sys/arch/amd64/conf/Makefile.amd64"
+      default_state: "not available"
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: NetBSD 11.0 does not support Intel CET shadow stack for the kernel.
+      No shadow stack page table extensions, no WRSS/RSTORSSP handling.
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/aarch64/aarch64/locore.S"
+        - "sys/arch/aarch64/include/armreg.h"
+        default_state: >-
+          Intel CET shadow stack is an x86 ISA feature. The aarch64
+          hardware backward-edge analogue is the Guarded Control Stack
+          (FEAT_GCS), scored at C2b.4.
+      rationale: >-
+        arm64: N/A — Intel CET shadow stack is x86-only; x86-only
+        mechanisms receive N/A in the supplementary ARM64 column. The
+        aarch64 counterpart (GCS) is scored under C2b.4.
+  C2b.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/locore.S"
+      - "sys/arch/x86/x86/pmap.c"
+      default_state:
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM PAC does not exist on x86-64. N/A; scored in the supplementary
+      ARM64 column (see the arm64 overlay below).
+    arm64:
+      P: 1
+      D: 1
+      S: 2
+      A: 2
+      T_age: 3
+      T_maintained: 2
+      implementation:
+        config_options:
+        - "makeoptions ARMV83_PAC=1 (commented out in GENERIC64)"
+        - "options ARMV83_PAC (commented out in GENERIC64)"
+        - "-mbranch-protection=pac-ret (sys/arch/aarch64/conf/Makefile.aarch64)"
+        source_files:
+        - "sys/arch/aarch64/aarch64/aarch64_machdep.c"
+        - "sys/arch/aarch64/aarch64/cpuswitch.S"
+        - "sys/arch/aarch64/aarch64/locore.S"
+        - "sys/arch/evbarm/conf/GENERIC64"
+        default_state: >-
+          Kernel PAC (return-address signing via -mbranch-protection=pac-ret,
+          per-thread APIA/APIB/APDA/APDB/APGA keys randomly initialized and
+          switched on context switch) is implemented but both ARMV83_PAC
+          lines ship commented out in GENERIC64, so the default evbarm
+          kernel does not sign return addresses. machdep.pac_enabled sysctl
+          reports the state. Userland PAC keys are initialized at exec
+          regardless, enabling userland pointer authentication on
+          PAC-capable CPUs.
+      commits:
+      - hash: "6d94ff13c3d75a1fd02b80ff78fe8075dc600fb6"
+        date: "2020-04-12"
+        description: "Add support for Pointer Authentication (PAC)."
+      - hash: "164f546e0defc6f6719f84ccfbfd6a01df3f5ed3"
+        date: "2020-05-23"
+        description: >-
+          Userland PAC keys (APIA,APIB,APDA,APDB,APGA) randomly
+          initialized at exec and switched on context switch.
+      - hash: "0613f4f367e3310404f284fa9cdf0f5db59f08d7"
+        date: "2022-05-06"
+        description: >-
+          Sprinkle isb after modifying system regs of pointer auth; works
+          on native Mac M1 with options ARMV83_PAC.
+      rationale: >-
+        arm64: P=1 — kernel return-address signing (PAC) is implemented for
+        aarch64, including per-thread key management and Apple M1 support.
+        D=1 — opt-in: ARMV83_PAC ships commented out in GENERIC64, unlike
+        Linux where CONFIG_ARM64_PTR_AUTH_KERNEL=y is the default. S=2 —
+        cryptographic return-address integrity significantly raises ROP
+        difficulty, but speculative oracles (PACMAN) and signing-gadget
+        reuse are known bypass classes. A=2 — in-tree option requiring a
+        custom kernel config. T=2 — landed 2020-04 (T_age=3, 6 years) but
+        mechanism-specific maintenance is sporadic since 2022
+        (T_maintained=2).
+  C2b.4:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/locore.S"
+      - "sys/arch/x86/x86/pmap.c"
+      default_state:
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM GCS (FEAT_GCS, ARMv9.4) does not exist on x86-64. N/A
+      (ARM-specific hardware feature on x86-64 evaluation),
+      mirroring the C2a.3 (ARM BTI) and C2b.3 (ARM PAC) na treatment in
+      this file. NetBSD has not wired up arm64 GCS on any architecture.
+      Scored separately in the supplementary ARM64 column (see the
+      arm64 overlay below).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/aarch64/aarch64/cpu.c"
+        - "sys/arch/aarch64/include/armreg.h"
+        default_state: >-
+          No Guarded Control Stack support: no GCS/GCSPR register handling,
+          no FEAT_GCS detection, no shadow-stack page management. The only
+          backward-edge options on aarch64 are the opt-in PAC return-address
+          signing (C2b.3) and SSP canaries (C1a.1).
+      rationale: >-
+        arm64: P=0 — ARM GCS (FEAT_GCS, ARMv9.4) is not implemented; Linux
+        scores its userspace-only GCS here while NetBSD has no support at
+        all. GCS-capable silicon is only now emerging, but the mechanism is
+        scored absent rather than N/A for consistency with the MTE
+        treatment (C1a.6/C1b.5/C5c.3): the hardware class exists in the
+        aarch64 ecosystem and the OS ships nothing.
+  C2c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - "net.bpf.jit (default 0; npf JIT-compiles rules ungated)"
+      source_files:
+      - "sys/net/bpfjit.c"
+      - "sys/external/bsd/sljit/dist/sljit_src/sljitExecAllocator.c"
+      default_state: >-
+        NetBSD does have an in-kernel JIT: bpfjit (sys/net/bpfjit.c, via
+        the sljit code generator with a native x86-64 backend), built as
+        an autoloadable module reachable under GENERIC's
+        MODULAR_DEFAULT_AUTOLOAD. bpf(4) gates it behind net.bpf.jit
+        (default 0), but npf JIT-compiles rules unconditionally
+        (npf_rule_setcode -> npf_bpf_compile -> bpf_jit_generate). The
+        generated code has NO hardening: the kernel sljit allocator maps
+        chunks with uvm_km_alloc(..., UVM_KMF_EXEC), i.e. simultaneously
+        writable+executable (RWX), with no post-codegen W^X transition
+        and no constant blinding.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0, not N/A: bpfjit/sljit emits native amd64 code into kernel
+      memory and is reachable in the default GENERIC configuration
+      (module autoload;
+      npf uses it ungated), so the JIT attack surface exists. (The
+      taxonomy os_hint "N/A (no in-kernel JIT)" is incorrect - see the
+      deviation note in the report.) The hardening this row scores is
+      absent: JIT pages are RWX for their whole lifetime (UVM_KMF_EXEC
+      in the sljit exec allocator, no uvm_km_protect downgrade) and
+      there is no constant blinding - strictly weaker than FreeBSD's
+      classic-BPF JIT, which at least allocates W^X-separated memory
+      (scored P=1, S=1 there). Classic BPF's restricted instruction set
+      (verified, no loops) limits attacker-controlled code generation,
+      but JIT-spray-style abuse of RWX pages is unmitigated.
+  C3a.1:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "options KASLR (in GENERIC_KASLR, not in GENERIC)"
+      - "options PAX_ASLR=1 (in GENERIC, userland ASLR)"
+      - "makeoptions KASLR=1"
+      source_files:
+      - "sys/arch/amd64/conf/GENERIC_KASLR"
+      - "sys/arch/amd64/stand/prekern/prekern.c"
+      default_state: >-
+        opt-in: requires GENERIC_KASLR kernel and prekern; GENERIC only
+        has PAX_ASLR for userland
+    commits:
+    - hash: "650b1fa4d5f1e80900b37549c6a3e41dbf4e4f8b"
+      date: "2017-10-07"
+      description: "Add GENERIC_KASLR kernel config (toolchain parts)"
+    - hash: "c9759921f59878bb0bf101e4ac77f45665aab230"
+      date: "2017-10-10"
+      description: "Add the amd64 prekern: kernel relocator used for Kernel ASLR"
+    discussions:
+    - "https://blog.netbsd.org/tnf/entry/the_strongest_kaslr_ever"
+    - "https://blog.netbsd.org/tnf/entry/kernel_aslr_on_amd64"
+    rationale: >-
+      KASLR exists (P=1) but requires non-default GENERIC_KASLR kernel
+      (D=1 opt-in). Per the layout-randomization anchors (Gruss et al.),
+      KASLR without page-table separation caps at S=1 due to
+      prefetch/TSX side channels; SVS (C3b.1, default-on for Intel)
+      restores the S=2 baseline. S=3 would additionally require
+      kernel-pointer-leak prevention, which NetBSD lacks (S=2 moderate).
+      In-tree implementation with dedicated prekern (A=2). Available
+      since NetBSD 9.0 (T_age=3), but the code is dormant: the prekern
+      and GENERIC_KASLR recorded zero commits in the 18-month window
+      ending at the 11.0 release (last change 2024-06, a
+      build-dependency tweak; last substantive change 2022-08), so
+      T_maintained=1 and T = min(3,1) = 1.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/amd64/stand/prekern/prekern.c"
+        default_state: >-
+          No kernel image randomization on aarch64. GENERIC_KASLR and the
+          prekern bootstrap exist only under sys/arch/amd64; the GENERIC64
+          kernel is loaded at a fixed virtual address by the bootloader
+          (efiboot/u-boot). Userland ASLR (options PAX_ASLR=1 in
+          GENERIC.common) applies on aarch64, but the kernel image itself
+          is not randomized.
+      discussions: []
+      rationale: >-
+        arm64: P=0 — kernel base address randomization is not implemented
+        for aarch64. The amd64 implementation (GENERIC_KASLR + prekern) was
+        never ported; no aarch64 boot path randomizes the kernel load
+        address or virtual mapping. Userland PAX_ASLR is unaffected but is
+        out of scope for this kernel-image mechanism.
+  C3a.2:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "options KASLR (in GENERIC_KASLR)"
+      - "makeoptions KASLR=1"
+      source_files:
+      - "sys/arch/amd64/stand/prekern/prekern.c"
+      default_state: "opt-in (requires GENERIC_KASLR kernel)"
+    commits:
+    - hash: "569f0c08bfbd142cd58e858bcf414f61186f5c90"
+      date: "2017-10-29"
+      description: "Randomize the kernel segments independently (text, rodata, data)"
+    - hash: "6ac8be2408b8080c07cd687f623d8b22198bb5db"
+      date: "2017-11-13"
+      description: "Map each ELF section independently at a random address (per-section KASLR)"
+    discussions:
+    - "https://blog.netbsd.org/tnf/entry/the_strongest_kaslr_ever"
+    rationale: >-
+      Per-section KASLR is present (P=1) but opt-in via GENERIC_KASLR
+      (D=1). Randomizes ~33 sections independently with ~2^24 entropy
+      each -- stronger than monolithic KASLR but not true per-function
+      FG-KASLR (S=2 moderate). In-tree with dedicated prekern
+      infrastructure (A=2). Available since NetBSD 9.0 (T_age=3), but
+      dormant: zero commits to the prekern in the 18-month window ending
+      at the 11.0 release, so T_maintained=1 and T = min(3,1) = 1.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/amd64/stand/prekern/prekern.c"
+        default_state: >-
+          NetBSD's per-section fine-grained randomization is part of the
+          amd64 GENERIC_KASLR/prekern infrastructure, which has no aarch64
+          port. With no kernel randomization of any granularity on
+          aarch64 (see the C3a.1 arm64 overlay), fine-grained
+          randomization is likewise absent.
+      discussions: []
+      rationale: >-
+        arm64: P=0 — fine-grained (per-section) kernel randomization
+        depends on the amd64-only prekern; aarch64 has no kernel layout
+        randomization at all. Scored absent, consistent with C3a.1.
+  C3b.1:
+    P: 1
+    D: 2
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "options SVS (in GENERIC, enabled)"
+      - "machdep.svs.enabled sysctl (read-only status node, CTLFLAG_PERMANENT)"
+      - "RB_MD3 boot flag (disables SVS at boot)"
+      source_files:
+      - "sys/arch/x86/x86/svs.c"
+      - "sys/arch/x86/include/pmap.h"
+      - "sys/arch/x86/x86/x86_machdep.c"
+      default_state: >-
+        Default-on for vulnerable (Intel) CPUs. Not runtime-switchable --
+        machdep.svs.enabled is a read-only status node; the only disable
+        paths are a kernel rebuild without 'options SVS' or the RB_MD3
+        boot flag.
+    commits:
+    - hash: "da72fac8fc295ac283d4139e88d6de47470e4b56"
+      date: "2018-01-07"
+      description: "Add new option SVS (Separate Virtual Space): unmap kernel pages in userland"
+    - hash: "0d64a27b7406812b3142fb9d19847927805b3d16"
+      date: "2018-02-26"
+      description: "Enable SVS by default"
+    discussions:
+    - "https://blog.netbsd.org/tnf/entry/recent_security_affairs"
+    - "https://mail-index.netbsd.org/tech-kern/2018/01/21/msg023000.html"
+    rationale: >-
+      SVS present and compiled into GENERIC (P=1). Default-on for
+      vulnerable Intel CPUs with automatic detection (D=2). Complete
+      kernel/user page table separation equivalent to Linux KPTI (S=3
+      strong). A=2 (in-tree, deeply integrated into amd64 pmap but
+      retrofitted for Meltdown, not an original design property).
+      Available since NetBSD 8.0 (2018), so T_age=3, but the code is
+      dormant: sys/arch/x86/x86/svs.c has not been touched since
+      2022-09 and recorded zero commits in the 18-month evaluation
+      window, so T_maintained=1 and T=min(3,1)=1.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/x86/x86/svs.c"
+        default_state: >-
+          No kernel/user page-table separation on aarch64. SVS is
+          implemented exclusively for amd64; the aarch64 pmap has no
+          equivalent of Linux's UNMAP_KERNEL_AT_EL0 (KPTI trampoline) and
+          no per-core Meltdown vulnerability detection. The kernel remains
+          mapped in TTBR1 while userspace runs.
+      discussions: []
+      rationale: >-
+        arm64: P=0 — NetBSD implements no kernel/user address-space
+        separation on aarch64. Meltdown-class cores exist in the aarch64
+        ecosystem (e.g. Cortex-A75), so the attack surface is present in
+        principle and the mechanism is scored absent rather than N/A
+        (Linux, by contrast, ships UNMAP_KERNEL_AT_EL0 on arm64). Most
+        SoCs in the NetBSD/evbarm support list (Cortex-A53/A72) are
+        in-order or Meltdown-immune, which limits practical exposure but
+        does not change the mechanism's absence.
+  C3b.2:
+    P: 1
+    D: 2
+    S: 3
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "Automatic on supported CPUs (no kernel config option needed)"
+      source_files:
+      - "sys/arch/amd64/amd64/copy.S"
+      - "sys/arch/amd64/amd64/locore.S"
+      - "sys/arch/x86/x86/cpu.c"
+      default_state: "default-on when CPU supports SMAP/SMEP"
+    commits:
+    - hash: "e3befc155e9492e04e475c2666621b3582232bbf"
+      date: "2015-12-13"
+      description: "Implement amd64 support for SMEP (Supervisor Mode Execution Prevention)"
+    - hash: "41713064f04660fd63521ca48292240ad952e5b7"
+      date: "2017-10-17"
+      description: "Add support for SMAP on amd64 (clac/stac copy windows in copy.S)"
+    discussions:
+    - "https://mail-index.netbsd.org/tech-kern/2017/08/23/msg022249.html"
+    rationale: >-
+      SMAP/SMEP present (P=1). Automatically enabled on supported CPUs
+      at boot (D=2 default-on). Hardware-enforced prevention of supervisor
+      access to user pages (S=3 strong). In-tree with hot-patching into
+      interrupt entry paths (A=2). SMEP since 2015, SMAP since 2017,
+      both in NetBSD 8.0+ (T_age=3); the implementation files saw only
+      sporadic, SMAP/SMEP-unrelated maintenance in the 18-month window
+      ending at the 11.0 release (T_maintained=2, T=2). The CR4_SMEP/CR4_SMAP
+      enablement lives in cpu.c.
+    arm64:
+      P: 1
+      D: 2
+      S: 3
+      A: 2
+      T_age: 3
+      T_maintained: 2
+      implementation:
+        config_options:
+        - "options ARMV81_PAN (enabled in GENERIC64)"
+        source_files:
+        - "sys/arch/aarch64/aarch64/copyinout.S"
+        - "sys/arch/aarch64/aarch64/fusu.S"
+        - "sys/arch/aarch64/aarch64/cpufunc.c"
+        - "sys/arch/evbarm/conf/GENERIC64"
+        default_state: >-
+          On aarch64 the SMAP equivalent is PAN (Privileged Access Never,
+          ARMv8.1): with options ARMV81_PAN — enabled by default in
+          GENERIC64 — the kernel runs with PSTATE.PAN set on PAN-capable
+          CPUs, faulting any stray kernel access to user mappings.
+          copyin/copyout and fusu paths clear PAN only around the explicit
+          user access, mirroring the amd64 SMAP_DISABLE/SMAP_ENABLE
+          bracketing.
+      discussions: []
+      commits:
+      - hash: "cf570c9e4c9adada6f43fab861a53f331877b29d"
+        date: "2020-08-02"
+        description: "Add support for Privileged Access Never (ARMv8.1-PAN)."
+      rationale: >-
+        arm64: P=1 — PAN is the aarch64 counterpart of SMAP. D=2 — options
+        ARMV81_PAN is enabled in GENERIC64 and activates automatically on
+        PAN-capable (ARMv8.1+) CPUs. S=3 — hardware-enforced; kernel
+        accesses to EL0-accessible pages fault outside the bracketed
+        copyin/copyout windows. A=2 — in-tree, integrated into the user
+        access and exception entry paths. T=2 — landed 2020-08 (T_age=3),
+        but the PAN/user-access files recorded no mechanism-relevant
+        commits in the 18-month window ending at the 11.0 release
+        (T_maintained=2). No SMEP-analogue needed here: instruction-side
+        protection (PXN) is scored at C1e.4.
+  C3c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - "PR_ZERO flag (per-pool, zero on alloc -- not on free)"
+      source_files:
+      - "sys/kern/subr_pool.c"
+      - "sys/kern/subr_kmem.c"
+      default_state: >-
+        No production zero-on-free mechanism. PR_ZERO and kmem_zalloc()
+        zero memory at allocation time (not on free). The former
+        KMEM_GUARD debug facility was removed from the kernel in 2020
+        (superseded by KASAN). No equivalent to Linux
+        CONFIG_INIT_ON_FREE_DEFAULT_ON
+        or OpenBSD junk-on-free. Freed memory retains sensitive data.
+    commits: []
+    discussions: []
+    rationale: >-
+      This mechanism measures zeroing on free (preventing freed memory
+      disclosure). NetBSD has PR_ZERO/kmem_zalloc which zero on
+      allocation, not on free. Freed memory is not zeroed or poisoned
+      in production GENERIC kernels. P=0 (the security property --
+      zeroing on free -- is absent). Consistent with FreeBSD P=0.
+  C3c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/amd64/locore.S"
+      default_state: "not available"
+    commits: []
+    discussions: []
+    rationale: >-
+      No stack erasure on syscall return mechanism exists in NetBSD (P=0).
+      All other dimensions score 0 as the mechanism is absent.
+  C3c.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/conf/Makefile.kern.inc"
+      - "sys/arch/amd64/amd64/locore.S"
+      default_state: "not available"
+    commits: []
+    discussions: []
+    rationale: >-
+      No register scrubbing mechanism exists in NetBSD (P=0). All other
+      dimensions score 0 as the mechanism is absent.
+  C3d.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "kern.expose_address sysctl (0/1/2; default 1 for GENERIC)"
+      - "kern.securelevel (restricts /dev/kmem writes at >= 1)"
+      source_files:
+      - "sys/kern/init_sysctl.c"
+      - "sys/kern/kern_descrip.c"
+      default_state: >-
+        kern.expose_address=1 in GENERIC (permits kmem-opening processes);
+        no dmesg restriction
+    commits:
+    - hash: "6015b4b38b74cbd46b73e76dd77060076654e586"
+      date: "2018-10-05"
+      description: "Provide a sysctl kern.expose_address to expose kernel addresses in sysctl returns (default off)"
+    - hash: "1d0978b88ca8c14f568462db3a4795c4f3f59196"
+      date: "2020-08-26"
+      description: "Return hashed values instead of 0 when kern.expose_address=0"
+    discussions: []
+    rationale: >-
+      Pointer exposure restriction via kern.expose_address exists (P=1).
+      D=2: the GENERIC default of 1 already denies kernel pointers to all
+      processes without PK_KMEM (the KAUTH_REQ_PROCESS_CANSEE_KPTR check
+      in kern_proc.c allows only kmem-opening, i.e. privileged,
+      processes) - the restriction is on by default, matching the
+      Linux (kptr_restrict/dmesg_restrict) and OpenBSD (allowkmem) D=2
+      baselines; only the fully-locked mode (0, the KASLR-kernel
+      default) is an opt-in increment. Covers fstat/sockstat addresses
+      and securelevel restricts kmem writes, but no dmesg restriction or
+      %p hashing (S=2 moderate). In-tree sysctl and securelevel
+      framework (A=2). Long-standing features (T_age=3), but the
+      implementing files saw only sporadic upkeep in the 18 months
+      before the 11.0 release (T_maintained=2, T=2).
+  C3d.2:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "security.curtain sysctl (0=off, 1=filter by uid; default 0)"
+      - "kern.securelevel (level >= 1 restricts kmem, modules)"
+      source_files:
+      - "sys/secmodel/extensions/secmodel_extensions.c"
+      - "sys/kern/kern_proc.c"
+      default_state: "security.curtain=0 (disabled by default)"
+    commits:
+    - hash: "ec14f2d11e209b1bec9687797bc9992c56d67cb5"
+      date: "2005-09-07"
+      description: "Introduce security.curtain sysctl controlling per-user object visibility"
+    - hash: "bc433a82fbbb9cb7e88b559a834d4e5af5796292"
+      date: "2005-09-07"
+      description: "Implement curtain in KERN_PROC/PROC2/FILE/FILE2/PROC_ARGS sysctl handlers"
+    discussions:
+    - "https://wiki.netbsd.org/tutorials/hide_other_user__39__s_processes/"
+    rationale: >-
+      Diagnostic interface restriction via security.curtain exists (P=1).
+      Disabled by default (D=1 opt-in). When enabled, hides other users'
+      processes; securelevel adds module/kmem restrictions, but procfs
+      lacks hidepid (S=2 moderate). In-tree secmodel framework (A=2).
+      Long-standing (T_age=3), but the curtain code is quiescent -- its
+      files saw only sporadic incidental churn in the 18 months before
+      the 11.0 release (T_maintained=2, T=2).
+  C4.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/secmodel/suser/secmodel_suser.c"
+      - "sys/kern/kern_auth.c"
+      - "sys/external/bsd/drm2/include/linux/capability.h"
+      default_state: "not available"
+    commits: []
+    discussions: []
+    rationale: >-
+      NetBSD does not implement POSIX.1e capabilities (Linux CAP_*) or any
+      other fine-grained capability-based access control. The POSIX.1e support
+      added in NetBSD 10.0 covers only ACLs, not the mac, audit, privilege
+      (capability), or information flow label APIs. The kauth(9) framework
+      uses a binary root/non-root model via secmodel_suser -- there is no
+      mechanism to decompose root privileges into individual capabilities
+      that can be selectively granted to processes. Unlike Linux (which has
+      ~40 distinct capabilities), FreeBSD (Capsicum capability mode), or
+      Fuchsia (handle-based capabilities), NetBSD relies entirely on the
+      traditional superuser model for privilege escalation. Historical plans
+      to add POSIX capabilities to replace setid bits were discussed but
+      never implemented. P=0: capability-based access control is absent.
+  C4.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/x86/x86/syscall.c"
+      - "sys/sys/syscallvar.h"
+      - "sys/arch/amd64/conf/majors.amd64"
+      default_state: "not available"
+    commits: []
+    discussions: []
+    rationale: >-
+      NetBSD has no syscall attack surface reduction mechanism equivalent to
+      Linux seccomp-bpf or OpenBSD pledge(2). The historical systrace(4)
+      facility, which provided per-process syscall policy filtering, was
+      removed from NetBSD in late 2007 due to unfixed implementation issues
+      and incompatibility with the new threading model. No replacement was
+      ever merged. A research prototype secmodel_sandbox (BSDCan 2017) used
+      in-kernel Lua scripts to define per-process kauth rules, but this was
+      never integrated into the NetBSD base system. The out-of-tree
+      Cells/Jails project remains unmerged in the NetBSD 11.0 base system
+      (sys/secmodel at the 11.0 tag contains no cell secmodel). Without
+      seccomp, pledge, or any equivalent, applications on NetBSD 11.0
+      have access to the full syscall surface -- a surface 11.0 in fact
+      enlarges: it adds native memfd_create,
+      epoll_create1/epoll_ctl/epoll_pwait2 and semtimedop syscalls, and
+      significantly expands the compat_linux(8) emulation (statx, epoll,
+      inotify, clone3, close_range, etc.), although compat_linux is not
+      enabled in amd64 GENERIC and is excluded (#if 0) from the
+      exec_autoload list in kern_exec.c, so the Linux syscall surface is
+      only reachable after an explicit modload. P=0: syscall filtering
+      mechanism is absent.
+  C4.5:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "kern.securelevel sysctl (must be >= 1 to block module loading)"
+      - "options INSECURE in GENERIC (keeps securelevel at -1, modules unrestricted)"
+      - "options MODULAR (enabled in GENERIC)"
+      - "options MODULAR_DEFAULT_AUTOLOAD (enabled in GENERIC)"
+      - "securelevel= in /etc/rc.conf (default empty)"
+      source_files:
+      - "sys/secmodel/securelevel/secmodel_securelevel.c"
+      - "sys/secmodel/securelevel/files.securelevel"
+      - "sys/modules/securelevel/"
+      - "sys/kern/kern_module.c"
+      - "sys/arch/amd64/conf/GENERIC"
+      - "sbin/init/init.c"
+      default_state: >-
+        GENERIC kernel has options INSECURE, so securelevel stays at -1 in
+        multiuser mode. Module loading is unrestricted. init(8) only raises
+        securelevel from 0 to 1, but with INSECURE it starts at -1 and init
+        does not touch it. MODULAR_DEFAULT_AUTOLOAD enables on-demand module
+        loading. To restrict modules the administrator only has to raise the
+        level at runtime -- secmodel_securelevel_sysctl() rejects lowering
+        (newsecurelevel < securelevel returns EPERM for non-init), not
+        raising, so "sysctl -w kern.securelevel=1" succeeds on a stock
+        GENERIC kernel; setting securelevel= in /etc/rc.conf makes it
+        persistent. No kernel rebuild is needed.
+    commits:
+    - hash: "bbc79e58a6b48edc15ae7b2ed8364880fddce1e7"
+      date: "2008-01-16"
+      description: "Pull in my modules code (kern_module.c with KAUTH_SYSTEM_MODULE authorization)"
+    - hash: "abc7a4290bc49519acdd0a02fce3ce482329d948"
+      date: "2009-10-03"
+      description: "Put module loading policy back in the subsystem (kauth listener in kern_module.c)"
+    discussions: []
+    rationale: >-
+      Kernel module loading can be restricted via securelevel. In
+      secmodel_securelevel_system_cb(), KAUTH_SYSTEM_MODULE requests are
+      denied when securelevel > 0 (line 294-296 of secmodel_securelevel.c).
+      At securelevel >= 1, modctl(2) cannot load or unload modules. However,
+      the GENERIC amd64 kernel ships with "options INSECURE" (line 56 of
+      GENERIC), which initializes securelevel to -1. The init(8) source
+      (line 1501) only raises securelevel if getsecuritylevel() == 0, so
+      with -1 it stays at -1. Consequently, in the default GENERIC config,
+      module loading is completely unrestricted and MODULAR_DEFAULT_AUTOLOAD
+      enables automatic loading. There is no module signing (see C6.3).
+      P=1: the securelevel-based restriction mechanism exists and works when
+      enabled. D=1: opt-in -- the administrator must raise the level, either
+      at runtime or via securelevel= in rc.conf. Note that no kernel rebuild
+      is required: secmodel_securelevel_sysctl() only rejects *lowering* the
+      level (newsecurelevel < securelevel yields EPERM for anything but
+      init), so "sysctl -w kern.securelevel=1" succeeds on the stock GENERIC
+      kernel despite options INSECURE. S=2: moderate -- when active,
+      it is an absolute block on module load/unload, but provides no
+      cryptographic verification of module integrity (a trusted-path-only
+      approach). A=2: in-tree option rather than a non-removable core
+      property -- sys/secmodel/securelevel/files.securelevel declares
+      "defflag secmodel_securelevel" and sys/modules/securelevel builds the
+      secmodel as a loadable module, so the policy is separable by
+      construction; this matches the A=2 recorded for Linux and FreeBSD.
+      T=2: securelevel dates from 4.4BSD (~1994), so T_age=3, but upkeep is
+      sporadic -- sys/secmodel/securelevel/ has had zero commits since
+      2020-12 and sys/kern/kern_module.c only 2 non-trivial commits in the
+      evaluation window, giving T_maintained=2 and T=min(3,2)=2.
+  C4.6:
+    P: 1
+    D: 1
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "chroot(2) syscall (root-only)"
+      - "KAUTH_SYSTEM_CHROOT kauth scope"
+      source_files:
+      - "sys/kern/vfs_syscalls.c"
+      - "sys/secmodel/suser/secmodel_suser.c"
+      - "sys/kern/sys_ptrace_common.c"
+      default_state: >-
+        chroot(2) is available but requires root privileges. No namespace
+        isolation, no jail-like features in NetBSD 11.0. The out-of-tree
+        Cells/Jails project is not merged into the 11.0 base system.
+    commits:
+    - hash: "6d0f67d6aac3a35a8b0ae3486dbacdf22e186c8c"
+      date: "1999-03-22"
+      description: "Call vn_isunder() in fchdir(), chroot() and fchroot() to make it harder to escape chroot()"
+    - hash: "5f7169ccb1d349e91f3fbefef9c51d04dc8a863e"
+      date: "2006-09-08"
+      description: "First take at security model abstraction (kauth, KAUTH_SYSTEM_CHROOT)"
+    discussions: []
+    rationale: >-
+      NetBSD 11.0 provides only chroot(2) for process/resource isolation.
+      chroot changes the root directory of a process, restricting its
+      filesystem view, but provides no isolation of networking, IPC, PID
+      space, mount namespace, or other resources. It is root-only
+      (KAUTH_SYSTEM_CHROOT requires superuser in secmodel_suser). NetBSD
+      has a security enhancement from NetBSD 1.4: chroot silently sets the
+      working directory to the new root if it is not already under it,
+      preventing a known escape technique. Additionally, ptrace_allowed()
+      enforces that a chrooted tracer cannot trace processes outside its
+      chroot (proc_isunder check). However, chroot is fundamentally weak:
+      no PID isolation, no network isolation, no resource limits specific
+      to the chroot, no device restriction beyond filesystem view. FreeBSD
+      has jails (since 1999), Linux has namespaces (since 2002+), but
+      NetBSD has neither. The Cells/Jails project (using secmodel_cell
+      kernel enforcement) remains out-of-tree at the 11.0 release --
+      sys/secmodel in base contains no cell secmodel -- so base NetBSD
+      still ships no jail-like isolation.
+      P=1: chroot exists as a basic isolation primitive. D=1: opt-in,
+      root-only, must be explicitly set up. S=1: weak -- filesystem-only
+      isolation with known limitations and no resource compartmentalization.
+      A=2: in-tree Unix facility, not a bolt-on but not a core design
+      principle either. T_age=3: chroot dates from Version 7 Unix (1979);
+      T_maintained=2: the implementing files saw a single incidental
+      commit in the 18 months before the 11.0 release, giving
+      T=min(3,2)=2.
+  C4.7:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "security.models.extensions.curtain sysctl (default 0)"
+      - "security.models.extensions.user_set_dbregs sysctl (default 0)"
+      - "KAUTH_PROCESS_PTRACE kauth scope"
+      - "KAUTH_PROCESS_CANSEE kauth scope"
+      source_files:
+      - "sys/kern/sys_ptrace_common.c"
+      - "sys/secmodel/suser/secmodel_suser.c"
+      - "sys/secmodel/securelevel/secmodel_securelevel.c"
+      - "sys/secmodel/extensions/secmodel_extensions.c"
+      default_state: >-
+        Basic ptrace restrictions are default-on: UID matching, chroot
+        boundary enforcement, system process protection, init protection.
+        Debug register access denied to non-root by default (user_set_dbregs=0).
+        Curtain mode is off by default (curtain=0). No Yama-like ptrace
+        scope restrictions.
+    commits:
+    - hash: "c27d5f30b6a97beb5ddcab8291ca15946811984f"
+      date: "2008-01-23"
+      description: "Tons of process scope changes (ptrace mediated via KAUTH_PROCESS_PTRACE)"
+    - hash: "615c430a229ecdb60cd97014e9fb295066918aa9"
+      date: "2018-04-08"
+      description: "Add security.models.extensions.user_set_dbregs sysctl (default-off PT_SETDBREGS)"
+    discussions: []
+    rationale: >-
+      NetBSD provides several credential and process relationship hardening
+      features, though weaker than Linux Yama or OpenBSD's restricted ptrace.
+      (1) ptrace UID checks: a process must have the same real UID as the
+      target, and cannot trace setuid/setgid executables (unless root).
+      (2) System process protection: no process may trace system processes
+      (PK_SYSTEM flag) or init (pid 1). At securelevel >= 0, init cannot be
+      traced or written via procfs (secmodel_securelevel_process_cb).
+      (3) Chroot boundary: ptrace_allowed() uses proc_isunder() to prevent
+      a chrooted process from tracing processes outside its chroot.
+      (4) Debug registers: user_set_dbregs=0 by default in secmodel_extensions,
+      preventing unprivileged users from setting CPU debug registers via
+      ptrace PT_SETDBREGS. (5) Curtain mode: when security.curtain=1,
+      secmodel_extensions hides process info (ps, fstat, netstat) from
+      non-owning users, but this is off by default. However, there is no
+      equivalent to Linux Yama PTRACE_SCOPE which restricts ptrace to
+      parent-child relationships. Any process with matching UID can ptrace
+      any other same-UID process. No dmesg_restrict or kptr_restrict
+      equivalents exist. P=1: credential/ptrace hardening exists. D=2:
+      the basic ptrace UID checks and system/init protection are default-on.
+      S=1: weak compared to Yama -- no parent-child scope restriction, no
+      ability to disable ptrace system-wide for unprivileged users.
+      A=2: in-tree, integrated via kauth listeners across secmodels.
+      T_age=3: ptrace restrictions date from early BSD, kauth integration
+      since NetBSD 4.0 (2007), secmodel_extensions since ~2011, all 10+
+      years. T_maintained=1: none of the implementing files received any
+      commit in the 18-month window before the 11.0 release
+      (sys_ptrace_common.c's last change, rev 1.96, landed 2025-01-11,
+      just before the window opened), so T=min(3,1)=1.
+  C5a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - "userspace: rump_msdos, rump_tmpfs, rump_ffs, etc."
+      source_files:
+      - "sys/rump/librump/rumpkern/rump.c"
+      - "lib/librump/Makefile"
+      - "usr.sbin/puffs/Makefile"
+      default_state: >-
+        opt-in -- user must explicitly mount with rump_* commands or -o rump;
+        GENERIC kernel runs all drivers in-kernel
+    commits: []
+    discussions:
+    - "https://wiki.netbsd.org/rumpkernel/"
+    rationale: >-
+      NetBSD's rump kernel framework allows running unmodified kernel drivers as
+      userspace processes via puffs/p2k, primarily for file system drivers. However,
+      in the GENERIC kernel all drivers run in-kernel; this is not driver fault
+      isolation in the architectural sense. Monolithic kernels
+      lack driver fault isolation (P=0). Rump kernels are an opt-in testing/mounting
+      tool, not a production driver isolation mechanism. P=0.
+  C5a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - "options MODULAR"
+      - "options MODULAR_DEFAULT_AUTOLOAD"
+      source_files:
+      - "sys/kern/kern_module.c"
+      - "sys/sys/module.h"
+      default_state: >-
+        modules load at securelevel <= 0; no isolation once loaded
+    commits: []
+    discussions:
+    - "https://man.netbsd.org/module.7"
+    - "https://man.netbsd.org/secmodel_securelevel.9"
+    rationale: >-
+      NetBSD kernel modules become part of the kernel once loaded with no memory
+      protection between modules and the rest of the kernel (module(7) man page states
+      this explicitly). A module can crash the OS or give an attacker total control.
+      The only protection is securelevel: at securelevel >= 1, modules cannot be loaded
+      or unloaded. But the GENERIC kernel ships with 'options INSECURE' (securelevel -1)
+      and MODULAR_DEFAULT_AUTOLOAD, meaning modules auto-load without restriction.
+      This is access control, not isolation -- there is no sandbox, containment, or
+      fault isolation for loaded modules. Scored P=0 (no isolation mechanism exists).
+  C5a.3:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "net.bpf.jit sysctl (default 0; bpf(4) uses the interpreter)"
+      source_files:
+      - "sys/net/bpf_filter.c"
+      - "sys/net/bpfjit.c"
+      default_state: >-
+        Classic BPF is compiled into GENERIC (pseudo-device bpfilter) and
+        every attached filter program is checked by the bpf_validate()
+        verifier (bounds-checked memory/jump targets, no backward jumps,
+        guaranteed termination) before it may run in the interpreter VM.
+        bpfjit (sljit-based JIT) is an optional autoloadable module
+        (net.bpf.jit, default 0; npf uses it unconditionally). No
+        eBPF-class general extension VM: no program types, maps, helper
+        calls or verifier-tracked register state.
+    commits:
+    - hash: "61f282557f0bc41c0b762c629a2f4c14be8b7591"
+      date: "1993-03-21"
+      description: "initial import of 386bsd-0.1 sources (mechanism inherited as ancestral BSD functionality)"
+    - hash: "e8c0d6c662b578bb7da7d2a03aecdef0d7d9eb2a"
+      date: "2012-10-27"
+      description: "Add bpfjit and enable it for amd64"
+    discussions:
+    - "https://man.netbsd.org/bpf.4"
+    rationale: >-
+      P=1: classic BPF is an in-kernel VM that runs user-supplied
+      programs under a real verifier - bpf_validate() rejects programs
+      with out-of-bounds memory/jump operands or backward jumps,
+      guaranteeing sandboxed, terminating execution. This follows the
+      FreeBSD C5a.3 precedent, which scores the same
+      classic-BPF-with-validator mechanism P=1/D=2/S=1 ("present,
+      limited"); NetBSD additionally ships the bpfjit runtime. (This
+      deviates from the taxonomy os_hint "classic BPF ... P=0" - see
+      the deviation note in the report; OpenBSD C5a.3 scores P=1 on
+      the same grounds.) D=2: the verifier
+      is unconditional for every filter attached via bpf(4)/npf in stock
+      GENERIC. S=1: weak relative to the eBPF reference point - a narrow
+      packet-filter instruction set with no program types, maps, bounded
+      loops analysis or register-state tracking, and the optional bpfjit
+      backend emits RWX code (see C2c.1). A=2: in-tree subsystem. T_age=3
+      (ancestral, 1993 import; JIT 2012); T_maintained=1 (dormant in the
+      18-month window ending at the 11.0 release: zero commits touch
+      sys/net/bpf* on the netbsd-11 branch; last change is the 2024-10
+      MBUFTRACE/libpcap-1.10.5 sync), so T=min(3,1)=1.
+  C5b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/dev/nvmm/nvmm.c"
+      - "sys/arch/amd64/conf/GENERIC"
+      - "sys/arch/x86/x86/pmap.c"
+      default_state: "absent on the applicable host-virtualization surface"
+    commits: []
+    discussions:
+    - "https://man.netbsd.org/nvmm.4"
+    rationale: >-
+      NetBSD has no equivalent of HEKI (Hypervisor-Enforced Kernel Integrity) or
+      Windows HVCI. While NetBSD has the NVMM hypervisor (type-2, for guest VM
+      acceleration), NVMM is designed to run guest VMs, not to enforce the host
+      kernel's own integrity. NVMM does not use VT-x/AMD-V to restrict the host
+      kernel's page tables, code integrity, or control registers. No proposals or
+      patches for such a mechanism exist in NetBSD's development history.
+      Scored P=0 (absent).
+  C5b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - "tpm* at acpi?"
+      - "tpm* at isa? iomem 0xfed40000 irq 7"
+      source_files:
+      - "sys/dev/ic/tpm.c"
+      - "sys/dev/ic/tpmreg.h"
+      - "sys/dev/ic/tpmvar.h"
+      - "sys/dev/acpi/tpm_acpi.c"
+      default_state: >-
+        enabled in GENERIC kernel (tpm* at acpi?), but provides only raw
+        /dev/tpm access and entropy contribution
+    commits: []
+    discussions:
+    - "https://man.netbsd.org/tpm.4"
+    rationale: >-
+      NetBSD has a TPM driver (tpm(4)) in GENERIC providing raw /dev/tpm
+      access and entropy contribution. However, the mechanism evaluated
+      here is enclave-style protection of kernel key material, not mere
+      TPM device access. NetBSD has no kernel-level key sealing, no
+      TPM-backed keyring, no trusted-key subsystem, and no TEE/SGX
+      integration. The TPM is a passthrough device; kernel key material
+      is not protected by any enclave mechanism. P=0: the security
+      property (enclave-protected kernel keys) is absent.
+  C5c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/x86/x86/bus_dma.c"
+      default_state: "absent on the applicable amd64 DMA-isolation surface"
+    commits: []
+    discussions:
+    - "https://wiki.netbsd.org/projects/project/x86-iommu/"
+    rationale: >-
+      NetBSD does not have IOMMU support on x86/amd64. The wiki project page
+      'Add IOMMU support in x86 native ports' (last edited Jan 2025) describes
+      this as an active but unimplemented project. While NetBSD has the machine-
+      independent bus_dma(9) abstraction (which supports IOMMU on SPARC), the
+      x86-specific DMAR/AMD-Vi backend has never been implemented. There is no
+      acpidmar driver, no Intel VT-d parsing, no DMA remapping. The GENERIC
+      kernel config has no IOMMU or DMAR options. Without IOMMU, all DMA-capable
+      devices can access arbitrary physical memory, leaving the system vulnerable
+      to DMA attacks (e.g., Thunderbolt/FireWire). Scored P=0 (absent).
+  C5c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/x86/x86/pmap.c"
+      - "sys/conf/files"
+      default_state: "absent -- flat supervisor domain with no intra-kernel hardware compartments"
+    commits: []
+    discussions: []
+    rationale: >-
+      NetBSD has no mechanism for intra-kernel memory-protection domains. There
+      is no equivalent of Linux's proposed BULKHEAD (PKS-based domains), no use
+      of Intel Protection Keys for Supervisor (PKS), and no hardware-assisted
+      partitioning of kernel memory into isolated domains. The kernel operates
+      as a flat address space where all kernel code can access all kernel memory.
+      Scored P=0 (absent).
+  C5c.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/x86/x86/pmap.c"
+      default_state: "N/A"
+    commits: []
+    discussions: []
+    rationale: >-
+      ARM Memory Tagging Extension (MTE) is not applicable to the x86-64
+      evaluation target. MTE is an ARMv8.5-A feature; x86-64 has no equivalent
+      hardware memory tagging capability. This mechanism is N/A for all x86-64
+      evaluated systems. Scored P=0 (N/A -- hardware feature absent on target
+      architecture). Scored separately in the supplementary ARM64
+      column (see the arm64 overlay below).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/aarch64/include/armreg.h"
+        default_state: >-
+          No MTE-based isolation: NetBSD does not enable EL1 MTE, assigns
+          no memory tags, and has no tag-domain separation between kernel
+          subsystems or between kernel and DMA-visible memory.
+      rationale: >-
+        arm64: P=0 — MTE-based memory isolation is not implemented; NetBSD
+        has no MTE support at all (only ID-register decoding). Consistent
+        with the C1a.6/C1b.5 arm64 overlays: attack surface exists on
+        MTE-capable hardware, mechanism absent.
+  C5d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/init_main.c"
+      - "sys/arch/amd64/conf/GENERIC"
+      - "sys/rump/librump/rumpkern/rump.c"
+      default_state: "monolithic -- all kernel services run in ring 0"
+    commits: []
+    discussions:
+    - "https://wiki.netbsd.org/rumpkernel/"
+    - "https://en.wikipedia.org/wiki/Rump_kernel"
+    rationale: >-
+      NetBSD is a monolithic kernel. All core services -- networking stack, file
+      systems, device drivers, VM subsystem -- run in the same address space in
+      ring 0. While the rump kernel framework theoretically enables running
+      drivers in userspace (the 'anykernel' concept), in practice the GENERIC
+      kernel runs everything monolithically. Rump kernels are primarily used for
+      (1) testing/development and (2) opt-in FS mounting of untrusted media.
+      The standard deployment does not architecturally separate kernel services.
+      The 'Cells for NetBSD' project (kernel-enforced process isolation,
+      developed against netbsd-11 sources) was not merged into the
+      NetBSD 11.0 release either (no cells code or commits in the
+      netbsd-11 branch). Scored P=0 (no architectural separation in the
+      default GENERIC kernel deployment).
+  C5d.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/conf/files"
+      - "sys/arch/x86/x86/pmap.c"
+      default_state: "absent -- flat kernel address space without intra-kernel protection domains"
+    commits: []
+    discussions: []
+    rationale: >-
+      NetBSD has no internal compartmentalization mechanism to limit lateral
+      movement within the kernel. Once an attacker gains kernel code execution
+      in any subsystem, they have unrestricted access to all kernel memory,
+      all data structures, and all hardware. There are no privilege boundaries
+      between kernel subsystems, no capability model for kernel objects, and
+      no hardware-enforced partitioning (PKS, MTE, or similar). The module(7)
+      man page explicitly states 'there is no memory protection between modules
+      and the rest of the kernel'. Scored P=0 (absent).
+  C6.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - "GENERIC amd64: options INSECURE (active, disables securelevel)"
+      source_files:
+      - "sys/arch/amd64/conf/GENERIC"
+      default_state: "not available"
+    commits: []
+    discussions: []
+    rationale: >-
+      NetBSD does not support UEFI Secure Boot. Installation documentation
+      requires disabling Secure Boot in firmware. No signed bootloader
+      (e.g., shim) exists for NetBSD. While Veriexec provides file integrity
+      verification, it is not a boot-chain verification mechanism -- it
+      operates post-boot and verifies userspace files, not the bootloader
+      or kernel image during the boot process. P=0: no verified/secure boot
+      chain exists.
+  C6.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - "tpm* at acpi? (compiled in GENERIC)"
+      - "tpm* at isa? iomem 0xfed40000 irq 7 (compiled in GENERIC)"
+      source_files:
+      - "sys/dev/ic/tpm.c"
+      - "sys/arch/amd64/conf/GENERIC"
+      default_state: "driver present but no measured boot framework"
+    commits: []
+    discussions: []
+    rationale: >-
+      NetBSD 11.0 GENERIC kernel includes a TPM driver (tpm(4)) supporting
+      TPM 1.2 and 2.0 via ACPI and ISA, but only as a hardware driver and
+      entropy source (rnd(4)). There is no measured boot implementation --
+      no PCR extension during boot, no IMA-equivalent, no remote attestation
+      framework. The tpm-tools and trousers packages were imported in NetBSD
+      9.0 for userspace TPM access, but no kernel-level measured boot or
+      attestation infrastructure exists. P=0: the mechanism (measured boot
+      and attestation) is absent despite the TPM driver being present.
+  C6.3:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "veriexec=YES + veriexec_strict>=2 in rc.conf (default NO/0)"
+      - "options MODULAR + MODULAR_DEFAULT_AUTOLOAD (modules loadable)"
+      - "options INSECURE (securelevel stays at -1, modules loadable)"
+      source_files:
+      - "sys/kern/kern_module_vfs.c"
+      - "sys/kern/vfs_vnops.c"
+      - "sys/kern/kern_veriexec.c"
+      default_state: >-
+        Kernel modules (/stand/<arch>/<release>/modules/*.kmod) load via
+        module_load_vfs -> vn_open, which invokes the Veriexec hook
+        veriexec_openchk; at veriexec_strict >= 2 (IPS) access to any
+        monitored file with a wrong or missing SHA-256/384/512
+        fingerprint is denied, covering .kmod files listed in the
+        signatures database. Entirely opt-in: rc.conf defaults
+        veriexec=NO/veriexec_strict=0, and veriexecgen's default scan
+        paths do not include /stand (the admin must add it). No
+        cryptographic signature verification (hashes, not signatures)
+        and no Linux MODULE_SIG_FORCE equivalent.
+    commits:
+    - hash: "29b7b4241f272082507f492c4c9a452889f78179"
+      date: "2002-10-29"
+      description: "Add support for fingerprinted executables aka verified exec (Veriexec)"
+    - hash: "b5d09ef065754997f437eb01c07e12c2c06178d3"
+      date: "2006-07-14"
+      description: "Introduce fileassoc(9) and rework Veriexec on top of it"
+    discussions: []
+    rationale: >-
+      P=1: NetBSD can enforce kernel-module file integrity through
+      Veriexec - module files are opened via vn_open, whose
+      veriexec_openchk hook denies access to fingerprint-mismatched
+      files at strict level >= IDS/IPS. This mirrors the FreeBSD C6.3
+      precedent (mac_veriexec, a direct port of NetBSD Veriexec, scored
+      P=1/D=1/S=2 for the same hash-based KLD verification). D=1:
+      fully opt-in - veriexec=NO and strict=0 by default, /stand is not
+      in veriexecgen's default scan paths, and securelevel -1 (options
+      INSECURE) leaves module loading otherwise unrestricted. S=2:
+      SHA-2 fingerprint verification, not cryptographic signatures (no
+      key/PKI chain, database integrity rests on the admin protecting
+      the signatures file); unlike Linux MODULE_SIG_FORCE there is no
+      build-time signing infrastructure. A=2: in-tree fileassoc/veriexec
+      subsystem. T_age=3 (Veriexec since 2002); T_maintained=2
+      (kern_veriexec.c itself is dormant -- its only 11.0-cycle change
+      is a KASSERT-style cleanup -- and the vn_open/vfs_vnops path saw
+      only a couple of small unrelated bugfixes in the 18-month window),
+      so T=min(3,2)=2.
+  C6.4:
+    P: 1
+    D: 1
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "kern.securelevel sysctl"
+      - "securelevel= in /etc/rc.conf"
+      - "options INSECURE in GENERIC (defaults securelevel to -1)"
+      source_files:
+      - "sys/secmodel/securelevel/secmodel_securelevel.c"
+      - "sys/arch/amd64/conf/GENERIC"
+      - "etc/defaults/rc.conf"
+      default_state: >-
+        GENERIC kernel compiled with options INSECURE; rc.conf default
+        securelevel is empty. System runs at securelevel -1 out of the box.
+        Administrator must set securelevel > 0 in rc.conf and recompile
+        kernel without INSECURE to get full protection.
+    commits:
+    - hash: "a0a7429482099a77efd9ccbd414b351f56f5e89e"
+      date: "1994-05-05"
+      description: "lots of changes (introduces the securelevel variable and its 4.4BSD security-level semantics)"
+    - hash: "6887492c261e6d27ac6fa6294fb8552ffcfd0c49"
+      date: "2007-11-21"
+      description: "Make securelevel a secmodel of its own (secmodel_securelevel.c)"
+    discussions: []
+    rationale: >-
+      kern.securelevel provides runtime kernel integrity protection through
+      four levels: -1 (permanently insecure), 0 (insecure), 1 (secure: blocks
+      /dev/mem writes, raw disk writes on mounted FS, module loading, immutable
+      flag changes), 2 (highly secure: all raw disks read-only, no new mounts,
+      no clock setback, no PF rule changes, no CPU microcode loading). This is
+      a core BSD security model inherited from 4.4BSD, deeply integrated into
+      the kernel via secmodel_securelevel(9). However, the GENERIC amd64 kernel
+      ships with options INSECURE active (for X11 compatibility), and rc.conf
+      defaults securelevel to empty, so the system runs at securelevel -1 out
+      of the box. The mechanism exists (P=1) but requires explicit opt-in by
+      the administrator (D=1): set securelevel in rc.conf and recompile kernel
+      without INSECURE. When enabled at level 1+, protection is moderate
+      (S=2): prevents /dev/mem tampering, blocks module loading, protects file
+      flags, but does not verify kernel code integrity cryptographically.
+      Architectural depth is core (A=3): inherited from 4.4BSD, woven into the
+      security model. T_age=3: present since 4.4BSD (~1994), over 30
+      years old. T_maintained=1: the securelevel/secmodel code is dormant
+      -- zero commits to sys/secmodel/ or kern_auth.c in the 18-month
+      window ending at 11.0 -- so T=min(3,1)=1.
+  C6.5:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "pseudo-device veriexec (via include dev/veriexec.config)"
+      - "options FILEASSOC"
+      - "options VERIFIED_EXEC_FP_SHA256"
+      - "options VERIFIED_EXEC_FP_SHA384"
+      - "options VERIFIED_EXEC_FP_SHA512"
+      - "veriexec=YES in rc.conf (default NO)"
+      - "veriexec_strict=0|1|2|3 in rc.conf (default 0)"
+      source_files:
+      - "sys/dev/veriexec.config"
+      - "sys/kern/kern_veriexec.c"
+      - "sys/sys/verified_exec.h"
+      - "sbin/veriexecctl/"
+      - "usr.sbin/veriexecgen/"
+      default_state: >-
+        Veriexec pseudo-device compiled into GENERIC kernel since NetBSD 9.0
+        (all tier 1 and most tier 2 ports). However, veriexec=NO in default
+        rc.conf and veriexec_strict=0 (learning mode). No /etc/signatures
+        file shipped by default. Requires administrator to generate
+        fingerprint database and enable in rc.conf.
+    commits:
+    - hash: "29b7b4241f272082507f492c4c9a452889f78179"
+      date: "2002-10-29"
+      description: "Add support for fingerprinted executables aka verified exec (Veriexec)"
+    - hash: "b5d09ef065754997f437eb01c07e12c2c06178d3"
+      date: "2006-07-14"
+      description: "Introduce fileassoc(9) and rework Veriexec on top of it"
+    discussions: []
+    rationale: >-
+      Veriexec is NetBSD's in-kernel file integrity verification subsystem,
+      first appearing in NetBSD 2.0 (2004). It verifies cryptographic
+      fingerprints (SHA-256/384/512) of executables, libraries, and config
+      files at open()/exec() time. Four strict levels: 0=learning (warn
+      only), 1=IDS (deny mismatched), 2=IPS (deny mismatch + block writes
+      to monitored files), 3=lockdown (deny access to unmonitored files).
+      The pseudo-device is compiled into GENERIC since NetBSD 9.0, but
+      veriexec is disabled by default in rc.conf (veriexec=NO) and no
+      signatures file is shipped. Administrator must generate /etc/signatures
+      via veriexecgen(8) and set veriexec=YES. P=1: mechanism exists and is
+      compiled in. D=1: opt-in, requires explicit administrator action.
+      S=2: moderate -- uses hash-based verification (not asymmetric
+      signatures), so a root-level attacker who can modify /etc/signatures
+      before loading could bypass it; however at strict level 2+ the
+      signatures database itself is protected. A=2: in-tree subsystem with
+      dedicated kernel infrastructure (fileassoc(9), veriexec(9)), but not
+      a foundational kernel design element. T=1: first appeared in NetBSD 2.0
+      (2004), over 20 years old (T_age=3), but the subsystem is dormant --
+      zero commits across the whole Veriexec surface (kern_veriexec.c,
+      veriexec.config, verified_exec.h, veriexecctl, veriexecgen) in the
+      18-month window ending at the 11.0 release (the only recent trunk
+      activity, a 2026-01-04 janitorial dtrace/include sweep, is not in
+      the netbsd-11 branch), and the userland tools have not been
+      touched since 2020. T_maintained=1, so T=min(3,1)=1. Dependency cap:
+      C6.1 is P=0 — NetBSD 11.0 has no verified boot chain, so nothing
+      authenticates the kernel that performs verification or the
+      /etc/signatures database it reads. An attacker able to replace the boot
+      image defeats Veriexec entirely, so S_eff=1 despite S=2 in isolation.
+  C7a.1:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 2
+    T_maintained: 1
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/external/bsd/drm2/include/linux/nospec.h"
+      - "sys/external/bsd/drm2/dist/drm/drm_ioctl.c"
+      - "sys/external/bsd/drm2/dist/drm/i915/i915_query.c"
+      - "sys/arch/amd64/conf/GENERIC"
+      - "sys/arch/x86/x86/spectre.c"
+      default_state: >-
+        NetBSD's DRM compatibility layer provides a native
+        array_index_nospec() mask and uses it in DRM ioctl, i915, and AMD GPU
+        paths. i915drmkms is compiled into amd64 GENERIC. The global
+        machdep.spectre_v1.mitigated sysctl remains 0 because there is no
+        kernel-wide compiler/barrier policy outside these selected paths.
+    commits:
+    - hash: "23e975abd4654eabd38ff6e1a76ec4b04802426e"
+      date: "2021-12-19"
+      description: "array_index_nospec"
+    - hash: "649689f3827b94208148c9ace3c73e8bdb2bf6f4"
+      date: "2021-12-19"
+      description: "Fix mistake in array_index_nospec"
+    discussions: []
+    rationale: >-
+      P=1: array_index_nospec() provides real Spectre-v1 bounds masking in
+      default-GENERIC DRM/i915 paths; the status wiki and global mitigated=0
+      sysctl describe the absence of a kernel-wide policy, not total absence.
+      D=2 because the annotated DRM paths are compiled into the standard kernel.
+      S=1; decisive property: masking is confined to a
+      narrow imported driver subset and leaves the rest of the kernel
+      unannotated. A=2: integrated through the DRM compatibility layer but not
+      a core-kernel framework. T_age=2 (2021); T_maintained=1 because the native
+      helper has had no mechanism changes in the 18-month window, so T=1.
+  C7a.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "makeoptions SPECTRE_V2_GCC_MITIGATION=1"
+      - "options SPECTRE_V2_GCC_MITIGATION"
+      source_files:
+      - sys/arch/x86/x86/spectre.c
+      - sys/arch/amd64/conf/GENERIC
+      default_state: >-
+        Software retpoline enabled by default in GENERIC
+        (SPECTRE_V2_GCC_MITIGATION=1). Hardware mitigations (IBRS,
+        Enhanced IBRS, AMD DIS_IND) auto-detected and applied at boot
+        via cpu_speculation_init(). IBPB issued on context switch when
+        IBRS is active. Sysctls: machdep.spectre_v2.hwmitigated,
+        machdep.spectre_v2.swmitigated, machdep.spectre_v2.method.
+    commits:
+    - hash: "a28f31b51dbc61964eda885134c22e04f4e36a77"
+      date: "2018-03-14"
+      description: "Spectre V2 mitigation for certain families of AMD CPUs"
+    - hash: "0223f0c87225a7e2d342c0c69632d6f21c65b7ce"
+      date: "2018-03-28"
+      description: "Add the IBRS mitigation for SpectreV2 on amd64"
+    - hash: "ae527bc777deaf3f3b2e1b5aa5ce0ea9a96d6f89"
+      date: "2018-04-08"
+      description: "Turn on GCC Spectre v2 mitigation options (retpoline) in GENERIC"
+    discussions: []
+    rationale: >-
+      NetBSD implements Spectre v2 (BTI) mitigation through both software
+      (GCC retpoline, enabled by default in GENERIC via
+      SPECTRE_V2_GCC_MITIGATION=1) and hardware (Intel IBRS, Enhanced IBRS,
+      AMD DIS_IND auto-detected at boot). IBPB is issued on context switch
+      for IBRS path. Limitations: no retpoline for ASM parts, no RSB-stuffing
+      for Skylake. D=2 (default-on for retpoline; hardware auto-applied when
+      detected). S=2 (moderate: retpoline covers C indirect calls but not ASM;
+      no BHI/Retbleed-era mitigations). A=2 (in-tree, integrated into build
+      system and CPU init). T_age=3 (present since NetBSD 8.0 in 2018),
+      but T_maintained=1: spectre.c is dormant -- zero commits in the
+      18-month window ending at 11.0 (last change 2021), with no
+      BHI/Retbleed/SRSO-era follow-up -- so T=min(3,1)=1.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/x86/x86/spectre.c"
+        default_state: >-
+          NetBSD has no aarch64 branch-predictor hardening: no SMCCC
+          ARCH_WORKAROUND_1 firmware calls, no branch-predictor
+          invalidation on kernel entry or context switch, and no CSV2/BHB
+          handling. The retpoline/IBRS framework in spectre.c is x86-only.
+          The aarch64 tree's only speculation-related code is a comment in
+          fpu.c about FPU register clearing.
+      rationale: >-
+        arm64: P=0 — Spectre v2 mitigation is not implemented for aarch64.
+        Affected cores are in NetBSD's evbarm support list (e.g.
+        Cortex-A57/A72 require firmware branch-predictor invalidation,
+        which Linux performs via SMCCC ARCH_WORKAROUND_1), so the attack
+        surface exists and the mechanism is scored absent rather than N/A.
+  C7a.3:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "machdep.spectre_v4.mitigated (sysctl, user-settable)"
+      - "machdep.spectre_v4.method (sysctl, read-only)"
+      source_files:
+      - sys/arch/x86/x86/spectre.c
+      default_state: >-
+        Disabled by default (v4_mitigation_enabled=false), as recommended
+        by AMD. User must enable via sysctl -w machdep.spectre_v4.mitigated=1.
+        Supports Intel SSBD, AMD SSB_NO, and AMD NONARCH variants
+        (F15H/F16H/F17H). Kernel auto-detects available method but does
+        not activate without user intervention.
+    commits:
+    - hash: "058ce8c21cecd5833e8b794c3763e30c78f2556e"
+      date: "2018-05-22"
+      description: "Mitigation for SpectreV4, based on SSBD"
+    discussions: []
+    rationale: >-
+      NetBSD implements Spectre v4 (SSBD) mitigation with Intel SSBD and
+      AMD NONARCH variants. The code auto-detects available methods at boot
+      but does NOT enable by default (disabled per AMD recommendation).
+      User must explicitly enable via machdep.spectre_v4.mitigated=1.
+      D=1 (opt-in: present but disabled by default, requires manual sysctl).
+      S=2 (moderate: standard SSBD MSR approach, comparable to other OSes).
+      A=2 (in-tree: integrated into spectre.c mitigation framework with
+      per-CPU apply logic and sysctl control). T_age=3 (since NetBSD
+      8.0/2018) but T_maintained=1 (spectre.c dormant, zero commits in
+      the 18-month window ending at 11.0), so T=1.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/aarch64/include/armreg.h"
+        - "sys/arch/aarch64/aarch64/procfs_machdep.c"
+        default_state: >-
+          NetBSD decodes the SSBS field of ID_AA64PFR1_EL1 and reports the
+          ssbs hwcap via procfs, but never sets PSTATE.SSBS or SCTLR.DSSBS,
+          makes no SMCCC ARCH_WORKAROUND_2 firmware calls, and exposes no
+          sysctl. The machdep.spectre_v4 framework in spectre.c is
+          x86-only.
+      rationale: >-
+        arm64: P=0 — Spectre v4 (speculative store bypass) mitigation is
+        not wired up on aarch64: the SSBS hardware control is only decoded
+        for feature identification, never enabled, and no firmware
+        workaround is invoked. Attack surface exists on affected aarch64
+        cores, mechanism absent.
+  C7a.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/conf/Makefile.kern.inc"
+      - "sys/arch/amd64/amd64/locore.S"
+      default_state: "No SLS mitigation implemented"
+    commits: []
+    discussions: []
+    rationale: >-
+      NetBSD does not implement Straight-Line Speculation (SLS) mitigation.
+      No -mharden-sls compiler flag is used in the kernel build, and no
+      INT3-after-RET or INT3-after-indirect-branch padding is applied.
+      The GENERIC kernel config shows SPECTRE_V2_GCC_MITIGATION uses
+      -mindirect-branch flags but not -mharden-sls. The spectre.c source
+      contains no SLS-related code. This is a newer vulnerability class
+      (CVE-2021-26341, AMD-specific on Zen1/Zen2) and NetBSD has not
+      adopted the mitigation. P=0 absent.
+  C7b.1:
+    status: xref
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: >-
+      Cross-reference to C3b.1 (SVS / Separate Virtual Space). NetBSD's
+      Meltdown mitigation is SVS, which unmaps kernel pages when running
+      in userspace. Evaluated under C3b.1 per taxonomy convention.
+      SVS is enabled by default on vulnerable Intel CPUs in GENERIC kernel
+      (options SVS). Controlled via machdep.svs.enabled sysctl.
+  C7b.2:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/dev/nvmm/x86/nvmm_x86_vmx.c"
+      default_state: >-
+        NVMM's VMX backend mitigates L1TF for guests: vmx_init_l1tf()
+        checks IA32_ARCH_SKIP_L1DFL_VMENTRY (skips on non-vulnerable
+        CPUs) and, when the microcode exposes CPUID_SEF_L1D_FLUSH, adds
+        MSR_IA32_FLUSH_CMD = L1D_FLUSH to the VM-entry MSR-load list, so
+        the L1 data cache is flushed on every guest entry. Auto-enabled,
+        no sysctl to disable. The core kernel has NO bare-metal L1TF
+        mitigation: no PTE inversion for non-present PTEs and no page-0
+        blacklist.
+    commits:
+    - hash: "85679641455fefa7d6013755b57121ab96b29ef8"
+      date: "2019-02-13"
+      description: "Add Intel-VMX support in NVMM (vmx_init_l1tf: L1D flush MSR-load on VM entry mitigates L1TF)"
+    discussions: []
+    rationale: >-
+      P=1: NVMM flushes the L1 data cache on every VM entry on vulnerable
+      Intel CPUs (vmx_init_l1tf + the VM-entry MSR-load list in
+      nvmm_x86_vmx.c) - the same hypervisor-side L1TF mitigation OpenBSD
+      (vmm, P=1/S=2) and FreeBSD (bhyve, P=1/S=3) are credited for. D=2:
+      applied automatically whenever NVMM/VMX runs on affected hardware
+      with L1D_FLUSH microcode; not disableable. S=1: virtualization-only
+      coverage - unlike Linux/FreeBSD there is no PTE inversion for
+      non-present PTEs and no page-0/blacklist handling, so the
+      bare-metal L1TF vector is unaddressed and protection depends on the
+      microcode-provided flush. A=2: in-tree NVMM subsystem (pseudo-device,
+      loadable module). T_age=3 (NVMM VMX since 2019); T_maintained=2
+      (NVMM receives sporadic bug-fix maintenance, 8 commits in the
+      18-month window ending at 11.0, about half non-trivial -- CPUID
+      hypervisor-leaf work and an NMI-dispatch fix); T = min(3,2) = 2.
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/aarch64/aarch64/cpu.c"
+        - "sys/arch/aarch64/aarch64/pmap.c"
+        default_state: >-
+          L1TF (Foreshadow) exploits Intel-specific L1 data cache
+          speculation on non-present PTEs; the mitigations (PTE inversion,
+          L1D flush on VM entry) are Intel-only. aarch64 cores are not
+          affected.
+      rationale: >-
+        arm64: N/A — L1 Terminal Fault is Intel-specific; aarch64 has no
+        equivalent attack surface, so the absent mitigation does not count
+        against the ARM64 column (P=0 on x86-64 becomes N/A here).
+  C7c.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "machdep.mds.mitigated (sysctl, user-settable)"
+      - "machdep.mds.method (sysctl, read-only, shows [VERW] or (none))"
+      - "machdep.taa.mitigated (sysctl, user-settable)"
+      - "machdep.taa.method (sysctl, read-only)"
+      source_files:
+      - sys/arch/x86/x86/spectre.c
+      default_state: >-
+        MDS: auto-enabled if CPU microcode provides MD_CLEAR capability
+        (machdep.mds.mitigated=1 auto-set). Uses VERW instruction.
+        TAA: separate sysctl (machdep.taa.mitigated), with methods
+        TAA_NO/MDS/RTM_DISABLE. TAA may fall back to MDS VERW mitigation.
+        Requires updated CPU microcode via BIOS or pkgsrc
+        sysutils/intel-microcode-netbsd.
+    commits:
+    - hash: "74b8eea55e36c8cefee4a29278aca4607e1a22dd"
+      date: "2019-05-14"
+      description: "Mitigation for INTEL-SA-00233: Microarchitectural Data Sampling (MDS)"
+    - hash: "f7244b19a603a9691ec93a96bf617058fe2c5b1e"
+      date: "2019-11-12"
+      description: "Mitigation for CVE-2019-11135: TSX Asynchronous Abort (TAA)"
+    discussions: []
+    rationale: >-
+      NetBSD implements MDS and TAA mitigations in spectre.c. MDS uses
+      VERW instruction (MDS_MITIGATION_VERW), auto-enabled when microcode
+      provides MD_CLEAR. TAA has separate detection with methods TAA_NO,
+      TAA_MDS (falls back to VERW), and TAA_RTM_DISABLE. Both have sysctl
+      controls for runtime toggling. MMIO stale data is not explicitly
+      addressed as a separate mitigation (no MMIO-specific code found).
+      D=2 (default-on when microcode is present; microcode dependency means
+      some systems may not have it auto-enabled). S=2 (moderate: standard
+      VERW approach, covers MDS/TAA but not all MMIO variants). A=2
+      (in-tree: integrated into spectre.c framework with per-CPU apply
+      and sysctl). T_age=3 (MDS and TAA since 2019) but T_maintained=1
+      (spectre.c dormant -- zero commits in the 18-month window ending
+      at 11.0, and still no MMIO-Stale-Data-specific handling), so T=1.
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/aarch64/aarch64/cpu.c"
+        - "sys/arch/aarch64/aarch64/cpu_machdep.c"
+        default_state: >-
+          MDS / TAA / MMIO Stale Data are Intel-specific sampling
+          vulnerabilities (VERW-based buffer clearing, Intel TSX). aarch64
+          cores are not affected; NetBSD's machdep.mds/machdep.taa sysctls
+          and the VERW mitigation in spectre.c are x86-only.
+      rationale: >-
+        arm64: N/A — microarchitectural data sampling (MDS/TAA/MMIO) is
+        Intel-only; aarch64 has no equivalent buffer-sampling surface.
+  C7c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options:
+      - "smtoff=YES in /etc/rc.conf (manual SMT disable, not STIBP)"
+      source_files: []
+      default_state: >-
+        No STIBP implementation. SMT can be disabled manually via BIOS
+        or smtoff=YES in /etc/rc.conf, but this is a blunt workaround,
+        not a targeted cross-thread speculation isolation mechanism.
+    commits: []
+    discussions: []
+    rationale: >-
+      NetBSD does not implement STIBP (Single Thread Indirect Branch
+      Predictors). The spectre.c source contains no STIBP references
+      and no IA32_SPEC_CTRL STIBP bit management. The only cross-thread
+      defense available is manual SMT disabling via BIOS or smtoff=YES
+      in /etc/rc.conf, which is documented on the MDS/TAA wiki pages as
+      an additional hardening step. This blunt approach disables
+      hyperthreading entirely rather than providing targeted per-thread
+      speculation isolation. P=0 because STIBP as a mechanism is not
+      implemented; manual SMT disable is a separate operational control.
+    arm64:
+      P:
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/aarch64/aarch64/cpu.c"
+        - "sys/arch/aarch64/aarch64/cpuswitch.S"
+        default_state: >-
+          STIBP is an x86 IA32_SPEC_CTRL MSR feature controlling
+          cross-SMT-thread branch-predictor sharing. The aarch64 SoCs
+          supported by NetBSD/evbarm (Cortex-A53/A57/A72 class, Apple M1)
+          do not implement SMT, so the cross-thread predictor surface does
+          not exist.
+      rationale: >-
+        arm64: N/A — STIBP is x86-only and the supported aarch64 cores have
+        no SMT; there is no cross-hyperthread speculation surface to
+        isolate (P=0 on x86-64 becomes N/A here).
+  C1e.6:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/kern/exec_elf.c"
+      - "sys/uvm/uvm_map.c"
+      default_state: >-
+        NetBSD's pmap layer on amd64 does not support execute-only
+        mappings. The ELF image activator maps text as
+        VM_PROT_READ|VM_PROT_EXECUTE.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no execute-only memory primitive.
+  C1e.7:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/uvm/uvm_mmap.c"
+      - "sys/uvm/uvm_mremap.c"
+      default_state: >-
+        NetBSD has no mimmutable/mseal/PROT_MAX equivalent. mprotect,
+        munmap, and mremap are unrestricted on user mappings.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no immutable-mapping API.
+  C1e.8:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/conf/kern.ldscript"
+      - "sys/arch/amd64/conf/kern.ldscript.kaslr"
+      - "sys/arch/i386/conf/kern.ldscript"
+      default_state: >-
+        The default amd64 (and i386) GENERIC kernel linker scripts end the
+        .text output section with "} =0xCC", filling all alignment padding
+        within .text (up to the 2 MB large-page boundary set by
+        ALIGN(__LARGE_PAGE_SIZE)) with int3 instructions, so any jump into
+        the padding faults immediately. Also present in the KASLR and Xen
+        ldscripts. No equivalent fill in the aarch64 ldscript.
+    commits:
+    - hash: "295e874f10fee0f094a7b313438dcaa837cbf739"
+      date: "2017-08-18"
+      description: "Fill the .text padding with 0xcc (int3), in such a way that any jump into this area will automatically fault"
+    discussions: []
+    rationale: >-
+      P=1: NetBSD's default kernel linker scripts fill executable .text
+      padding with int3 (0xCC) - the same trapsled hardening OpenBSD is
+      scored P=1 for: a stray/misaligned jump or fall-through into
+      alignment padding traps deterministically instead of sliding to the
+      next function. (The taxonomy os_hint "limited" understates this;
+      see the deviation note in the report.) D=2: active in stock GENERIC
+      amd64/i386 builds. S=2: covers intra-.text alignment padding -
+      bounded surface, comparable to OpenBSD's trapsleds (NetBSD lacks
+      the complementary compiler-side NOP-sled replacement OpenBSD added
+      to gas, hence not stronger than S=2). A=2: build/linker-script
+      integration. T_age=3 (2017, 8+ years); T_maintained=1 (dormant:
+      the linker scripts are byte-identical to 10.1 and saw zero commits
+      in the 18-month window ending at the 11.0 release; the new
+      -z noseparate-code flag affects PT_LOAD segmentation only, not the
+      section-level =0xCC fill), so T = min(3,1) = 1.
+      arm64 note: the aarch64 ldscript has no equivalent fill, so this
+      remains an amd64/i386 hardening.
+  C4.8:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - sys/arch/x86/x86/syscall.c
+      - sys/arch/amd64/amd64/trap.c
+      - sys/kern/sys_syscall.c
+      default_state: >-
+        syscall() in sys/arch/x86/x86/syscall.c dispatches on the syscall
+        number without validating the caller PC; any executable user mapping
+        may execute the syscall instruction.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no syscall-origin pinning. NetBSD has no
+      msyscall(2)/pinsyscalls(2) analogue; syscalls are accepted from any
+      executable text.
+  C5e.1:
+    P: 1
+    D: 2
+    S: 1
+    A: 2
+    T_age: 3
+    T_maintained: 1
+    implementation:
+      config_options:
+      - "options DDB (in-kernel debugger, default-on in GENERIC)"
+      - "pseudo-device swwdog (software watchdog, swwdog(4); compiled into GENERIC)"
+      - "kern.dump_on_panic / dumponpanic (default 1)"
+      - "options DIAGNOSTIC (consistency checks; commented out in GENERIC)"
+      - "options HEARTBEAT + options HEARTBEAT_MAX_PERIOD_DEFAULT=15 (default-on in amd64 GENERIC and evbarm GENERIC64; runtime knob kern.heartbeat.max_period, 0 disables)"
+      source_files:
+      - "sys/kern/subr_prf.c"
+      - "sys/kern/kern_heartbeat.c"
+      - "sys/dev/sysmon/sysmon_wdog.c"
+      - "sys/dev/sysmon/swwdog.c"
+      - "sys/arch/amd64/conf/GENERIC"
+      default_state: >-
+        Monolithic kernel: a kernel fault cannot be contained or
+        recovered in place. panic() (subr_prf.c vpanic) ends in
+        kern_reboot(RB_AUTOBOOT | RB_DUMP) — an automatic crash dump
+        (savecore(8)) plus reboot, i.e. whole-machine recovery — with
+        dumponpanic defaulting to 1. However, amd64 GENERIC ships
+        options DDB and the default db_onpanic value is 1 (DDB_ONPANIC
+        defaults to 1 in db_variables.c even though it is commented out
+        in the config), so by default a panic first drops into the
+        in-kernel debugger (operator halt / diagnosis) before reaching
+        the reboot path; setting ddb.onpanic=0 yields unattended
+        reboot+dump. The sysmon watchdog framework (sysmon_wdog.c,
+        wdog(4)/wdogctl(8)) plus the swwdog(4) software watchdog provide
+        liveness recovery on hang, but ship DISARMED (WDOG_MODE_DISARMED)
+        and must be armed via wdogctl(8) — opt-in. NetBSD 11.0 adds
+        heartbeat(9) (kern_heartbeat.c): every CPU periodically verifies
+        from hard-interrupt context that the system clock and the other
+        CPUs are making progress, sends a defibrillation IPI to a stalled
+        CPU to capture its stack, and panics if the CPU stays silent — a
+        default-on soft/hard-lockup detector (options HEARTBEAT +
+        HEARTBEAT_MAX_PERIOD_DEFAULT=15 in amd64 GENERIC; started from
+        main() via heartbeat_start(); tunable/disable via the
+        kern.heartbeat.max_period sysctl, 0 = off). The detected fault
+        still funnels into the coarse panic path (DDB by default, then
+        reboot+dump); there is still NO kdump-style live kernel-state
+        recovery and NO per-subsystem fault containment.
+    commits:
+    - hash: "e67f5e66bc9e376193bc65187aa14850d5631138"
+      date: "2000-11-05"
+      description: "Split the envsys and watchdog parts of sysmon into their own files"
+    - hash: "ddd2ade2528218b42daf6738ea763c1fa597b7d4"
+      date: "2005-01-09"
+      description: "Add a software watchdog timer facility (swwdog)"
+    - hash: "755577dd325ce5269043634de7e9ce8980ae3d22"
+      date: "2023-07-07"
+      description: "heartbeat(9): New mechanism to check progress of kernel."
+    - hash: "143c2f4eb0b64a36ea2df71bbfb9083658608f2d"
+      date: "2023-07-15"
+      description: "x86: Enable HEARTBEAT by default in GENERIC."
+    discussions: []
+    rationale: >-
+      In a monolithic kernel there is no in-kernel fault containment: a
+      kernel fault panics. P=1 because NetBSD provides availability
+      primitives — automatic reboot+crash-dump on panic (default-on),
+      the sysmon hardware/software watchdog framework for liveness
+      recovery (opt-in, disarmed by default), and default-on DDB for
+      fault detection/diagnosis. D=2: since 11.0 the active
+      fault-detection facet ships armed — heartbeat(9) hard-lockup
+      detection is enabled by default in GENERIC (HEARTBEAT, max period
+      15 s, disable via kern.heartbeat.max_period=0) alongside the
+      default-on reboot+crash-dump path; only the sysmon/swwdog
+      watchdogs remain opt-in, and on GENERIC DDB still interactively
+      halts on panic rather than auto-recovering. S=1:
+      recovery is a full reboot, not fault containment; heartbeat(9) now
+      detects CPU lockups but recovery remains whole-machine
+      panic/reboot; DIAGNOSTIC is off in GENERIC. A=2:
+      in-tree and integrated (sysmon framework, panic/dump path) but no
+      per-fault containment architecture (cf. microkernel per-component
+      restart). T_age=3 (sysmon watchdog 2000, swwdog 2005, panic/DDB
+      foundational; heartbeat facet 2023); T_maintained=1 (no non-trivial
+      commits to the fault-detection/recovery code on the netbsd-11
+      branch in the 18-month window ending at release — heartbeat last
+      touched 2024-08, swwdog 2024-11), so T=min(3,1)=1.
+      Mirrors OpenBSD C5e.1, with NetBSD's sysmon wdog framework +
+      swwdog, default-on heartbeat(9) and DDB-on-panic-by-default as the
+      local specifics.
+  C5e.2:
+    P: 1
+    D: 2
+    S: 1
+    A: 1
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "setrlimit RLIMIT_CPU (login.conf 'cputime' class limit; default unlimited / RLIM_INFINITY)"
+      - "setpriority/nice (BSD time-share priority) + POSIX sched_setscheduler SCHED_FIFO/SCHED_RR (root-only real-time classes, sys_sched.c)"
+      source_files:
+      - "sys/kern/kern_synch.c"
+      - "sys/kern/kern_resource.c"
+      - "sys/kern/sched_4bsd.c"
+      default_state: >-
+        Per-process CPU-time budget is enforced via RLIMIT_CPU: the
+        periodic sched_pstats() callout in kern_synch.c sums per-process
+        runtime and, when runtm >= rlim_cur, raises SIGXCPU at the soft
+        limit (and bumps the soft limit by 5s), or SIGKILL once
+        runtm >= rlim_max (hard limit). The default RLIMIT_CPU is
+        RLIM_INFINITY (no cap, set in limit0) unless lowered via
+        login.conf 'cputime'. Native scheduling is BSD time-share
+        (sched_4bsd, or the SMP-oriented sched_m2) driven by
+        nice/setpriority, plus the native POSIX sched_setscheduler(2)
+        SCHED_FIFO/SCHED_RR real-time classes (sys_sched.c; only the
+        rtprio(1)-style utility interface lives in the compat layers).
+        There is NO cgroup-style CPU bandwidth/quota (cpu.max), NO
+        SCHED_DEADLINE/EDF admission control, and NO per-cpu% cap
+        (cf. FreeBSD RCTL pcpu).
+    commits:
+    - hash: "61f282557f0bc41c0b762c629a2f4c14be8b7591"
+      date: "1993-03-21"
+      description: "initial import of 386bsd-0.1 sources (mechanism inherited as ancestral BSD functionality)"
+    - hash: "93dc43bb50150ac8a1d5973a1c71aec7cb078f11"
+      date: "2011-10-05"
+      description: "When killing a process due to RLIMIT_CPU, also log a message with LOG_NOTICE, and print a message to the user with uprintf"
+    discussions: []
+    rationale: >-
+      P=1: RLIMIT_CPU is a real in-kernel CPU-time budget that kills a
+      runaway process (SIGXCPU soft, SIGKILL hard, enforced in
+      sched_pstats), defending CWE-400 CPU starvation, plus
+      nice/setpriority scheduler control. (The taxonomy os_hint "no
+      CPU-budget enforcement (P=0)" is incorrect — see the deviation
+      note in the report; this follows the OpenBSD C5e.2 precedent.)
+      D=2: the rlimit/sched_pstats machinery and priority scheduler are
+      always present and configurable (login.conf), though the cap
+      defaults to unlimited. S=1: weak — a coarse total-CPU-seconds cap
+      plus priorities, NOT temporal isolation; no CPU-bandwidth/quota,
+      no deadline scheduling, no per-cpu% cap. A=1: bolt-on resource
+      accounting layered on the time-share scheduler, not an
+      architectural temporal-isolation design. T_age=3 (RLIMIT_CPU
+      enforcement is ancestral 4.4BSD, present since the 1993 import);
+      T_maintained=2 (sporadic on the netbsd-11 branch in the 18-month
+      window ending at release: one non-trivial fix, the 2026-04
+      sched_4bsd l_estcpu upper-bound pull-up), so T=min(3,2)=2.
+  C5e.3:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "setrlimit RLIMIT_DATA/STACK/RSS/MEMLOCK/NOFILE/NPROC/NTHR/FSIZE/CORE"
+      - "login.conf class limits (datasize, stacksize, maxproc, openfiles, memorylocked)"
+      - "kern.maxproc / kern.maxfiles / kern.maxlwp sysctls"
+      - "UFS disk quotas (quota1/quota2; quota(1), edquota(8), quotacheck(8), quotaon(8); opt-in via fstab)"
+      source_files:
+      - "sys/kern/kern_proc.c"
+      - "sys/kern/kern_fork.c"
+      - "sys/kern/kern_uidinfo.c"
+      - "sys/ufs/ufs/ufs_quota.c"
+      default_state: >-
+        Per-process resource quotas via setrlimit(2)/RLIMIT_* with real
+        default-on limits set in limit0 (kern_proc.c) and uvm_init_limits:
+        RLIMIT_NOFILE (= min(maxfiles, nofile)), RLIMIT_NPROC
+        (= min(maxproc, maxuprc)), RLIMIT_NTHR (= maxlwp/2),
+        RLIMIT_MEMLOCK (= avail/3), RLIMIT_DATA (DFLDSIZ) and
+        RLIMIT_STACK (DFLSSIZ); RLIMIT_CPU and RLIMIT_AS default to
+        unlimited. Per-uid process counting (chgproccnt in
+        kern_uidinfo.c) is enforced in fork1() (kern_fork.c): a fork is
+        denied with EAGAIN once the global tnprocs >= maxproc, or once
+        the per-uid count exceeds RLIMIT_NPROC (subject to a kauth
+        privilege override). Global kern.maxproc / kern.maxfiles /
+        kern.maxlwp sysctls bound system-wide consumption. login.conf
+        class limits (datasize, maxproc, openfiles, memorylocked) are
+        applied at login. UFS filesystem disk quotas (quota1 + the newer
+        quota2 on-disk format, ufs_quota.c) are available but opt-in
+        (enabled per-filesystem). There is no hierarchical cgroup-style
+        quota framework (cf. Linux memcg / FreeBSD RACCT).
+    commits:
+    - hash: "540aa31a08a47e6c6596a9a7c60ff97130643569"
+      date: "1994-05-19"
+      description: "update to lite (per-uid proc counting / RLIMIT_NPROC fork enforcement, chgproccnt)"
+    - hash: "063f96f3c249ff3323f6625e7bd0ffbd70cebb80"
+      date: "2011-03-06"
+      description: "Merge the bouyer-quota2 branch: modernised disk quota system (quota2, versioned quotactl)"
+    discussions: []
+    rationale: >-
+      P=1: comprehensive resource-exhaustion enforcement — per-process
+      RLIMIT_* with default-on caps, per-uid proc counting (chgproccnt in
+      kern_uidinfo.c, enforced in kern_fork.c), global
+      maxproc/maxfiles/maxlwp sysctls, and UFS disk quotas; defends
+      CWE-400/CWE-770. D=2: rlimits ship with real default-on limits
+      (NOFILE, NPROC=min(maxproc,maxuprc), NTHR, MEMLOCK, DATA, STACK)
+      and per-uid fork counting is always enforced, while disk quotas are
+      opt-in. S=2: effective per-process/per-uid/per-filesystem caps, but
+      flat — no hierarchical cgroup-style nesting and no unified
+      hierarchical quota framework (quota2 modernises the on-disk format
+      but is still per-uid/per-gid). A=2: in-tree, well-integrated,
+      actively maintained. T_age=3 (rlimits and per-uid counting are
+      ancestral 4.4BSD; UFS quotas long-standing); T_maintained=2
+      (sporadic on the netbsd-11 branch in the 18-month window ending at
+      release: the 2025-07 O_CLOFORK kernel work in kern_fork.c and a
+      2026-04 sysctl_doeproc fix in kern_proc.c; kern_uidinfo.c and
+      ufs_quota.c untouched), so T=min(3,2)=2.
+      Mirrors OpenBSD C5e.3. Cross-reference C4.6 (chroot scores
+      the isolation/visibility facet; C5e.3 scores the availability/quota
+      facet — no double-count).
+  C7d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/uvm/uvm_page.c"
+      default_state: >-
+        No cache-partitioning or time-protection mechanism. NetBSD has
+        no Intel CAT/RDT / resctrl support (no IA32_PQR_ASSOC or L3 QoS
+        MSR programming, no LLC allocation) and no ARM MPAM. UVM does
+        implement page colouring (uvmexp.ncolors / colormask, per-colour
+        free-list buckets pgb_colors[], re-coloured "as cache sizes are
+        discovered" in uvm_page.c), but this is a cache-conflict-miss
+        PERFORMANCE optimization on a single machine-wide free list —
+        any allocation can draw from any colour bucket, so it provides
+        no per-domain/per-process cache-isolation guarantee and is not a
+        security partition. The micro-architectural timing-channel
+        surface (shared LLC, shared structures) therefore exists but is
+        not addressed by any dedicated partitioning mechanism. SMT can
+        be disabled manually (scored under C7c.2) and SVS/KPTI provides
+        page-table isolation (scored under C3b.1), which incidentally
+        reduce some timing channels, but neither is cache/time
+        partitioning.
+    commits: []
+    discussions: []
+    rationale: >-
+      No dedicated time-protection / cache-partitioning mechanism in
+      NetBSD 11.0. No Intel CAT/RDT, no ARM MPAM, no temporal
+      partitioning. UVM page colouring exists but is a performance
+      optimization (global colour-balanced free list, no per-domain
+      isolation), not a security partition, so it does not raise P. The
+      timing-channel surface exists, so P=0 (absent), not null (N/A) —
+      mirroring the OpenBSD C7d.1 "P=0 not N/A" rationale. Adjacent
+      mitigations (SMT disable C7c.2, SVS/KPTI C3b.1) are scored
+      elsewhere. P=0 ⇒ D=S=A=T=0.

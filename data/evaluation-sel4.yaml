@@ -1,0 +1,2156 @@
+# yaml-language-server: $schema=schema/evaluation.schema.json
+# seL4 (L4-family formally verified microkernel, C) kernel hardening evaluation.
+#
+# Primary target: AArch64 (ARMv8-A, MMU) verification build on the Xilinx Zynq
+#   UltraScale+ (`zynqmp`, Cortex-A53) — the platform the pinned preset
+#   configs/AARCH64_zynqmp_verified.cmake selects and against which the TCB
+#   measurement is resolved. Chosen as the fair, same-ISA peer of the
+#   ARM-Cortex-M RTOS cohort (FreeRTOS/Zephyr/NuttX/Contiki/Tock): the
+#   comparison axis is exactly Cortex-M MPU (partial isolation) vs Cortex-A MMU
+#   (proven isolation). Other verified AArch64 platforms (i.MX8, Jetson TX2/TX1,
+#   odroid, rockpro64) differ in core type — notably TX2 is out-of-order
+#   Cortex-A57/Denver2 while the pinned zynqmp Cortex-A53 is in-order — so
+#   speculation-related applicability is decided on the pinned A53, not on the
+#   platform family as a whole.
+# Comparator configs:
+#   - RISC-V RV64 (Sv39 MMU), verified config (no FPU, no fast path): carries the
+#     most complete proof stack — functional correctness + integrity +
+#     confidentiality/non-interference + binary-level translation validation
+#     (compiler and linker not trusted). Ties to the suite's RISC-V targets.
+#   - x86-64 (x64), verified config (without VT-x and VT-d, no fast path):
+#     functional-correctness proof only; lets x86-only mitigations (SMEP/SMAP/
+#     KPTI/CET, VT-d IOMMU, Spectre class) be discussed as comparator rather than
+#     N/A. Connects to the Fiasco/BSD evals.
+#   - ARMv7/AArch32 (i.MX6 sabre), verified config without hypervisor extensions
+#     and without FPU: the historical full-stack target (FC + integrity +
+#     confidentiality + binary + user-level initialiser). Noted for provenance.
+#   - MCS (mixed-criticality, capability-based scheduling-context) kernel vs the
+#     classic kernel: a config axis, not a separate scored target. MCS is OFF in
+#     the scored build and its verification is in progress.
+#
+# VERIFICATION-COVERAGE MATRIX at the evaluated revision, per the in-tree
+# sources/sel4/CAVEATS.md (byte-identical at 881de507 and at the current clone
+# HEAD) and docs.sel4.systems verified-configurations. Every entry is
+# configuration-specific; the configurations are NOT interchangeable:
+#   functional correctness (C->abstract spec):
+#     AArch32 (with and without hyp, no SMMU, no FPU, fast path);
+#     AArch64 (hypervisor extensions ONLY, no SMMU, with FPU, fast path);
+#     RISC-V RV64 (no FPU, no fast path); x86-64 (without VT-x and VT-d, no fast path)
+#   integrity (no write without authority):
+#     AArch32 (without hyp, without FPU), RISC-V RV64, AND AArch64 (with hyp, with FPU)
+#   confidentiality + intransitive non-interference, modulo timing channels:
+#     AArch32 (without hyp, without FPU) and RISC-V RV64 ONLY.
+#     On AArch64 these proofs are in progress at the evaluated revision.
+#   binary translation validation (compiler/linker untrusted):
+#     AArch32 or RISC-V RV64 only — NOT AArch64
+#   user-level system initialisation proofs: AArch32 only
+#
+#   Consequences for this evaluation. The scored AArch64 build carries functional
+#   correctness AND its own integrity proof — integrity is established here, not
+#   "maturing". Confidentiality/information-flow is NOT available for the scored
+#   AArch64 build and is NOT borrowed from the AArch32/RISC-V line: the AArch32
+#   confidentiality proof holds only WITHOUT hypervisor extensions and WITHOUT
+#   FPU, whereas the verified AArch64 build REQUIRES both, so the configurations
+#   are disjoint and the "same C source, same spec" transfer does not hold.
+#   Strength scores therefore rest on functional correctness and integrity for the
+#   AArch64 primary; any claim resting on confidentiality is stated as a RISC-V
+#   RV64 / AArch32 comparator result with its configuration named.
+#
+#   Upstream drift note (after the pin, not credited here): the seL4 project
+#   announced completion of AArch64 confidentiality on 2026-08-24, after the
+#   evaluated 15.0.0 revision. This evaluation scores the pinned revision only.
+#
+# WHAT THE PROOFS ASSUME (carried through to every row that cites them). The
+# functional-correctness proof does NOT cover machine code, the compiler, the
+# linker, boot code, or cache/TLB management. On AArch64 the compiler and linker
+# stay in the trusted base because binary translation validation does not cover
+# that architecture. Roughly 284 SLOC of hand-written AArch64 assembly (head.S,
+# traps.S, idle.S, machine_asm.S) and the boot path are assumed correct rather
+# than verified. The proofs further assume DMA is absent or well-behaved, and a
+# hardware model of the MMU/machine interface. No configuration provides timing
+# or other microarchitectural channel guarantees; non-interference is explicitly
+# "modulo timing channels".
+#
+# CONFIGURATION PINS that the scored build fixes (configs/AARCH64_zynqmp_verified.cmake
+# via configs/include/AARCH64_verified_include.cmake): KernelArmHypervisorSupport=ON
+# (the kernel runs in EL2 — permission reasoning must use EL2 stage-1 mappings and
+# stage-2 S2AP for user/guest pages, not EL1 AP bits), KernelArmSMMU=OFF,
+# KernelMaxNumNodes=1 (uniprocessor), KernelBenchmarks=none, KernelPrinting=OFF,
+# KernelFastpath=ON, KernelNumDomains=16, KernelAllowSMCCalls=ON, MCS off.
+#
+# SMP: a symmetric multiprocessor configuration exists and is supported upstream
+#   but is NOT formally verified, and upstream states it is not expected to
+#   satisfy strong intransitive non-interference. The scored build is
+#   uniprocessor (KernelMaxNumNodes=1); no result here transfers to SMP.
+#
+# HARDWARE-TIER CAVEAT (the central fairness point):
+#   seL4 fundamentally requires an MMU — there is no verified MPU/PMP-only
+#   configuration. It therefore does NOT run on the sub-100KB-RAM Cortex-M /
+#   RV32-PMP silicon that FreeRTOS/Contiki/Tock target; it needs an application-
+#   class core. seL4 is the MMU-class, formally-verified ceiling of the embedded
+#   cohort: weaker on footprint/deployability, far stronger on isolation assurance.
+#
+# Memory model: the kernel has no private heap or free-list and performs no
+#   hidden allocation; all kernel objects are created on behalf of user level out
+#   of explicitly supplied Untyped capabilities via the Retype invocation
+#   (src/object/untyped.c), with verified accounting and lifetime rules. Object
+#   creation and bookkeeping do occur at runtime, so this is "no kernel heap",
+#   not "no runtime object allocation". Conventional heap-hardening mechanisms
+#   (C1b.*) are N/A — analogous to Tock's grant model.
+#
+# Assurance vs probabilistic mitigation: as a small verified kernel, seL4
+#   deliberately omits stack canaries, KASLR, CFI, and FORTIFY — the
+#   functional-correctness proof (not a probabilistic barrier) is the assurance.
+#   These are scored P=0 with that rationale, paralleling Fiasco's design stance.
+#   The proof removes the defect classes those mechanisms detect, for the covered
+#   code and under the assumptions above; it is not a general result that the
+#   mechanisms would add nothing.
+#
+# Primary kernel source: github.com/seL4/seL4 (`sources/sel4/`).
+# Evaluated release revision: 881de507fe528490dc5e570c7810a149bad5880f
+# (2026-03-31), VERSION 15.0.0.
+# Proofs (l4v): github.com/seL4/l4v — documentation-only reference, NOT cloned;
+#   proof claims are cited from sources/sel4/CAVEATS.md, docs.sel4.systems
+#   verified-configurations, and the verification papers.
+# Build/config: CMake + Kconfig; arch via -DKernelSel4Arch=aarch64|riscv64|x86_64,
+#   -DKernelPlatform=…, MCS via -DKernelIsMCS=ON; -DKernelVerificationBuild=ON
+#   restricts to the proof-covered feature set (treated as the scored baseline).
+os: sel4
+schema_version: 1
+baseline_class: assurance-build
+default_config: "seL4 15.0.0 (881de507fe528490dc5e570c7810a149bad5880f), AArch64 verification build on zynqmp/Cortex-A53 (configs/AARCH64_zynqmp_verified.cmake: -DKernelSel4Arch=aarch64 -DKernelPlatform=zynqmp -DKernelVerificationBuild=ON), which pins hypervisor extensions ON (kernel in EL2), SMMU OFF, uniprocessor (KernelMaxNumNodes=1), benchmarks none, printing off, fast path on, 16 domains, classic (non-MCS) kernel; comparators RISC-V RV64 (Sv39, no FPU/no fast path, most complete proof stack), x86-64 (without VT-x/VT-d, functional correctness only), AArch32/i.MX6 (without hyp/without FPU, historical full stack)"
+comparator_configs:
+- "RISC-V RV64 (Sv39 MMU), verified config without FPU and without fast path — most complete proof stack: functional correctness + integrity + confidentiality/non-interference + binary translation validation"
+- "x86-64 (x64), verified config without VT-x and VT-d and without fast path — functional correctness only; enables x86 SMEP/SMAP/KPTI/CET, VT-d IOMMU, Spectre-class discussion"
+- "ARMv7/AArch32 (i.MX6 sabre), verified config without hypervisor extensions and without FPU — historical full-stack target incl. user-level initialiser proofs"
+- "MCS (mixed-criticality scheduling-context) kernel vs classic kernel — MCS is off in the scored build and its verification is in progress"
+
+mechanisms:
+
+  # =========================================================================
+  # C1 — Memory Corruption Prevention
+  #
+  # Theme: seL4 substitutes a machine-checked functional-correctness proof for
+  # most intra-kernel anti-corruption hardening. It deliberately omits stack
+  # canaries, KASLR, RANDSTRUCT, sanitizers, FORTIFY, kernel W^X and PXN/SMEP on
+  # the AArch64 primary — these defend against kernel memory-safety bugs that the
+  # proof rules out. seL4's C1 strength is concentrated in the few mechanisms it
+  # realizes as concrete, proven architectural properties: bounded verified IPC
+  # transfer (C1a.3), zero-on-Retype (C1c.2), and control-metadata isolation
+  # (C1e.5). Heap-hardening is N/A: there is no kernel heap or free-list, though
+  # kernel objects are still created at runtime from user-supplied Untyped memory.
+  # =========================================================================
+
+  C1a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/CMakeLists.txt:185 (-fno-stack-protector in the kernel compile flags)"
+      default_state: >-
+        The kernel is compiled with -fno-stack-protector (alongside -ffreestanding
+        -nostdinc -fno-common), so GCC/Clang emit no canary prologue/epilogue and
+        no __stack_chk_guard/__stack_chk_fail. Kernel stack frames carry no
+        per-frame integrity cookie. seL4's assurance against stack buffer overflow
+        is the functional-correctness proof (the verified C provably contains no
+        out-of-bounds stack write), not a probabilistic canary.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: SSP is deliberately disabled. D/S/A/T=0 follow. Same design stance as
+      Fiasco (C1a.1 P=0): a small verified microkernel relies on proof + strict
+      isolation rather than per-frame canaries. The proof is a stronger guarantee
+      than a canary for the verified code paths, but the canary *mechanism* itself
+      is absent, so it scores P=0 with the proof noted as the compensating control.
+  C1a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options:
+      - "CONFIG_KERNEL_STACK_BITS (kernel stack size)"
+      source_files:
+      - "sources/sel4/src/kernel/stack.c (kernel_stack_alloc[CONFIG_MAX_NUM_NODES][BIT(CONFIG_KERNEL_STACK_BITS)] — contiguous char array, no guard)"
+      default_state: >-
+        Kernel stacks are statically allocated as one contiguous BSS array indexed
+        by CPU id; there are no unmapped guard pages between or around them, and
+        there is no kernel heap to place redzones in. A kernel stack overflow would
+        clobber the adjacent CPU's stack or BSS. The single-entry, bounded,
+        run-to-completion kernel design keeps maximum stack depth small and
+        statically analysable, so a guard page is not used. Note that this is a
+        design argument, not a proved bound for this target: machine-level stack
+        bounds are produced by the binary-verification toolchain, which covers
+        AArch32 and RISC-V but not AArch64, so no stack-depth certificate exists
+        for the scored configuration.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no guard pages around kernel stacks and no kernel heap to guard.
+      D/S/A/T=0. Like Fiasco (C1a.2 P=0); mitigation is the bounded, verified
+      kernel stack depth rather than a hardware trap.
+  C1a.3:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/tcb.c (message-register / IPC-buffer transfer between sender and receiver)"
+      - "sources/sel4/libsel4/include/sel4/constants.h (seL4_MsgMaxLength caps the transfer length)"
+      - "sources/sel4/src/arch/arm/64/kernel/vspace.c:109-129 (APFromVMRights — under KernelArmHypervisorSupport, VMReadWrite yields S2AP=3: these are stage-2 permissions for the user/guest mapping, not EL1 stage-1 AP bits; the kernel itself runs in EL2)"
+      - "sources/sel4/src/arch/x86/kernel/boot.c:381 (x86-64 comparator: CR4_SMAP enabled — supervisor cannot read user memory without STAC/CLAC)"
+      default_state: >-
+        seL4 has no general copyin/copyout surface. Syscall arguments arrive in CPU
+        registers (message registers) and, for longer messages, via the IPC buffer
+        — a user page whose transfer length is statically bounded by
+        seL4_MsgMaxLength and whose copy loop is part of the verified IPC path. On
+        AArch64 the kernel shares the address space with the current thread and can
+        directly read/write user pages, and seL4 sets no PAN-equivalent, but every
+        such access is in proven-correct code. The verified AArch64 build runs the
+        kernel in EL2 with hypervisor extensions, so the permission bits on a user
+        mapping are stage-2 (S2AP) values governing the guest, not a statement
+        about the kernel's own stage-1 access. On the x86-64 comparator the kernel
+        enables SMAP (CR4.SMAP), adding a hardware barrier around supervisor access
+        to user memory.
+    commits:
+    - hash: "353e2aa38db473b2e37f39b991333968bcda20b3"
+      date: "2018"
+      description: "x86: Define CR4 SMEP/SMAP bits"
+    discussions: []
+    rationale: >-
+      P=1: the boundary is a real, bounded transfer mechanism. D=3: it is the only
+      user/kernel data path and is always present (mandatory). S=2: the transfer
+      length is statically bounded and the copy is verified, but on the AArch64
+      primary there is no PAN/SMAP hardware barrier, so a (hypothetical, proof-
+      excluded) kernel bug could still touch arbitrary user memory; the x86-64
+      comparator raises this to a hardware-enforced barrier. A=3: IPC is a core
+      design property. T=3: foundational and actively maintained.
+  C1a.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/CMakeLists.txt:180 (-ffreestanding -nostdinc: only memcpy/memmove/memset/memcmp builtins are assumed)"
+      default_state: >-
+        _FORTIFY_SOURCE inserts __*_chk wrappers around glibc string/memory
+        functions; a freestanding kernel built with -ffreestanding -nostdinc links
+        no libc and uses only the four compiler memory builtins, so there is no
+        fortifiable call surface and the flag is not set.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: FORTIFY is not applied and there is effectively no libc surface to apply
+      it to. Same posture as Fiasco (C1a.4 P=0). Scored P=0 (the C compile feature
+      exists but is unused) rather than N/A; the verified bounds on the few builtin
+      memory operations are the real assurance.
+  C1a.5:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/CMakeLists.txt (no -fsanitize=* in the kernel flags)"
+      default_state: >-
+        The verification build links no sanitizer runtime, and adding one would
+        change the verified binary and require matching proof work. Memory-safety
+        errors that sanitizers detect at runtime are instead proven absent at
+        verification time for the covered configurations. The absence of a kernel
+        heap is not the reason: sanitizers also instrument stack and global
+        accesses, so this is a proof-substitution argument, not an inapplicability
+        one, and it holds only for the verified configuration and only for the
+        defect classes the proof covers.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no runtime memory-safety sanitizer. D/S/A/T=0. The functional-
+      correctness proof subsumes the *goal* of a sanitizer for the verified config,
+      but the sanitizer mechanism itself is absent. Like Fiasco (C1a.5 P=0).
+  C1a.6:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/armv/armv8-a/config.cmake (scored ARMv8.0/8.2 platforms have no FEAT_MTE)"
+      default_state: >-
+        The scored AArch64 target is a Cortex-A53/A57-class embedded SoC
+        (i.MX8/TX2/Zynq UltraScale+, ARMv8.0/8.2) with no ARM MTE (FEAT_MTE is
+        ARMv8.5). seL4 also has no MTE/tag-checking support in any configuration.
+        Unlike the Cortex-M RTOS cohort (where MTE is architecturally impossible),
+        MTE could in principle appear on a future ARMv8.5 SoC, but seL4 would still
+        not use it (it would change the verified hardware model).
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: spatial memory tagging requires hardware absent on the scored SoC and is
+      unsupported by seL4. Matches the Fiasco/x86 and Cortex-M cohort treatment.
+  C1a.7:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/CMakeLists.txt:165-195 (kernel compile flags contain no -fsanitize=bounds/-fsanitize=undefined instrumentation)"
+      default_state: >-
+        The verification build is plain freestanding C with no UBSAN runtime,
+        __ubsan_handle_out_of_bounds handler, -fsanitize=bounds, or
+        __counted_by-style annotation framework. Array accesses therefore receive
+        no compiler-inserted runtime index check. The functional-correctness proof
+        discharges out-of-bounds behaviour for proof-covered code paths, but that
+        proof is a compensating assurance rather than an implementation of the
+        UBSAN_BOUNDS mechanism scored here.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no compiler-inserted array-index bounds-checking mechanism exists in
+      the kernel build; D/S/A/T=0 follow and maturity components are null. This
+      matches the Fiasco/Hurd/FreeRTOS treatment of plain C kernels without
+      UBSAN_BOUNDS. The proof is recorded as the compensating control (xref
+      C1a.5/C1f.1) but does not make the mechanism present. The compensating
+      argument here is the same one recorded for sanitizers: array-bounds
+      obligations are discharged explicitly in the verified C semantics, so both
+      rows rest on identical proof coverage for the same guarded accesses.
+  C1b.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/untyped.c (objects are created by user level from Untyped via Retype; the kernel never mallocs/frees)"
+      - "sources/sel4/src/object/cnode.c (capability revocation: an object cannot be deleted while live capabilities to it remain — the verified mapdb/CDT prevents dangling references)"
+      default_state: >-
+        seL4 performs zero dynamic allocation after boot, so there is no allocator
+        free-list in which to apply quarantine or delayed-reuse. Temporal safety is
+        instead structural: an object's backing Untyped can only be reused (re-
+        Retyped) after every derived capability has been revoked, which the
+        verified capability-derivation tree (CDT) enforces — there is no way to
+        hold a usable capability to freed/re-typed memory.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: the allocator-level UAF attack surface does not exist (no kernel heap).
+      The temporal-safety guarantee is provided by capability revocation — see
+      C4.2/C4.6 — rather than an allocator mitigation. Parallels Tock's
+      no-kernel-heap grant model.
+  C1b.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/untyped.c (no free-list; Retype carves typed objects out of Untyped at user-chosen offsets)"
+      default_state: >-
+        There is no general-purpose kernel allocator and therefore no inline
+        boundary tags, free-list pointers, or size headers to corrupt. Object
+        placement is decided by user level (which offset of which Untyped) and
+        validated by the kernel; the bookkeeping lives in capabilities, not in
+        in-band heap metadata.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no kernel heap metadata exists to harden. Same treatment as Tock
+      (C1b.2 N/A).
+  C1b.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/cnode.c (cteInsert/cteDelete maintain the CDT; references are structural, not a numeric count)"
+      default_state: >-
+        seL4 has no Linux-style refcount_t. The number of capabilities pointing at
+        an object is represented by the capability-derivation tree structure, not a
+        bounded integer that could wrap; deletion walks the CDT rather than
+        decrementing a counter. There is therefore no refcount to overflow, but
+        equally no explicit saturating-counter primitive.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no saturating reference-count primitive (consistent with Fiasco/Tock
+      C1b.3 P=0). The CWE-190-refcount-overflow path is structurally avoided by the
+      verified CDT, but that is an emergent property, not a refcount-hardening
+      mechanism, so D/S/A/T=0.
+  C1b.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/endpoint.c (endpoint send/recv wait queues), sources/sel4/src/kernel/thread.c (scheduler ready queues)"
+      default_state: >-
+        Kernel linked lists (endpoint/notification wait queues, scheduler ready
+        queues) carry no LIST_POISON sentinels or double-add guards. Their
+        invariants are maintained by proven-correct code, and the list nodes live
+        inside kernel objects that user code can never write, so there is no
+        untrusted path that could corrupt them.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no runtime list-integrity hardening primitive. Integrity is instead a
+      consequence of functional correctness plus control-metadata isolation
+      (C1e.5). Matches Fiasco (C1b.4 P=0); Tock scores P=1 only because Rust's
+      type system is an explicit runtime/compile mechanism.
+  C1b.5:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/armv/armv8-a/config.cmake (scored ARMv8.0/8.2 platforms have no FEAT_MTE temporal mode)"
+      default_state: >-
+        Temporal MTE requires FEAT_MTE (ARMv8.5), absent on the scored Cortex-A53/
+        A57-class SoC, and seL4 has no tag-checking support. See C1a.6.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no MTE silicon and no seL4 support.
+  C1c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/CMakeLists.txt (no auto-var-init flag in kernel flags)"
+      default_state: >-
+        The kernel is not built with automatic stack-variable initialization. The
+        functional-correctness proof discharges CWE-457 directly: reading an
+        uninitialized local is undefined behaviour the proof does not permit, so
+        the verified code provably never does it.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: the compiler auto-init mechanism is absent. The *goal* (no use of
+      uninitialized data) is met by proof, noted as the compensating control. This
+      contrasts with C1c.2, where seL4 implements the zeroing mechanism concretely.
+  C1c.2:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/untyped.c:255 (clearMemory(regionBase, block_size) on Retype)"
+      - "sources/sel4/src/object/untyped.c:261 (clearMemory of the per-object chunk)"
+      - "sources/sel4/src/kernel/boot.c:308 (clearMemory of the root-server IPC buffer / boot frames at startup)"
+      default_state: >-
+        A Retype invocation that turns ordinary Untyped memory into kernel objects
+        or user frames clears that memory (clearMemory); device-memory Untyped is
+        deliberately not cleared, and an Untyped capability whose free index is
+        still 0 needs no reset. A newly created object
+        or freshly handed-out frame therefore never exposes the previous tenant's
+        contents — there is no path to obtain stale, uninitialized backing memory.
+        This zeroing is part of the verified Retype semantics, so it is mandatory
+        and cannot be configured off.
+    commits:
+    - hash: "03c71b63e19215ef8be6b8c1ac8167d729b3b10c"
+      date: "2016"
+      description: "SELFOUR-444: Preemptible zeroing for retype."
+    discussions: []
+    rationale: >-
+      P=1: ordinary memory is cleared when Untyped is Retyped into a fresh object.
+      D=3: mandatory part of the verified Retype path, not optional. S=3; decisive
+      property: the reset/Retype protocol is covered by the functional-correctness
+      proof, which does hold for the scored AArch64 configuration, so no residual
+      ordinary-memory contents cross an object-reuse boundary and there is no known
+      bypass. Two qualifications are recorded rather than scored down: device-memory
+      Untyped is deliberately not cleared, and a capability with nothing yet
+      allocated (free index 0) skips the reset because there is nothing to clear —
+      so this is correct initialisation under the object lifecycle, not
+      unconditional erasure of arbitrary physical memory. A=3: core design property
+      of the Untyped/Retype model. T=3: foundational, actively maintained. seL4's
+      strongest C1 mechanism.
+  C1d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/kernel/stack.c (kernel_stack_alloc at a fixed link-time address)"
+      default_state: >-
+        Kernel stacks sit at fixed, statically allocated addresses. seL4 performs no
+        per-entry or per-boot stack-base randomization.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no kernel stack randomization. Probabilistic address-space obfuscation
+      is not part of seL4's assurance model, and the layout-dependent proofs would
+      need matching work to accommodate it — a cost, not a prohibition. Like Fiasco
+      (C1d.1 P=0).
+  C1d.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/untyped.c (objects are explicitly Retyped; there is no kernel heap/order to randomize)"
+      default_state: >-
+        Object placement is chosen explicitly by user level out of Untyped regions;
+        there is no kernel allocator whose allocation order could be randomized.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no kernel heap (cf. C1b.2). Tock scores C1d.2 N/A for the same reason.
+  C1d.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/include/object/structures_64.bf (object/PTE layouts are fixed bitfield definitions reasoned about by the proof)"
+      default_state: >-
+        seL4 uses no RANDSTRUCT-style layout randomization. Kernel object and
+        page-table layouts are fixed, generated bitfields; the proof reasons about
+        exact member offsets, so randomizing them is fundamentally incompatible with
+        the verified build.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no structure-layout randomization. The existing proofs are tied to the
+      kernel's fixed layout, so introducing randomization would require matching
+      proof work — a real maintenance cost, but not an impossibility result: seL4's
+      specifications are nondeterministic, and nothing in the verification approach
+      rules out randomized layouts. Like Fiasco/Tock (C1d.3 P=0).
+  C1e.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/kernel/vspace.c:236-283 (map_kernel_window: PADDR_BASE..PADDR_TOP mapped as VMKernelOnly large pages with XN=0 under KernelArmHypervisorSupport, i.e. writable and executable in the kernel's own EL2 stage-1 mapping)"
+      default_state: >-
+        seL4 maps the entire physical address range into the kernel's high window
+        as VMKernelOnly large pages: user level has no access to it, but in the
+        kernel's own address space the window is simultaneously readable, writable,
+        and executable — kernel .text, .data, and all object/Untyped backing share
+        one RWX mapping. The verified build runs the kernel in EL2, so this is an
+        EL2 stage-1 mapping; under hypervisor support map_kernel_window sets XN=0,
+        leaving the window executable.
+        There is no read-only .text or non-executable .data region. The x86-64
+        comparator does set CR0.WP (so the kernel honours read-only PTEs) but the
+        kernel image itself is likewise not split into W^X sections.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: kernel-space W^X is not enforced; the kernel runs in a flat RWX physical
+      window in its own EL2 address space by design (it must read/write all object
+      memory). seL4
+      substitutes the correctness proof — no verified code path writes .text or
+      executes data — for hardware kernel W^X. This is notably *weaker* than Fiasco
+      (C1e.1 P=1), an honest consequence of the proof-first design.
+  C1e.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/kernel/vspace.c:236 (single RW kernel window; no post-boot remap to read-only)"
+      default_state: >-
+        seL4 has no notion of data that is mutable during boot and sealed read-only
+        afterwards; all kernel data lives in the flat kernel-writable window.
+        Boot-time
+        global structures (e.g. the global page-table arrays) remain writable.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no read-only-after-init mechanism (consistent with the flat-window design
+      of C1e.1). Like Fiasco/Tock (C1e.2 P=0).
+  C1e.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/kernel/vspace.c:171 (VMReadOnly is available for user mappings)"
+      default_state: >-
+        There is no facility to mark a kernel-internal region immutable at runtime.
+        For user memory, a frame can be mapped read-only (VMReadOnly) by minting a
+        read-only frame capability, but that is governed by capability rights and
+        the mapping API rather than a dedicated immutability primitive.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no immutable kernel-memory mechanism. Read-only *user* mappings exist but
+      are an aspect of the capability/mapping model (see C4.6), not a kernel-
+      data-protection feature.
+  C1e.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/kernel/vspace.c:331 (user frame PTE sets !executable as the UXN bit only; no PXN field is exposed in the AArch64 PTE)"
+      - "sources/sel4/include/arch/arm/arch/32/mode/object/structures.bf:423 (AArch32 PTE *does* carry a PXN field)"
+      - "sources/sel4/src/arch/x86/kernel/boot.c:388 (x86-64 comparator: CR4_SMEP enabled — supervisor cannot execute user pages)"
+      default_state: >-
+        ret2usr prevention is the kernel-execute-never-on-user-memory property. On
+        the AArch64 primary seL4 sets UXN on user/kernel mappings (controlling EL0
+        execution) but does not set PXN on user pages, and it keeps the user (TTBR0)
+        translation active while in the kernel — so at EL1 there is no hardware
+        barrier against executing a user page. seL4 instead relies on the verified
+        kernel control flow provably never branching to a user-controlled address.
+        By contrast the x86-64 comparator enables SMEP (CR4.SMEP) and the AArch32
+        verified target carries PXN, both of which *do* provide the hardware barrier.
+    commits:
+    - hash: "353e2aa38db473b2e37f39b991333968bcda20b3"
+      date: "2018"
+      description: "x86: Define CR4 SMEP/SMAP bits"
+    discussions: []
+    rationale: >-
+      P=0 on the scored AArch64 config: no PXN-based ret2usr barrier; the protection
+      is the correctness proof, not hardware. Recorded honestly as a primary-arch
+      gap even though the mechanism *is* present on seL4's x86-64 (SMEP) and AArch32
+      (PXN) targets — an artefact of choosing AArch64 as the fair ARM peer. Contrast
+      Fiasco x86 (C1e.4 P=1, SMEP).
+  C1e.5:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/cnode.c (CNodes hold capabilities; only kernel code mutates them, via invocations)"
+      - "sources/sel4/src/object/tcb.c (TCBs hold register/scheduling state in kernel-only memory)"
+      - "sources/sel4/src/arch/arm/64/kernel/vspace.c:236 (kernel objects reside in the VMKernelOnly window — no EL0 access)"
+      default_state: >-
+        Capabilities, thread control blocks, page tables, and scheduling contexts
+        are all kernel objects backed by memory that is mapped VMKernelOnly (EL0 has
+        no access). User threads can only influence this metadata through narrow,
+        type-checked capability invocations — never by direct memory write. The
+        seL4 integrity proof establishes that user level cannot modify any kernel
+        object except as authorized by an explicit capability.
+    commits:
+    - hash: "91b7da8625d28ad533d5bd801be5f89ad1b50d80"
+      date: "2014"
+      description: "Release snapshot"
+    discussions: []
+    rationale: >-
+      P=1: control metadata is isolated in kernel-only objects. D=3: mandatory and
+      unconditional. S=3: proven (integrity result) — user level provably cannot
+      corrupt kernel control metadata; no known bypass. A=3: a defining property of
+      the capability/object model. T=3: foundational and active. Alongside C1c.2
+      this is seL4's flagship C1 mechanism, and it is stronger than Fiasco
+      (C1e.5 S=2) because the property is machine-checked.
+  C1e.6:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/kernel/vspace.c:110 (vm_rights are VMKernelOnly / VMReadOnly / VMReadWrite; execution is a separate execute-never attribute, so there is no execute-only combination)"
+      default_state: >-
+        seL4 frame rights are {KernelOnly, ReadOnly, ReadWrite} combined with an
+        armExecuteNever attribute. Executable user code is therefore always also
+        readable (RX); there is no way to express execute-only (X but not R) to hide
+        .text from disclosure-driven ROP gadget enumeration.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: execute-only memory is not expressible in the rights model on any seL4
+      target. Tock scores this N/A (only RISC-V ePMP can do X-only); seL4 is scored
+      P=0 because the attack surface (readable executable .text) is present while
+      the mechanism is absent.
+  C1e.7:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/kernel/vspace.c (unmap/remap require the relevant frame or page-table capability)"
+      default_state: >-
+        There is no mseal-style flag that freezes a mapping's permissions. In seL4 a
+        mapping can only be changed or removed by a holder of the corresponding
+        frame/page-table capability; withholding that capability makes the mapping
+        effectively immutable, but this is a property of capability distribution,
+        not a dedicated seal mechanism.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no per-mapping seal primitive. Mapping immutability is achieved by
+      capability scoping instead — see C4.6. Matches Fiasco (C1e.7 P=0).
+  C1e.8:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/CMakeLists.txt (compiler/linker flags contain no trap-padding pass)"
+      default_state: >-
+        seL4 does not fill inter-function padding in executable sections with trap
+        instructions; the small verified kernel does not employ this gadget-
+        mitigation technique.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no trapsled padding. Like Fiasco/Tock (C1e.8 P=0).
+  C1f.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/ (kernel implemented in C; verified against an Isabelle/HOL specification)"
+      default_state: >-
+        seL4's kernel is written in C. It does not use a memory-safe implementation
+        language (Rust/Ada-SPARK). However, the machine-checked functional-
+        correctness proof establishes — for the verified configurations — exactly
+        the spatial, temporal, type, and initialization safety that a memory-safe
+        language would provide, and additionally proves the C matches its abstract
+        specification (which a memory-safe language does not give). A separate
+        Rust-userspace ecosystem (rust-sel4) and experimental Rust-kernel work
+        exist, but the verified kernel is C.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: the C1f.1 *mechanism* is a memory-safe implementation language, which
+      seL4 does not use. This is the central methodological contrast with Tock
+      (C1f.1 P=1, Rust): Tock obtains memory safety from the language; seL4 obtains
+      equivalent-or-stronger guarantees from proof. The framework scores the
+      mechanism (P=0) and records the proof as the compensating — arguably superior
+      — control. seL4's verification value surfaces in the high S/A scores of the
+      concrete mechanisms it does implement (C1c.2, C1e.5, C4, C5).
+  C2a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/CMakeLists.txt (no CFI instrumentation in kernel flags)"
+      default_state: >-
+        seL4 emits no forward-edge CFI checks on indirect calls. The kernel makes
+        very few indirect calls, and the correctness proof fixes the kernel's
+        control-flow graph, so a hijack of a function pointer is not a reachable
+        state in the verified code.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no software CFI mechanism. Control-flow integrity is a proof property,
+      not an instrumented runtime check. Like Fiasco (C2a.1 P=0).
+  C2a.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/config.cmake (AArch64 primary target; Intel CET-IBT is not applicable)"
+      default_state: >-
+        CET/IBT is x86-specific. The scored target is AArch64. The x86-64 comparator
+        does not enable IBT either (it is outside the verified configuration), but
+        on the ARM primary the mechanism does not exist.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: x86-only hardware forward-edge CFI; the ARM primary has no such facility.
+  C2a.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/armv/armv8-a/config.cmake (scored SoCs lack FEAT_BTI and build has no BTI flag)"
+      default_state: >-
+        Branch Target Identification needs FEAT_BTI (ARMv8.5). The scored Cortex-A53/
+        A57-class SoC is ARMv8.0/8.2. seL4 also builds with no -mbranch-protection,
+        so even on BTI-capable silicon it would emit no BTI landing pads.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no BTI silicon on the scored target and no seL4 support.
+  C2b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/CMakeLists.txt (no -fsanitize=shadow-call-stack)"
+      default_state: >-
+        Return addresses are kept on the ordinary kernel stack with no shadow copy
+        or per-return cookie. The verified kernel provably never corrupts a saved
+        return address.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no backward-edge software protection. Like Fiasco (C2b.1 P=0).
+  C2b.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/config.cmake (AArch64 primary target; Intel CET shadow stack is not applicable)"
+      default_state: >-
+        Hardware shadow stack (CET SHSTK) is x86-specific; the ARM primary has no
+        equivalent and the x86-64 comparator does not enable it.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: x86-only hardware backward-edge CFI; not applicable on the ARM primary.
+  C2b.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/armv/armv8-a/config.cmake (scored SoCs lack FEAT_PAuth and build has no PAC flag)"
+      default_state: >-
+        Pointer Authentication needs FEAT_PAuth (ARMv8.3). The scored Cortex-A53/A57-
+        class SoC is ARMv8.0/8.2, and seL4 builds with no -mbranch-protection=pac-ret,
+        so no PAC signing/authentication is emitted.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no PAC silicon on the scored target and no seL4 support. Matches Fiasco
+      (C2b.3 N/A) and the Cortex-M cohort treatment of PAC.
+  C2b.4:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/armv/armv8-a/config.cmake (scored SoCs lack ARMv9.4 FEAT_GCS)"
+      default_state: >-
+        The primary target uses ARMv8.0/8.2 Cortex-A53/A57-class silicon. It has no
+        FEAT_GCS register state or GCS-aware exception/return semantics, and the
+        seL4 source and build system contain no GCS support. The x86-64 comparator
+        is not relevant to this ARM-specific mechanism.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: the required hardware extension does not exist on the scored target, so
+      the mechanism is excluded rather than counted as an applicable P=0 gap.
+      D/S/A/T=0 and maturity components are null. This matches the Cortex-M cohort
+      and other non-FEAT_GCS primary targets.
+  C2c.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/libsel4/include/api/syscall.xml (fixed invocation ABI and no runtime code-generation subsystem)"
+      default_state: >-
+        seL4 contains no JIT, bytecode engine, or runtime code generator (it has no
+        eBPF-equivalent). There is no dynamically generated code to harden.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no JIT subsystem exists. Like Fiasco (C2c.1 N/A).
+  C3a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/kernel/vspace.c:236 (kernel window at a fixed PPTR_BASE)"
+      default_state: >-
+        The kernel image sits at a fixed virtual address with no per-boot
+        randomization. The functional-correctness proof reasons about a fixed
+        memory layout, so KASLR would conflict with the verified configuration.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no kernel base randomization. The fixed layout is an implementation and
+      proof-maintenance choice, not something verification forbids; randomizing the
+      base would require re-establishing the layout-dependent proofs. Like Fiasco
+      (C3a.1 P=0).
+  C3a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/CMakeLists.txt (deterministic verified image layout; no FG-KASLR pass)"
+      default_state: >-
+        No FG-KASLR-style per-function reordering; the kernel text layout is fixed
+        (and reasoned about by the proof).
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no fine-grained randomization. As with C3a.1, changing the binary layout
+      requires matching proof work; no impossibility or no-benefit result applies.
+      Like Fiasco (C3a.2 P=0).
+  C3b.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options:
+      - "KernelX86 SKIM window (x86-64 comparator only)"
+      source_files:
+      - "sources/sel4/src/arch/x86/config.cmake:238 (x86 comparator: 'Prevent against the Meltdown vulnerability by using a reduced Static Kernel Image Mapping' — SKIM)"
+      - "sources/sel4/src/arch/x86/64/c_traps.c:265 (SKIM exit path comment re: Meltdown-readable kernel region)"
+      default_state: >-
+        On the AArch64 primary the kernel uses the architectural TTBR1/TTBR0 split
+        but does not unmap itself on user entry (that would cost IPC performance),
+        and the scored in-order Cortex-A53/A57 cores are not affected by Meltdown,
+        so no KPTI is implemented. The x86-64 comparator provides SKIM, an opt-in
+        reduced kernel mapping that mitigates Meltdown.
+    commits:
+    - hash: "29695d26367259ad646a278fd8e574e90ea70f29"
+      date: "2018"
+      description: "x64: SKIM window to mitigate Meltdown (CVE-2017-5754) on x86-64"
+    discussions:
+    - "https://github.com/seL4/seL4/issues/1149"
+    rationale: >-
+      N/A on the scored AArch64 config: the pinned in-order Cortex-A53/A57 cores
+      are not Meltdown-vulnerable, so the attack surface KPTI isolates (user-mode
+      speculative reads of mapped kernel memory) does not exist on this target —
+      the same pinned-hardware basis as C7b.2 (L1TF) and C7c.1 (MDS), and
+      the same in-order-core reasoning that gives Tock and NuttX N/A here. The
+      mechanism *does* exist on seL4 x86-64 (SKIM, opt-in) — recorded as a
+      comparator. Fiasco x86 scores C3b.1 P=1.
+  C3b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/kernel/vspace.c:109-129 (APFromVMRights: under KernelArmHypervisorSupport VMReadWrite yields S2AP=3 — a stage-2 permission on the user/guest mapping, not an EL1 stage-1 AP bit; no PAN-equivalent msr anywhere in arm/64)"
+      - "sources/sel4/src/arch/x86/kernel/boot.c:381 (x86-64 comparator: CR4_SMAP + CR4_SMEP enabled)"
+      default_state: >-
+        On AArch64 seL4 keeps the user translation active in-kernel and does not set
+        PSTATE.PAN, so the kernel can freely read/write user memory (this is how IPC
+        transfer and capability invocation work). On the x86-64 comparator the
+        kernel enables SMAP (and SMEP), so supervisor access to user memory faults
+        unless explicitly bracketed.
+    commits:
+    - hash: "353e2aa38db473b2e37f39b991333968bcda20b3"
+      date: "2018"
+      description: "x86: Define CR4 SMEP/SMAP bits"
+    discussions: []
+    rationale: >-
+      P=0 on the scored AArch64 config: no PAN/supervisor-access-prevention barrier;
+      seL4 relies on the verified kernel only touching user memory deliberately and
+      correctly. Adjudicated P=0 rather than N/A: although PSTATE.PAN is
+      ARMv8.1+ and absent on the pinned v8.0 Cortex-A53, the guarded
+      surface — kernel access to user memory during IPC/syscall handling — exists
+      on this target, and a software barrier is implementable on v8.0 hardware
+      (cf. Linux ARM64_SW_TTBR0_PAN; the C3b anchor explicitly admits software-only
+      barriers at S≤2). This differs from C3b.1/C7b.2/C7c.1, where the pinned core
+      is not vulnerable and the surface itself is absent. Present on the x86-64
+      comparator (SMAP, P=1 — cf. Fiasco x86 C3b.2 P=1). Same primary-arch
+      artefact as C1e.4.
+  C3c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/untyped.c:234-270 (resetUntypedCap: returns early when the free index is 0, and skips clearMemory for device-memory Untyped — see C1c.2)"
+      default_state: >-
+        When an object is deleted, its backing memory is not immediately scrubbed;
+        the memory is instead cleared the next time that Untyped region is Retyped
+        into a new object. A holder of the (now revoked) capability cannot read it,
+        and a future tenant gets zeroed memory, so no residual data is disclosed —
+        but the timing is allocation, not free.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0 for the "zero-on-free" mechanism specifically; the equivalent disclosure
+      protection is provided by zero-on-Retype, scored at C1c.2 (P=1, S=3). Not
+      double-counted here.
+  C3c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/traps.S (return path has no STACKLEAK-style stack erasure)"
+      default_state: >-
+        The kernel stack is not poisoned/erased on return to user. Residual kernel
+        stack data is never user-readable (the kernel stack is VMKernelOnly and IPC
+        transfers only explicit message registers), so the disclosure path is closed
+        by isolation rather than erasure.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no stack-erasure mechanism. The leak is prevented structurally (kernel
+      stack unreachable from user). Like Fiasco (C3c.2 P=0).
+  C3c.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/tcb.c (each thread's full register context is saved to / restored from its own TCB)"
+      - "sources/sel4/src/arch/arm/64/c_traps.c (restore_user_context restores the destination thread's saved registers)"
+      default_state: >-
+        On kernel exit seL4 restores the target thread's complete register set from
+        its own TCB; only the explicitly transferred message registers carry IPC
+        data. There is no scenario where leftover kernel scratch values or another
+        thread's registers reach userspace, but the kernel does not perform explicit
+        register clearing — the property follows from context isolation.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no explicit register-scrubbing mechanism (consistent with Fiasco C3c.3
+      P=0). The compensating control on this build is functional correctness of the
+      context save/restore path, not the confidentiality proof — that result is
+      proved for AArch32-without-hyp and RISC-V and does not cover the scored
+      AArch64 configuration. Two further limits: a no-leak property is
+      observational and does not imply residual bytes are erased, and the kernel
+      exit path is hand-written assembly that the C-level proof does not cover.
+      Not inflated to P=1 because the scored mechanism is scrubbing, which seL4
+      does not perform.
+  C3d.1:
+    P: 1
+    D: 2
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "KernelPrinting (PRINTING) — DEFAULT = KernelDebugBuild; forced OFF in the verification build"
+      source_files:
+      - "sources/sel4/config.cmake:199 (KernelPrinting default = KernelDebugBuild, DEPENDS 'NOT KernelVerificationBuild')"
+      - "sources/sel4/config.cmake:187 (KernelDebugBuild DEFAULT ON only when NOT a verification build)"
+      default_state: >-
+        seL4 exposes no kernel-pointer-bearing interface to user level (no
+        /proc-equivalent; capabilities are opaque slot references, not kernel
+        addresses). Kernel console printing is a debug facility: it is on in a
+        debug build but off by default in a release/verification build, so the
+        scored production configuration logs nothing and therefore leaks no kernel
+        pointers. There is no %pK-style hashing because there is no logging surface
+        to hash in production.
+    commits:
+    - hash: "0b73072016e4898f6e08bd4a2c061c86bbaffc5f"
+      date: "2017"
+      description: "Add a CMake based build system"
+    discussions: []
+    rationale: >-
+      P=1: kernel-pointer exposure is structurally minimized. D=2: the protective
+      posture (no printing, no info interface) is the production/verification default
+      while debug builds print. S=2: when printing is on (debug) raw values can
+      appear, and capabilities never expose addresses regardless; strong in
+      production, weaker in debug. A=3: opacity of capabilities + no info interface
+      is a core design property. T=2: T_maintained=2 — 7 non-trivial config.cmake commits in the 18-month window (sporadic band). Matches Fiasco (C3d.1 P=1).
+  C3d.2:
+    P: 1
+    D: 2
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 2
+    implementation:
+      config_options:
+      - "CONFIG_DEBUG_BUILD / CONFIG_PRINTING — gate seL4_Debug* syscalls"
+      - "HardwareDebugAPI — DEFAULT OFF; DEPENDS 'NOT KernelVerificationBuild'"
+      source_files:
+      - "sources/sel4/libsel4/include/sel4/syscalls.h:32 (seL4_DebugPutChar under #ifdef CONFIG_PRINTING; seL4_DebugHalt/DumpScheduler/CapIdentify under #if CONFIG_DEBUG_BUILD)"
+      - "sources/sel4/config.cmake:191 (HardwareDebugAPI default off, disabled in verification build)"
+      default_state: >-
+        Diagnostic surface (seL4_DebugDumpScheduler, seL4_DebugCapIdentify,
+        seL4_DebugHalt, putchar, and the userspace breakpoint/watchpoint
+        HardwareDebugAPI) is only compiled into debug builds; a release/verification
+        build contains none of it. The restriction is build-time exclusion rather
+        than runtime permission gating.
+    commits:
+    - hash: "0b73072016e4898f6e08bd4a2c061c86bbaffc5f"
+      date: "2017"
+      description: "Add a CMake based build system"
+    discussions: []
+    rationale: >-
+      P=1: the diagnostic interface is restricted by being compiled out of
+      production. D=2: off by default in release/verification (mandatorily so under
+      KernelVerificationBuild), present in debug builds. S=2: when present (debug)
+      it is powerful, but it cannot exist in the scored verified config. A=2: a
+      build-configuration property rather than a runtime-enforced policy. T=2: T_maintained=2 — 7 non-trivial commits on config.cmake/syscalls.h in the 18-month window.
+      Fiasco scores C3d.2 N/A; seL4 scores P=1 because the clean debug/production
+      compile split is an explicit restriction mechanism.
+  C4.2:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/cnode.c (CNode/CSpace: capability storage, derivation, revocation)"
+      - "sources/sel4/src/object/objecttype.c (per-object-type invocation decoding — authority is the capability, not an ACL)"
+      - "sources/sel4/manual/parts/objects.tex:65 ('A capability is an unforgeable token that references a specific kernel object')"
+      - "sources/sel4/manual/parts/cspace.tex (capability spaces and addressing)"
+      default_state: >-
+        Every operation a thread can perform is authorized by a capability it holds
+        in its CSpace. Capabilities are unforgeable kernel-protected tokens; they
+        can be copied, minted (with reduced rights / a badge), and revoked, but
+        never fabricated by user code. There is no ambient authority and no
+        superuser: a component can affect only what its capabilities name. The
+        access-control model is part of what the integrity proof establishes.
+    commits:
+    - hash: "91b7da8625d28ad533d5bd801be5f89ad1b50d80"
+      date: "2014"
+      description: "Release snapshot"
+    discussions: []
+    rationale: >-
+      P=1: capabilities are the access-control mechanism. D=3: mandatory and
+      unconditional — there is no non-capability path to authority. S=3: proven
+      (integrity result) — capabilities are unforgeable and authority cannot be
+      escalated outside the model; no known practical bypass. A=3: the defining
+      design property of seL4. T=3: foundational, actively maintained. Matches
+      Fiasco (C4.2 all-3) with the added weight of machine-checked enforcement.
+  C4.3:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "KernelIsMCS (adds Wait/NBWait/NBSendRecv/NBSendWait to the base Send/Recv/Call/ReplyRecv/Yield set)"
+      source_files:
+      - "sources/sel4/libsel4/include/api/syscall.xml (the entire syscall list: Send/NBSend/Recv/NBRecv/Call/Reply/ReplyRecv/Yield (+ MCS variants); Debug* only in debug builds)"
+      - "sources/sel4/src/api/syscall.c (single kernel entry dispatching capability invocations)"
+      default_state: >-
+        The kernel exposes only a handful of system calls, and every one is either
+        an IPC primitive or a capability invocation; there are no hundreds of
+        ad-hoc syscalls as in a monolithic kernel. All object operations are
+        funnelled through capability invocation, so the parseable attack surface is
+        tiny and is exactly what the proof covers. Diagnostic syscalls
+        (seL4_Debug*) exist only in debug builds.
+    commits:
+    - hash: "91b7da8625d28ad533d5bd801be5f89ad1b50d80"
+      date: "2014"
+      description: "Release snapshot"
+    discussions: []
+    rationale: >-
+      P=1: the syscall surface is minimized by design. D=3: mandatory; there is no
+      larger surface to disable. S=3: the surface is small enough to be fully
+      verified, with no known bypass. A=3: core design property. T=3. Matches
+      Fiasco (C4.3 all-3).
+  C4.5:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/CMakeLists.txt (single fixed verified kernel image; no module loader)"
+      default_state: >-
+        seL4 has no kernel module loader, no run-time kernel extension mechanism,
+        and no in-kernel driver loading: the verified kernel image is monolithic
+        and immutable, and all extensibility lives in user-level components. There
+        is therefore no module-loading surface to restrict.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no kernel module/extension-loading subsystem exists. Matches Fiasco
+      (C4.5 N/A).
+  C4.6:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/tcb.c (a thread is bound to a CSpace root and a VSpace root)"
+      - "sources/sel4/src/arch/arm/64/kernel/vspace.c (per-VSpace page tables — MMU-enforced address-space isolation)"
+      - "sources/sel4/src/object/cnode.c (per-CSpace capability containment)"
+      default_state: >-
+        Isolation domains are first-class: a thread executes within a CSpace
+        (defining the authority it can name) and a VSpace (defining the memory it
+        can touch, MMU-enforced). Two components share memory or endpoints only if
+        explicitly granted overlapping capabilities. Resource accounting is also
+        capability-scoped — memory comes from Untyped capabilities, so a component
+        cannot consume kernel memory it was not granted.
+    commits:
+    - hash: "91b7da8625d28ad533d5bd801be5f89ad1b50d80"
+      date: "2014"
+      description: "Release snapshot"
+    discussions: []
+    rationale: >-
+      P=1: CSpace+VSpace are explicit isolation domains. D=3: mandatory — every
+      thread runs in such domains. S=3; decisive property: the integrity result,
+      which is established for the scored AArch64 configuration, proves that no
+      component can modify objects outside the authority its capabilities confer,
+      and there is no known bypass. Two premises are recorded rather than scored
+      down: the result is conditional on a well-formed capability distribution, and
+      components may deliberately share a CSpace, VSpace or memory — a private
+      domain per thread is a deployment property, not something the kernel imposes.
+      Confidentiality is not claimed here: the information-flow proof covers
+      AArch32-without-hyp and RISC-V, not this build. A=3: core design. T=3.
+      Matches Fiasco.
+  C4.7:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/cnode.c:327 (endpoint badge: a server distinguishes clients by the unforgeable badge minted into each client's endpoint capability)"
+      - "sources/sel4/src/object/endpoint.c (badged IPC; no global identity)"
+      default_state: >-
+        seL4 has no POSIX credential model — there is no root, no setuid/setgid,
+        and no process-tree privilege inheritance to abuse (so the entire
+        confused-deputy / privilege-escalation-via-ambient-authority class is
+        absent). Authority is conferred only by holding a capability. A server
+        identifies its clients via badges: an unforgeable value minted into a
+        client's copy of an endpoint capability, which the kernel delivers
+        alongside the message. This is the capability-system analogue of, and a
+        hardening over, traditional process credentials.
+    commits:
+    - hash: "91b7da8625d28ad533d5bd801be5f89ad1b50d80"
+      date: "2014"
+      description: "Release snapshot"
+    discussions: []
+    rationale: >-
+      P=1: the authority/identity model (capabilities + badges, no ambient
+      authority) is the hardened equivalent of process credentials. D=3: mandatory.
+      S=3: badges are unforgeable and the model is proven; no setuid-style
+      escalation surface exists. A=3: core design. T=3. Matches Fiasco (C4.7 all-3).
+  C4.8:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - src/arch/arm/64/traps.S
+      - src/arch/arm/64/c_traps.c
+      - src/api/syscall.c
+      default_state: >-
+        The EL0 svc trap vectors to c_handle_syscall, which dispatches on the
+        syscall register without restricting where the svc instruction resides.
+        Authority is entirely capability-gated - a gadget-issued invocation
+        wields only the capabilities the thread already holds - but the
+        origin-pinning mechanism itself is absent.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no syscall-origin pinning. The capability model bounds what an
+      invocation can do, not from where it may be issued; an in-process
+      ROP/JOP chain can exercise every capability the thread holds from any
+      executable address.
+  C5a.1:
+    P: 1
+    D: 3
+    S: 2
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/tcb.c (drivers are ordinary threads in their own domains)"
+      - "sources/sel4/src/arch/arm/object/iospace.c (device DMA constrained by SMMU IOSpace caps, so even a faulty driver cannot DMA outside its grant)"
+      default_state: >-
+        seL4 has no in-kernel drivers (beyond the interrupt-controller/timer the
+        kernel needs). Devices are driven from user level: a driver receives an IRQ
+        capability and device-memory frame capabilities, and runs as an isolated
+        component. A crashing or compromised driver is confined to its own VSpace
+        and the capabilities it was given, and its DMA is bounded by the SMMU. This
+        is the canonical microkernel fault-isolation property.
+    commits:
+    - hash: "91b7da8625d28ad533d5bd801be5f89ad1b50d80"
+      date: "2014"
+      description: "Release snapshot"
+    - hash: "1a9756f65bc534f6365aeef771f2776cd460e033"
+      date: "2020"
+      description: "SMMU: basic driver for init and probing"
+    discussions:
+    - "https://github.com/seL4/seL4/pull/148"
+    rationale: >-
+      P=1: drivers are isolated user components. D=3: mandatory (the kernel has
+      essentially no drivers to begin with). S=2; decisive property: CPU-side
+      memory isolation of a driver component is proven — the integrity result
+      bounds what a faulty driver can modify through the MMU — but that containment
+      does not extend to the devices a driver controls. The scored zynqmp platform
+      has no IOMMU available (C5c.1), and the proofs themselves assume DMA is
+      absent or well-behaved, so a driver for a DMA-capable device can bypass the
+      isolation entirely. Scored below a comprehensive-with-no-known-bypass
+      implementation for that reason. A=3: core microkernel design. T=3.
+  C5a.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/CMakeLists.txt (no loadable-module surface to isolate)"
+      default_state: >-
+        There is no kernel module/extension mechanism; extensibility is user-level
+        components, whose isolation is covered by C5a.1/C5d.1.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no in-kernel loadable-module subsystem. Matches Fiasco (C5a.2 N/A).
+  C5a.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/libsel4/include/api/syscall.xml (complete kernel interface contains no programmable VM)"
+      default_state: >-
+        seL4 has no in-kernel programmable VM (no eBPF). There is no sandboxed
+        in-kernel interpreter to verify or confine.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no in-kernel VM subsystem. Matches Fiasco (C5a.3 N/A).
+  C5b.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/head.S (seL4 enters as the most-privileged kernel/hypervisor, with no lower monitor validating its writes)"
+      - "sources/sel4/src/arch/arm/64/config.cmake (AArch64/hypervisor build selection has no HEKI/IKG monitor integration)"
+      default_state: >-
+        HEKI/IKG presupposes a hypervisor below the kernel that enforces the
+        kernel's code/data integrity. seL4 is itself the most-privileged software
+        (it can be the hypervisor at EL2); nothing runs beneath it to police it.
+        Its integrity is instead established by the functional-correctness proof,
+        not by an enclosing monitor.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: the kernel-integrity attack surface exists, but the evaluated system
+      supplies no enclosing HEKI/IKG-style hypervisor. Being the TCB root does not
+      make the mechanism inapplicable: Fiasco and other bare-metal kernels in the
+      same position also score P=0. seL4 instead relies on its functional-
+      correctness proof, which is a different assurance mechanism.
+  C5b.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/kernel/boot.c (kernel boot has no enclave/sealed-key self-protection)"
+      default_state: >-
+        seL4 manages no in-kernel key store, so there is no kernel key material to
+        wall off in an enclave. On ARM it can run as either the normal-world or the
+        secure-world OS and can partition TrustZone for user components, but it does
+        not use TrustZone-A as a self-protection enclave for kernel secrets.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no enclave-protected kernel key material (the kernel holds none). Matches
+      Fiasco (C5b.2 P=0). Crypto/key custody is delegated to user-level components.
+  C5c.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options:
+      - "KernelArmSMMU (not selectable on the scored platform: DEPENDS KernelPlatformTx2; also forced OFF by the verification preset)"
+      - "KernelIOMMU (x86-64 comparator only: VT-d)"
+      source_files:
+      - "sources/sel4/src/arch/arm/config.cmake:125 (config_option(KernelArmSMMU ... DEPENDS \"KernelPlatformTx2\") — the ARM SMMU option is TX2-only; KernelTk1SMMU immediately below is TK1-only)"
+      - "sources/sel4/configs/include/AARCH64_verified_include.cmake (KernelArmSMMU OFF in the verification preset)"
+      - "sources/sel4/src/drivers/smmu/smmuv2.c (ARM SMMUv2 driver — entire file inside #ifdef CONFIG_ARM_SMMU, so not built here)"
+      - "sources/sel4/src/arch/arm/object/smmu.c (ARMCBAssignVspace: binds an SMMU context bank to a VSpace — TX2 only)"
+      - "sources/sel4/src/arch/x86/object/iospace.c (x86-64 comparator: VT-d IO space)"
+      default_state: >-
+        The scored build has no IOMMU-mediated DMA translation. seL4 does implement
+        an ARM SMMUv2 driver and IOSpace/context-bank capabilities, and on a TX2
+        target a context bank can be assigned to a VSpace (ARMCBAssignVspace) so a
+        device's DMA is translated by that VSpace's tables; but the option depends
+        on KernelPlatformTx2 and is additionally forced off by the AArch64
+        verification preset, so neither the driver nor the capability type is
+        present for the pinned zynqmp platform. Device DMA on the scored target is
+        therefore bounded only by what the platform's own hardware does, not by the
+        kernel. The x86-64 comparator has VT-d, but the verified x64 configuration
+        is itself specified without VT-x and VT-d, and the release provides no
+        IOMMU interrupt (MSI) remapping.
+    commits:
+    - hash: "879d9724c13a3aac9d460ef28515f46569ae09e9"
+      date: "2016"
+      description: "arm/tk1: a checkpoint for SMMU implementation"
+    - hash: "1a9756f65bc534f6365aeef771f2776cd460e033"
+      date: "2020"
+      description: "SMMU: basic driver for init and probing"
+    discussions:
+    - "https://github.com/seL4/seL4/pull/148"
+    rationale: >-
+      P=0: no IOMMU-mediated DMA isolation is available on the scored zynqmp
+      target — KernelArmSMMU is gated on KernelPlatformTx2 and the SMMUv2 driver is
+      entirely conditional on CONFIG_ARM_SMMU, so nothing is compiled in. This is
+      P=0 rather than N/A because the attack surface exists: zynqmp carries
+      DMA-capable masters, and the mechanism that would mediate them is simply
+      absent for this platform. The upstream verification scope excludes device
+      address translation in every configuration, so no proof compensates for the
+      absence either. The SMMUv2 driver and IOSpace capability type remain real
+      seL4 features on TX2, and VT-d on the x86-64 comparator; both are recorded
+      above so the capability is not misread as missing from the project.
+  C5c.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/kernel/vspace.c:236 (one flat kernel window in the kernel's own EL2 address space — no intra-kernel domains)"
+      default_state: >-
+        seL4 runs as one privileged domain with full access to physical memory; it
+        does not partition itself into intra-kernel MMU compartments. The
+        compensating argument is size and proof: the kernel is ~10k lines of
+        verified C, so the intra-kernel attack surface that compartments would
+        contain is itself minimized and proven correct.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no intra-kernel memory-protection domains (cf. the flat kernel window in
+      C1e.1). Matches Fiasco (C5c.2 P=0). seL4's answer to intra-kernel
+      compartmentalization is a tiny verified TCB, not sub-domains.
+  C5c.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/armv/armv8-a/config.cmake (scored SoCs have no MTE domain facility)"
+      default_state: >-
+        Tag-based isolation needs FEAT_MTE (absent on the scored Cortex-A53/A57 SoC),
+        and seL4 has no MTE support. See C1a.6.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no MTE silicon and no seL4 support. Matches Fiasco (C5c.3 N/A).
+  C5d.1:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/ (the kernel deliberately excludes services; cf. the small src/object + src/kernel + src/arch tree)"
+      - "sources/sel4/manual/parts/intro.tex (microkernel minimality principle)"
+      default_state: >-
+        seL4 embodies the microkernel minimality principle: a feature is in the
+        kernel only if moving it out would prevent implementing required
+        functionality. Consequently the kernel contains no filesystem, no network
+        stack, no driver framework, no memory allocator policy — these are
+        user-level components composed over IPC and capabilities. Compromise of one
+        service does not implicate the others or the kernel.
+    commits:
+    - hash: "91b7da8625d28ad533d5bd801be5f89ad1b50d80"
+      date: "2014"
+      description: "Release snapshot"
+    discussions: []
+    rationale: >-
+      P=1: maximal architectural separation of services. D=3: mandatory (services
+      cannot be in the kernel). S=3: inter-component isolation is proven on verified
+      configs; no known bypass. A=3: the defining design property. T=3. Matches
+      Fiasco (C5d.1 all-3).
+  C5d.2:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/cnode.c (capabilities are explicitly delegated; no ambient authority to pivot through)"
+      - "sources/sel4/src/object/endpoint.c (communication only across endpoints both parties hold capabilities to)"
+      default_state: >-
+        Because there is no ambient authority, a compromised component can reach
+        only the objects and components for which it already holds capabilities;
+        it cannot enumerate or pivot to arbitrary kernel objects or peers. System
+        designers bound the blast radius by deciding the capability distribution
+        (often expressed in a CapDL/component description), and the kernel enforces
+        it. The minted-with-reduced-rights and badge facilities allow further
+        narrowing of delegated authority.
+    commits:
+    - hash: "91b7da8625d28ad533d5bd801be5f89ad1b50d80"
+      date: "2014"
+      description: "Release snapshot"
+    discussions: []
+    rationale: >-
+      P=1: capability least-authority limits lateral movement. D=3: mandatory
+      property of the model. S=3; decisive property: the integrity and
+      policy-refinement results — available for the scored AArch64 configuration —
+      prove that authority cannot be amplified beyond what the capability
+      distribution permits, with no known bypass. What they do not do is choose a
+      minimal policy or verify the behaviour of the services holding the authority,
+      so least authority is enforced as configured rather than guaranteed by
+      construction. A=3: core design. T=3. Matches Fiasco (C5d.2 all-3).
+  C6.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/head.S (kernel entry assumes it was loaded and handed control by a trusted bootloader)"
+      - "sources/sel4/manual/parts/bootup.tex (boot hand-off model)"
+      default_state: >-
+        seL4 implements no boot-chain signature verification. A trusted boot
+        environment (e.g. ARM TF-A + verified U-Boot, or a SoC secure-boot ROM) is
+        assumed to authenticate and load the kernel image; the correctness proof is
+        predicated on the genuine image running. seL4 itself does not verify what
+        loaded it.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no in-kernel verified-boot mechanism; it is a platform assumption.
+      Matches Fiasco (C6.1 P=0).
+  C6.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/kernel/boot.c (boot path performs no measurement/PCR extension/attestation)"
+      default_state: >-
+        seL4 performs no boot measurement or attestation. If attestation is
+        required it is built as a user-level component over platform roots of trust
+        (TPM/measured boot belong to the platform, not the microkernel).
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no measured-boot/attestation mechanism in the kernel. Matches Fiasco
+      (C6.2 P=0).
+  C6.3:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/CMakeLists.txt (fixed verified image and no runtime module-signing surface)"
+      default_state: >-
+        With no loadable kernel modules (C4.5), there is no in-kernel code to
+        sign or verify at load; the verified kernel image is fixed and signed (if at
+        all) by the bootloader.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no kernel-module-signing subsystem exists. Matches Fiasco (C6.3 N/A).
+  C6.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/kernel/faulthandler.c (faults are routed to user-level fault handlers — the kernel enables user-level *component* recovery, not kernel self-monitoring)"
+      default_state: >-
+        seL4 has no periodic kernel-integrity self-check, no hypervisor monitoring
+        it (it is the TCB root, C5b.1), and no in-kernel hardware watchdog
+        driver (a watchdog is a user-level device). Kernel integrity at runtime
+        rests on (a) the functional-correctness proof and (b) the impossibility of
+        user code writing kernel memory (C1e.5). The MCS timeout-fault and the
+        fault-handler mechanism let *user-level* monitors detect and restart
+        faulted components, but that protects components, not the kernel.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no dedicated runtime kernel-integrity-protection mechanism. The static
+      proof and the isolation credited under C1e.5 substitute only for modelled
+      software modification of kernel state; they do not detect replacement of the
+      booted image, corruption originating outside the model (faulty or hostile
+      hardware, DMA, physical faults), or violation of the proof's own assumptions
+      — and boot code is outside the proof's scope altogether. Fiasco scores C6.4
+      P=1; seL4 is recorded P=0 because it has no runtime monitor, and
+      liveness/recovery is a user-level component concern.
+  C6.5:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/kernel/boot.c (the kernel creates the root task from the boot image; it does not parse/verify ELF binaries — user-level loaders do)"
+      default_state: >-
+        seL4 has no in-kernel ELF loader or process-loading path; the root task and
+        user-level loaders create components by mapping frames and granting
+        capabilities. Any load-time signature/credential verification would be
+        implemented in that user-level loader, not the kernel.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no in-kernel executable-loading/verification subsystem (loading is
+      user-level). Matches Fiasco (C6.5 N/A). This is the structural contrast with
+      Tock (C6.5 P=1), whose kernel verifies app credentials at load.
+  C7a.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/traps.S (entry path has no Spectre-v1 barrier/index masking)"
+      default_state: >-
+        seL4 inserts no speculation barriers/index masking against Spectre v1. The
+        kernel's small size and few user-controlled array indices limit the surface,
+        but no explicit mitigation exists. The functional-correctness proof does not
+        reason about speculative/timing behaviour, so v1 is explicitly out of its
+        scope.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no Spectre-v1 mitigation on the ARM primary. Like Fiasco (C7a.1 P=0).
+  C7a.2:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options:
+      - "KernelX86IBRSMode (x86-64 comparator: none/stibp/basic/all)"
+      - "KernelX86IBPBOnContextSwitch (x86-64 comparator)"
+      source_files:
+      - "sources/sel4/src/arch/x86/config.cmake:283 (KernelX86IBRSMode; comment notes seL4 has no indirect jumps except switch jump-tables and ret, and does not switch kernel stacks, so RSB underflow is not a concern)"
+      - "sources/sel4/src/arch/x86/config.cmake:293 (-fno-jump-tables when IBRS basic/STIBP, to remove the only indirect jumps and block Spectre v2)"
+      default_state: >-
+        On the AArch64 primary seL4 implements no ARM Spectre-v2 mitigation (no BHB
+        clearing). Its design helps intrinsically: the kernel has no function
+        pointers and no indirect jumps except compiler switch-tables and ret, and
+        it does not switch kernel stacks (so it is not exposed to RSB underflow). On
+        the x86-64 comparator this is hardened explicitly via IBRS/STIBP, IBPB on
+        context switch, and -fno-jump-tables.
+    commits:
+    - hash: "f0594ac917f03c1246b00d8182fcd33f82367c0b"
+      date: "2018"
+      description: "x86: Implement IBRS based Spectre mitigations"
+    discussions:
+    - "https://github.com/seL4/seL4/issues/86"
+    - "https://github.com/seL4/seL4/issues/85"
+    - "https://github.com/seL4/seL4/issues/1149"
+    rationale: >-
+      P=0 on the scored AArch64 config (no ARM v2 mitigation). The mechanism exists
+      on the x86-64 comparator (IBRS/STIBP/IBPB + -fno-jump-tables), recorded there.
+      Fiasco x86 scores C7a.2 P=1.
+  C7a.3:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/head.S (CPU setup has no SSBS/SSBD control)"
+      default_state: >-
+        seL4 does not toggle SSBD (x86) or SSBS (ARM) for Spectre v4. No mitigation
+        is applied on the primary.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no SSB mitigation. Like Fiasco (C7a.3 P=0).
+  C7a.4:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/CMakeLists.txt (kernel flags contain no SLS-hardening pass)"
+      default_state: >-
+        No straight-line-speculation barriers are emitted. The small kernel and
+        lack of -mharden-sls mean SLS is unmitigated, consistent with seL4's
+        timing-channels-out-of-scope position.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: no SLS hardening. Like Fiasco (C7a.4 P=0).
+  C7b.1:
+    status: xref
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files: []
+      default_state:
+    commits: []
+    discussions: []
+    rationale: >-
+      xref → C3b.1: this entry records the cross-reference in the C7 (transient execution)
+      taxonomy and is excluded from scoring so that the mitigation is not counted twice.
+      Nothing is mitigated here on the scored config, however: the pinned in-order
+      Cortex-A53/A57 cores are not Meltdown-vulnerable, so the xref target C3b.1 is itself
+      N/A — the same pinned-hardware basis as C7b.2 (L1TF) and C7c.1 (MDS). The x86-64
+      comparator does provide an opt-in KPTI equivalent (SKIM), recorded under C3b.1 as a
+      comparator rather than as a scored mitigation.
+  C7b.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/config.cmake (AArch64 primary target; Intel L1TF is not applicable)"
+      default_state: >-
+        L1 terminal fault affects Intel cores (and SGX/VMX). The scored ARM target
+        is unaffected, so the mechanism does not apply.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: Intel-specific issue; not applicable on the ARM primary.
+  C7c.1:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/arch/arm/64/config.cmake (AArch64 primary target; Intel MDS/TAA is not applicable)"
+      default_state: >-
+        Microarchitectural Data Sampling and TSX Asynchronous Abort affect specific
+        Intel cores; the scored ARM target has no such buffers to sample. (On the
+        x86-64 comparator seL4's small kernel and verified flush points limit
+        exposure, but the issue is Intel-specific.)
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: Intel-specific microarchitectural sampling; not applicable on the ARM
+      primary. (Fiasco, scored on x86, takes C7c.1 P=1.)
+  C7c.2:
+    P:
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options:
+      - "KernelX86IBRSSTIBP (x86-64 comparator: single-thread indirect-branch isolation across hyperthreads)"
+      source_files:
+      - "sources/sel4/src/arch/x86/config.cmake:283 (STIBP option, only meaningful with >1 node / SMT, x86-64)"
+      default_state: >-
+        Cross-thread (sibling-hyperthread) speculation isolation only applies to SMT
+        cores. The scored Cortex-A53-class SoC is single-threaded per core (no SMT),
+        so STIBP/SMT-disable do not apply. The x86-64 comparator offers STIBP for
+        multicore/SMT deployments.
+    commits: []
+    discussions: []
+    rationale: >-
+      N/A: no SMT on the ARM primary, so cross-thread speculation isolation is
+      inapplicable. Present on the x86-64 comparator (STIBP). Fiasco x86 scores
+      C7c.2 P=1.
+  C5e.1:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "Per-TCB standard fault endpoint (core mechanism; a null endpoint leaves the faulting thread inactive)"
+      - "KernelIsMCS=ON (optional timeout-fault endpoints and scheduling-context budget overrun detection)"
+      source_files:
+      - "sources/sel4/src/kernel/faulthandler.c:14-172 (fault IPC; a thread with no handler is made inactive)"
+      - "sources/sel4/src/kernel/thread.c:649-674 (MCS budget expiry and timeout-fault delivery)"
+      - "sources/sel4/manual/parts/threads.tex:330-615 (standard and timeout exception semantics)"
+      default_state: >-
+        The kernel always detects and contains synchronous user faults. A valid
+        fault-endpoint capability delegates diagnosis and recovery to a separate
+        user component; without one, the faulting thread is paused and cannot
+        affect peers. Actual restart policy is system composition rather than an
+        in-kernel component manager. MCS timeout faults add detection and recovery
+        for CPU-budget overruns, but KernelIsMCS is off in the scored verification
+        baseline and timeout endpoints remain optional. Kernel self-faults and
+        whole-system watchdog recovery are outside this facility (xref C6.4).
+    commits:
+    - hash: "91b7da8625d28ad533d5bd801be5f89ad1b50d80"
+      date: "2014"
+      description: "Release snapshot"
+    - hash: "a38e62f2f9423fce7351c9b029f7337dc5b7c0fe"
+      date: "2018-03-01"
+      description: "mcs: timeout exceptions"
+    - hash: "ad32c2769f8c420e037a0e5501d670b7228d5e8e"
+      date: "2025-06-04"
+      description: "mcs: fix error handling for SetTimeoutEndpoint"
+    discussions: []
+    rationale: >-
+      P=1: the kernel provides a real fault detection, containment, and
+      user-supervised recovery path. D=3: fault detection and containment
+      are mandatory — every user fault is
+      unconditionally contained, a thread without a handler is paused without
+      affecting peers, and no build option disables this. The prior D=2 counted
+      recovery-endpoint installation, which is application adoption; by
+      convention, D scores the kernel-side posture. Direct anchor:
+      Redox C5e.1 D=3 ("containment is mandatory and inherent — no toggle");
+      Tock stays D=2 because its shipped default policy panics the whole
+      system on a process fault, which seL4's default does not. MCS timeout
+      detection remains the opt-in facet (scored at C5e.2). S=3: capability- and
+      MMU-enforced fault domains prevent an untrusted component from bypassing
+      containment, and MCS can convert budget overruns into supervisor-visible
+      faults; no practical component-level bypass is known. The lack of kernel
+      self-recovery is recorded under C6.4 rather than weakening the component
+      facility. A=3: process-as-fault-domain and user-level recovery are core
+      microkernel properties. T_age=3: the model is foundational and MCS timeout
+      faults date to 2018. T_maintained=3: fault/MCS paths receive active fixes and
+      verification-driven refactoring; T=min(3,3)=3. This is the stronger seL4
+      anchor anticipated by the completed Tock/Zephyr comparisons.
+  C5e.2:
+    P: 1
+    D: 1
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options:
+      - "KernelIsMCS=ON (DEFAULT OFF in sources/sel4/config.cmake:7-8)"
+      - "KernelStaticMaxPeriodUs (upper limit for scheduling-context period/budget values)"
+      source_files:
+      - "sources/sel4/config.cmake:7-346 (MCS default-off selection and period limit)"
+      - "sources/sel4/include/kernel/sporadic.h:13-23 (budget/period refill invariant)"
+      - "sources/sel4/src/kernel/sporadic.c (sporadic-server replenishment accounting)"
+      - "sources/sel4/src/kernel/thread.c:625-674 (budget charging, preemption, and postponement until refill)"
+      - "sources/sel4/manual/parts/threads.tex:120-180 (scheduling contexts and enforced execution upper bound)"
+      default_state: >-
+        The scored verification build uses the classic scheduler because
+        KernelIsMCS defaults off. When enabled, every runnable thread needs a
+        scheduling context configured through a SchedControl capability. A partial
+        context with budget b and period p cannot execute for more than b in any p;
+        after exhaustion the kernel postpones it until a refill becomes eligible.
+        Timeout endpoints can notify a monitor. The kernel performs no admission
+        test and therefore promises an upper bound, not a guaranteed lower bound,
+        but an untrusted thread cannot raise or bypass its capability-assigned cap.
+    commits:
+    - hash: "952134d1b80f142fc9573809f7e67b7211771e51"
+      date: "2016-10-28"
+      description: "mcs: Add a scheduling context object"
+    - hash: "34c1f920b13b0e9b992145887429862a688b6f73"
+      date: "2016-11-04"
+      description: "mcs: add periodic scheduling"
+    - hash: "84163bd855fd2971065dfe1b5cc5a86a95fa9c60"
+      date: "2024-09-13"
+      description: "mcs: refactor refill_budget_check"
+    - hash: "efd9426e1771b6cdbcc7e58d3fd58d3df77c337e"
+      date: "2026-02-25"
+      description: "mcs: use local variable in restart"
+    discussions: []
+    rationale: >-
+      P=1: MCS scheduling contexts are a genuine CPU-budget enforcement
+      mechanism. D=1: KernelIsMCS is an explicit default-off build selection, so
+      the scored baseline does not activate it. S=2; decisive property: the kernel
+      enforces an absolute budget/period ceiling and capability-gates its
+      configuration, so a compromised thread cannot execute without eligible
+      budget or alter the cap without SchedControl authority — but this is an
+      unverified configuration. MCS verification is still in progress at the
+      evaluated revision (design-level proofs complete for RISC-V, C-level in
+      progress, AArch64 planned), and the classic single-core proofs do not carry
+      over to it, so the enforcement rests on implementation review rather than on
+      a machine-checked result. Lack of admission control affects positive
+      schedulability guarantees, not the anti-monopolisation upper bound scored
+      here. A=2: MCS is upstream but remains a selectable alternative scheduler,
+      not an inseparable property of every seL4 build. T_age=3: scheduling
+      contexts and periodic accounting predate 2017 and have shipped in mainline
+      since version 11. T_maintained=3: the MCS scheduler has sustained fixes,
+      refactoring, CI, and proof work through 2026; T=min(3,3)=3. This places it
+      above fair-share-only Tock/Linux peers in strength, as their completed
+      rationales anticipate.
+  C5e.3:
+    P: 1
+    D: 3
+    S: 3
+    A: 3
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/src/object/untyped.c (Untyped Retype checks size/capacity and consumes the capability's finite free index)"
+      - "sources/sel4/src/object/cnode.c (capability derivation/revocation governs object authority and reclamation)"
+      - "sources/sel4/manual/parts/objects.tex:360-475 (Untyped Retype/watermark accounting, safe reuse, and explicit object capacities)"
+      default_state: >-
+        Resource quota is the memory model itself. The root task initially receives
+        capabilities for the finite untyped regions left after boot and delegates
+        bounded subsets to components. A component can create only objects whose
+        backing bytes come from Untyped capabilities it holds; Retype fails when
+        the region or destination CNode capacity is exhausted. It cannot draw from
+        a shared kernel heap, consume another component's allocation budget, or
+        manufacture additional authority. C4.6 scores domain isolation; this row
+        scores the availability effect of finite capability-accounted resources.
+    commits:
+    - hash: "91b7da8625d28ad533d5bd801be5f89ad1b50d80"
+      date: "2014"
+      description: "Release snapshot"
+    - hash: "03c71b63e19215ef8be6b8c1ac8167d729b3b10c"
+      date: "2016"
+      description: "SELFOUR-444: Preemptible zeroing for retype."
+    - hash: "120951221caa67df6afd003addf0b732537de91e"
+      date: "2025-06-05"
+      description: "cleanup: use rootSlot to give a name to excapref0"
+    discussions: []
+    rationale: >-
+      P=1: finite Untyped capabilities are enforceable per-principal resource
+      quotas. D=3: every dynamic object creation necessarily passes through Retype;
+      the property cannot be disabled. S=3: no overcommit or ambient kernel heap
+      exists, so an untrusted component can exhaust only the finite resources and
+      CNode slots delegated to it; exhaustion cannot spill into peers or create
+      unaccounted kernel objects. A=3: capability-accounted physical memory is a
+      defining seL4 architectural property. T_age=3: it is foundational and over a
+      decade old. T_maintained=3: the object/capability paths remain part of active
+      kernel and proof maintenance; T=min(3,3)=3. This matches Tock C5e.3's
+      all-three strength/depth treatment while using Untyped rather than grants.
+  C7d.1:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age:
+    T_maintained:
+    implementation:
+      config_options: []
+      source_files:
+      - "sources/sel4/configs/include/AARCH64_verified_include.cmake (KernelBenchmarks \"none\" — the benchmark cache-flush syscall that is sometimes mistaken for a time-protection facility is not compiled into the scored build)"
+      default_state: >-
+        Mainline seL4 15.0.0 performs no kernel cloning, security-domain-labelled
+        context switch, cache colouring, or mandatory whole-microarchitecture
+        scrubbing. The only cache-flushing facility in the mainline tree is exposed
+        as a benchmark syscall, and the verification preset sets
+        KernelBenchmarks=none, so even that is absent from the scored build. The
+        EuroSys prototype implemented and evaluated the real mechanisms on ARM and
+        x86 and substantially reduced timing-channel leakage, but its authors
+        describe it as a research prototype whose completeness depends on
+        hardware-provided partition/flush controls, and implementation and
+        verification work was still ongoing at the evaluated revision.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: the mechanism is not present in the evaluated configuration. The
+      research prototype is real and was measured, but it is out-of-tree, on a
+      separate branch and manifest, and the pinned verification build additionally
+      compiles out the one mainline cache-flush facility (KernelBenchmarks=none).
+      Scoring it present would credit this column with code the scored kernel does
+      not contain, which no other column is allowed. This is P=0 rather than N/A
+      because the surface is real: the pinned Cortex-A53 has shared cache state
+      across isolation domains, and the functional-correctness proof explicitly
+      excludes microarchitectural timing channels, so nothing else compensates.
+      The prototype and its published results are retained above so the project's
+      leading work in this area is not misread as absent.
