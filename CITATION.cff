@@ -1,0 +1,51 @@
+cff-version: 1.2.0
+message: >-
+  If you use this data or viewer, please cite the accompanying article
+  (see preferred-citation below).
+title: >-
+  OS Hardening Evaluation — supplementary data and viewer for a comparative
+  quantitative evaluation of kernel hardening mechanisms
+abstract: >-
+  Evaluation data and a static viewer scoring 76 kernel hardening mechanisms
+  across nine operating systems (Linux, OpenBSD, NetBSD, Fuchsia, GNU/Hurd,
+  Redox OS, Zephyr RTOS, Tock OS, seL4) on five dimensions — presence, default
+  posture, strength, integration depth and maturity — with per-mechanism
+  rationale and upstream commit evidence.
+type: software
+authors:
+  - family-names: Efremov
+    given-names: Denis V.
+    email: efremov@ispras.ru
+    affiliation: Ivannikov Institute for System Programming of the RAS
+    orcid: https://orcid.org/0000-0002-9916-056X
+url: https://evdenis.github.io/os-hardening-evaluation/
+repository-code: https://github.com/evdenis/os-hardening-evaluation
+license:
+  - MIT
+  - CC-BY-4.0
+keywords:
+  - operating system kernel
+  - kernel hardening
+  - exploit mitigation
+  - security evaluation
+  - comparative analysis
+preferred-citation:
+  type: article
+  title: >-
+    Comparative Quantitative Evaluation of Kernel Hardening Mechanisms in
+    Operating Systems
+  authors:
+    - family-names: Efremov
+      given-names: Denis V.
+      email: efremov@ispras.ru
+      affiliation: Ivannikov Institute for System Programming of the RAS
+      orcid: https://orcid.org/0000-0002-9916-056X
+  journal: Proceedings of the Institute for System Programming of the RAS
+  year: 2026
+  volume: 38
+  issue: 4
+  start: 81
+  end: 108
+  doi: 10.15514/ISPRAS-2026-38(4)-20
+  issn: 2079-8156
+  url: https://www.ispras.ru/proceedings/isp_38_2026_4-2/isp_38_2026_4-2_81/

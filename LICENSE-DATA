@@ -1,0 +1,33 @@
+Creative Commons Attribution 4.0 International (CC BY 4.0)
+
+Copyright (c) 2026 Denis Efremov
+
+This license covers the evaluation data shipped in this repository — everything
+under `data/`: the taxonomy, the per-system scoring files, and the cached
+upstream commit metadata and diffs. The compiled viewer (`index.html`,
+`assets/`) is licensed separately under the MIT License; see LICENSE.
+
+You are free to share and adapt this material for any purpose, including
+commercially, provided you give appropriate credit, provide a link to the
+license, and indicate if changes were made.
+
+Full license text: https://creativecommons.org/licenses/by/4.0/legalcode
+Summary: https://creativecommons.org/licenses/by/4.0/
+
+Attribution
+-----------
+
+Please cite the accompanying article:
+
+    Efremov D. V. Comparative Quantitative Evaluation of Kernel Hardening
+    Mechanisms in Operating Systems // Proceedings of the Institute for System
+    Programming of the RAS. 2026. Vol. 38, no. 4. P. 81-108.
+    DOI: 10.15514/ISPRAS-2026-38(4)-20
+
+Machine-readable citation metadata is in CITATION.cff.
+
+The cached upstream commit metadata and diffs under `data/commit-details.json`
+and `data/commit-diffs.json` are excerpts of the respective upstream kernel
+projects and remain under those projects' own licenses; the CC BY 4.0 grant
+above applies to the selection, arrangement and annotation of that material,
+not to the upstream code itself.
