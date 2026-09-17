@@ -3,10 +3,12 @@ message: >-
   If you use this data or viewer, please cite the accompanying article
   (see preferred-citation below).
 title: >-
-  OS Hardening Evaluation — supplementary data and viewer for a comparative
-  quantitative evaluation of kernel hardening mechanisms
+  OS Hardening Evaluation — supplementary data, viewer and scoring
+  implementation for a comparative quantitative evaluation of kernel
+  hardening mechanisms
 abstract: >-
-  Evaluation data and a static viewer scoring 76 kernel hardening mechanisms
+  Evaluation data, a static viewer and a reference implementation that
+  recomputes every published score, covering 76 kernel hardening mechanisms
   across nine operating systems (Linux, OpenBSD, NetBSD, Fuchsia, GNU/Hurd,
   Redox OS, Zephyr RTOS, Tock OS, seL4) on five dimensions — presence, default
   posture, strength, integration depth and maturity — with per-mechanism
@@ -29,6 +31,7 @@ keywords:
   - exploit mitigation
   - security evaluation
   - comparative analysis
+  - reproducibility
 preferred-citation:
   type: article
   title: >-

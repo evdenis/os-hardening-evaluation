@@ -4,8 +4,9 @@ Copyright (c) 2026 Denis Efremov
 
 This license covers the evaluation data shipped in this repository — everything
 under `data/`: the taxonomy, the per-system scoring files, and the cached
-upstream commit metadata and diffs. The compiled viewer (`index.html`,
-`assets/`) is licensed separately under the MIT License; see LICENSE.
+upstream commit metadata and diffs. The compiled viewer and the reference
+scoring implementation (`index.html`, `assets/`, `scripts/`) are licensed
+separately under the MIT License; see LICENSE.
 
 You are free to share and adapt this material for any purpose, including
 commercially, provided you give appropriate credit, provide a link to the

@@ -1,5 +1,6 @@
-This license covers the compiled viewer shipped in this repository —
-`index.html` and `assets/`. It does not cover the evaluation data under
+This license covers the compiled viewer and the reference scoring
+implementation shipped in this repository — `index.html`, `assets/` and
+`scripts/`. It does not cover the evaluation data under
 `data/` (CC BY 4.0, see LICENSE-DATA), nor the bundled third-party assets,
 which keep their own terms: the Inter Tight, JetBrains Mono and Source Serif 4
 font subsets are under the SIL Open Font License 1.1, and the Shiki grammar

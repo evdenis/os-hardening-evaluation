@@ -51,6 +51,25 @@ them.
 | C6 — Integrity and trust chain | 5 |
 | C7 — Transient execution defenses | 9 |
 
+## Reproducing the scores
+
+Every published number can be recomputed from `data/` with the reference
+implementation in `scripts/`. It needs Python 3.8+ and PyYAML, nothing else:
+
+```bash
+git clone https://github.com/evdenis/os-hardening-evaluation
+cd os-hardening-evaluation
+pip install -r scripts/requirements.txt
+
+python3 scripts/score.py                 # cross-system ranking table
+python3 scripts/score.py linux           # full per-mechanism breakdown
+python3 scripts/score.py --all --json    # machine-readable output
+```
+
+This is the implementation the article refers to when it fixes the rounding
+order of intermediate and final values (section 4.7); that order is written
+out in [`scripts/README.md`](scripts/README.md).
+
 ## Contents
 
 - `index.html`, `assets/` — prebuilt SPA (React/Vite bundle, self-hosted fonts,
@@ -63,6 +82,9 @@ them.
 - `data/commit-details.json`, `data/commit-diffs.json` — cached metadata and unified
   diffs for 514 upstream commits, backing the evidence viewer
   (`commit-diffs.json` is ~8 MB and dominates the clone size)
+- `scripts/` — reference implementation of the scoring pipeline
+  (`score.py`, `README.md`, `requirements.txt`): recomputes every published
+  score from `data/`, with the rounding order documented
 - `.nojekyll` — keeps GitHub Pages from filtering the build output
 
 ## Citation
@@ -90,7 +112,8 @@ Operating Systems // Proceedings of the Institute for System Programming of the 
 
 ## License
 
-- Viewer code (`index.html`, `assets/`) — MIT, see [`LICENSE`](LICENSE).
+- Viewer code and reference scripts (`index.html`, `assets/`, `scripts/`) — MIT,
+  see [`LICENSE`](LICENSE).
 - Evaluation data (`data/`) — CC BY 4.0, see [`LICENSE-DATA`](LICENSE-DATA).
 
 Bundled third-party assets keep their own terms: the Inter Tight, JetBrains Mono and
