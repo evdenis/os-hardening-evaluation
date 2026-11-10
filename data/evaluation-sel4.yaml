@@ -780,6 +780,36 @@ mechanisms:
     discussions: []
     rationale: >-
       P=0: no trapsled padding. Like Fiasco/Tock (C1e.8 P=0).
+  C1e.9:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "src/arch/arm/64/head.S:87-94 (SCTLR_EL2 initialised once at boot)"
+      - "include/arch/arm/arch/64/mode/machine.h:59-65 (SCTLR accessor — plain msr)"
+      - "src/arch/x86/kernel/boot.c:376-392 (x86-64 comparator sets CR0.WP and CR4 SMAP/SMEP once)"
+      default_state: >-
+        On the scored AArch64 build the kernel initialises SCTLR_EL2
+        in head.S and later writes system registers with plain msr;
+        the x86-64 comparator sets CR0.WP and CR4.SMEP/SMAP once in
+        boot.c. Neither architecture records the boot values or
+        re-checks them on a later write.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: the surface exists (SCTLR_EL2, VBAR_EL2 and, on the
+      comparator, CR0/CR4 are writable from kernel mode), but there is
+      no pinning. The functional-correctness proof covers the threat
+      instead: verified kernel code contains no memory-corruption path
+      that could steer execution to an unintended msr or mov to CR4. The
+      proof is a different assurance mechanism and is not credited here,
+      as with seL4's other omitted intra-kernel hardening. D=S=A=T=0
+      follow from absence.
   C1f.1:
     P: 0
     D: 0

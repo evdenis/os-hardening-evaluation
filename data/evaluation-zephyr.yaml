@@ -743,6 +743,33 @@ mechanisms:
       same rule): Thumb-2's lack of a clean INT3/UD2 trap-fill idiom is
       part of why the mitigation is absent, not a reason the padding surface
       vanishes. D=S=A=T=0 follow from P=0.
+  C1e.9:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "arch/arm/core/mpu/arm_mpu.c:291-300 (arm_core_mpu_enable writes MPU->CTRL)"
+      - "arch/arm/core/mpu/arm_mpu.c:310-317 (arm_core_mpu_disable clears MPU->CTRL)"
+      default_state: >-
+        The ARMv8-M MPU driver enables the MPU by writing MPU->CTRL
+        and exports arm_core_mpu_disable(), which clears it. Under
+        CONFIG_USERSPACE the dynamic per-thread regions are rewritten
+        on context switches from the thread's memory-domain data in
+        kernel RAM. Zephyr never sets the Armv8-M MPU/SAU/VTOR
+        configuration locks, and hardenconfig has no corresponding
+        option.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: the surface exists (MPU_CTRL and the region registers enforce
+      the user/kernel split under CONFIG_USERSPACE), but there is no
+      configuration lock or pinned-value check. D=S=A=T=0 follow from
+      absence.
   C1f.1:
     P: 0
     D: 0

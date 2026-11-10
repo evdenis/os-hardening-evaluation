@@ -1930,6 +1930,31 @@ mechanisms:
     discussions: []
     rationale: >-
       P=0: no trapsled mechanism.
+  C1e.9:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "x86_64/boothdr.S:163 (boot path sets CR0.WP)"
+      - "i386/i386at/model_dep.c:477 (sets CR0.WP on i386)"
+      - "i386/i386/proc_reg.h:133 (set_cr0 macro — bare mov, no check)"
+      - "i386/i386/proc_reg.h:209 (set_cr4 macro — bare mov, no check)"
+      default_state: >-
+        GNU Mach turns on CR0.WP at boot and never enables SMEP or
+        SMAP. The set_cr0()/set_cr4() accessors are bare inline mov
+        instructions, and nothing records or re-checks the WP bit
+        after boot.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: the surface exists (CR0.WP is the only protection bit set,
+      and it still makes kernel writes honour read-only user mappings),
+      but nothing pins it. D=S=A=T=0 follow from absence.
   C4.8:
     P: 0
     D: 0

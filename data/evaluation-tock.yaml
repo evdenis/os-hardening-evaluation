@@ -669,6 +669,32 @@ mechanisms:
       exists, but no trap-fill mitigation is applied. Not N/A because executable
       code with alignment padding exists; the architecture's lack of a clean trap
       encoding is why it stays unimplemented.
+  C1e.9:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "arch/cortex-m/src/mpu.rs:387-399 (enable_app_mpu/disable_app_mpu toggle MPU_CTRL on every process switch)"
+      default_state: >-
+        Tock enables the MPU (ENABLE|PRIVDEFENA) just before switching
+        to a process and clears it on return to the kernel, reloading
+        the process's regions from its in-RAM MPU configuration each
+        time. The evaluated nRF52840 core is ARMv7-M, which has no
+        configuration-lock inputs, and nothing re-checks the MPU
+        registers against fixed values.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: the surface exists (MPU_CTRL and the region registers isolate
+      processes), but there is no pinning; toggling the MPU on each
+      switch is a functional reprogramming path whose region values come
+      from mutable kernel state, not a check against a boot-time value.
+      D=S=A=T=0 follow from absence.
   C1f.1:
     P: 1
     D: 3

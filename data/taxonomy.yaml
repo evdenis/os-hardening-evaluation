@@ -459,6 +459,25 @@ mechanisms:
     subcategory: C1e
     name: "Executable section trap fills (trapsleds)"
     vulnerability_class: "CWE-121, CWE-787 (ROP gadget reuse in alignment padding; fall-through into adjacent code)"
+  C1e.9:
+    category: C1
+    subcategory: C1e
+    name: "Control-register pinning (CR0/CR4 security-bit pinning)"
+    vulnerability_class: "CWE-1233, CWE-693 (post-init clearing of control-register security bits)"
+    scoring_notes: >-
+      Scores whether the kernel keeps the security-relevant bits of privileged
+      control/system registers fixed after boot: a later write that would clear
+      them is refused or reverted (x86 CR0.WP, CR4.SMEP/SMAP/UMIP/CET/FSGSBASE;
+      the arm64 analogue is SCTLR_EL1/TCR_EL1/VBAR_EL1, the Armv8-M analogue the
+      MPU/SAU/VTOR configuration locks). Enabling the protection is scored
+      elsewhere — SMEP/PXN at C1e.4, SMAP/PAN at C3b.2, CET at C2a.2/C2b.2 — and
+      pinning evidence must not be the decisive Strength argument in those rows.
+      Pinning enforced from outside the kernel (Hyper-V VBS/HVCI, the HEKI KVM
+      CR-pinning hypercalls, vendor EL2 monitors) is credited at C5b.1;
+      after-the-fact detection of a cleared bit (LKRG CPU-state checks) stays at C6.4.
+      A software check in the register-write accessor stops a ROP chain that
+      calls the accessor, but not a raw mov-to-CR gadget or arbitrary kernel
+      code execution; a hardware lock bit survives both.
   C1f.1:
     category: C1
     subcategory: C1f

@@ -1010,6 +1010,34 @@ mechanisms:
       D=3 per the disable-path convention: _ALIGN_TRAPS int3 fills are
       hardwired in the amd64 assembler macros (sys/arch/amd64/include/asm.h)
       for the single GENERIC kernel; no configuration removes them.
+  C1e.9:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/amd64/include/cpufunc.h:105-109 (lcr0 — unconditional mov to %cr0)"
+      - "sys/arch/amd64/include/cpufunc.h:147-152 (lcr4 — unconditional mov to %cr4)"
+      - "sys/arch/amd64/amd64/cpu.c:801-811 (cpu_init sets CR4 SMEP/SMAP/UMIP/PKE once)"
+      - "sys/arch/amd64/amd64/efi_machdep.c:212 (clears CR4.CET around EFI runtime calls)"
+      default_state: >-
+        cpu_init() sets CR4.SMEP, SMAP, UMIP and (for execute-only user
+        mappings) PKE once per CPU, and CR4.CET is turned on for kernel
+        IBT. The lcr0()/lcr4() accessors are bare inline mov instructions;
+        nothing records the security bits or re-checks them on a later
+        write, and the kernel itself clears CR4.CET around EFI runtime
+        calls and CR0.WP during ACPI resume.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: the surface exists (OpenBSD sets CR0.WP and CR4 SMEP/SMAP/UMIP/
+      PKE/CET, all of which a kernel ROP chain could clear with one mov),
+      but no control-register pinning is implemented. D=S=A=T=0 follow from
+      absence.
   C1f.1:
     P: 0
     D: 0

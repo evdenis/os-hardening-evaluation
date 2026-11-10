@@ -2389,6 +2389,50 @@ mechanisms:
     discussions: []
     rationale: >-
       P=0: no trapsled mechanism.
+  C1e.9:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "src/arch/x86_64/misc.rs:14-21 (UMIP and SMEP set with x86::controlregs::cr4_write)"
+      - "src/arch/x86_64/alternative.rs:57-62 (SMAP set with x86::controlregs::cr4_write)"
+      default_state: >-
+        The kernel sets CR4.UMIP and SMEP in misc.rs and CR4.SMAP in
+        alternative.rs through the x86 crate's cr4_write(), an unsafe
+        wrapper around a single mov to CR4. Nothing records the
+        security bits or re-checks them later; Rust's memory safety
+        does not constrain a ROP chain that reaches that instruction.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: the surface exists (CR4.SMEP/SMAP/UMIP are set at boot), but
+      there is no control-register pinning. D=S=A=T=0 follow from
+      absence.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "src/arch/aarch64/start.rs (kernel entry runs with the bootloader-programmed SCTLR_EL1; no sctlr access anywhere in the kernel)"
+        default_state: >-
+          The aarch64 kernel never reads or writes SCTLR_EL1: the
+          bootloader programs it before entry and the kernel takes
+          it as given, so nothing records or re-checks its
+          security-relevant bits.
+      rationale: >-
+        arm64: P=0 — the surface exists (SCTLR_EL1, TCR_EL1 and
+        VBAR_EL1 remain writable from EL1), but there is no
+        system-register pinning. D=S=A=T=0 follow from absence.
   C4.8:
     P: 0
     D: 0

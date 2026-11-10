@@ -7826,6 +7826,22 @@
         "is_merge": false,
         "subject": "modules: sysctl to block module loading"
       },
+      "411df123c017169922cc767affce76282b8e6c85": {
+        "author": "Borislav Petkov (AMD)",
+        "author_date": "2026-03-19",
+        "body": "Commit in Fixes added the FRED CR4 bit to the CR4 pinned bits mask so\nthat whenever something else modifies CR4, that bit remains set. Which\nin itself is a perfectly fine idea.\n\nHowever, there's an issue when during boot FRED is initialized: first on\nthe BSP and later on the APs. Thus, there's a window in time when\nexceptions cannot be handled.\n\nThis becomes particularly nasty when running as SEV-{ES,SNP} or TDX\nguests which, when they manage to trigger exceptions during that short\nwindow described above, triple fault due to FRED MSRs not being set up\nyet.\n\nSee Link tag below for a much more detailed explanation of the\nsituation.\n\nSo, as a result, the commit in that Link URL tried to address this\nshortcoming by temporarily disabling CR4 pinning when an AP is not\nonline yet.\n\nHowever, that is a problem in itself because in this case, an attack on\nthe kernel needs to only modify the online bit - a single bit in RW\nmemory - and then disable CR4 pinning and then disable SM*P, leading to\nmore and worse things to happen to the system.\n\nSo, instead, remove the FRED bit from the CR4 pinning mask, thus\nobviating the need to temporarily disable CR4 pinning.\n\nIf someone manages to disable FRED when poking at CR4, then\nidt_invalidate() would make sure the system would crash'n'burn on the\nfirst exception triggered, which is a much better outcome security-wise.\n\nFixes: ff45746fbf00 (\"x86/cpu: Add X86_CR4_FRED macro\")\nSuggested-by: Dave Hansen <dave.hansen@linux.intel.com>\nSuggested-by: Peter Zijlstra <peterz@infradead.org>\nSigned-off-by: Borislav Petkov (AMD) <bp@alien8.de>\nCc: <stable@kernel.org> # 6.12+\nLink: https://lore.kernel.org/r/177385987098.1647592.3381141860481415647.tip-bot2@tip-bot2",
+        "files": [
+          {
+            "added": 1,
+            "deleted": 1,
+            "path": "arch/x86/kernel/cpu/common.c"
+          }
+        ],
+        "files_truncated": false,
+        "hash": "411df123c017169922cc767affce76282b8e6c85",
+        "is_merge": false,
+        "subject": "x86/cpu: Remove X86_CR4_FRED from the CR4 pinned bits mask"
+      },
       "44f65d900698278a8451988abe0d5ca37fd46882": {
         "author": "Jeff Xu",
         "author_date": "2024-08-06",
@@ -9274,6 +9290,42 @@
         "is_merge": false,
         "subject": "arm64: add basic pointer authentication support"
       },
+      "7652ac92018536eb807b6c2130100c85f1ba7e3b": {
+        "author": "Thomas Gleixner",
+        "author_date": "2019-07-10",
+        "body": "The pinning of sensitive CR0 and CR4 bits caused a boot crash when loading\nthe kvm_intel module on a kernel compiled with CONFIG_PARAVIRT=n.\n\nThe reason is that the static key which controls the pinning is marked RO\nafter init. The kvm_intel module contains a CR4 write which requires to\nupdate the static key entry list. That obviously does not work when the key\nis in a RO section.\n\nWith CONFIG_PARAVIRT enabled this does not happen because the CR4 write\nuses the paravirt indirection and the actual write function is built in.\n\nAs the key is intended to be immutable after init, move\nnative_write_cr0/4() out of line.\n\nWhile at it consolidate the update of the cr4 shadow variable and store the\nvalue right away when the pinning is initialized on a booting CPU. No point\nin reading it back 20 instructions later. This allows to confine the static\nkey and the pinning variable to cpu/common and allows to mark them static.\n\nFixes: 8dbec27a242c (\"x86/asm: Pin sensitive CR0 bits\")\nFixes: 873d50d58f67 (\"x86/asm: Pin sensitive CR4 bits\")\nReported-by: Linus Torvalds <torvalds@linux-foundation.org>\nReported-by: Xi Ruoyao <xry111@mengyan1223.wang>\nSigned-off-by: Thomas Gleixner <tglx@linutronix.de>\nTested-by: Xi Ruoyao <xry111@mengyan1223.wang>\nAcked-by: Kees Cook <keescook@chromium.org>\nAcked-by: Peter Zijlstra (Intel) <peterz@infradead.org>\nLink: https://lkml.kernel.org/r/alpine.DEB.2.21.1907102140340.1758@nanos.tec.linutronix.de",
+        "files": [
+          {
+            "added": 56,
+            "deleted": 16,
+            "path": "arch/x86/kernel/cpu/common.c"
+          },
+          {
+            "added": 2,
+            "deleted": 39,
+            "path": "arch/x86/include/asm/special_insns.h"
+          },
+          {
+            "added": 1,
+            "deleted": 13,
+            "path": "arch/x86/kernel/smpboot.c"
+          },
+          {
+            "added": 1,
+            "deleted": 0,
+            "path": "arch/x86/include/asm/processor.h"
+          },
+          {
+            "added": 1,
+            "deleted": 0,
+            "path": "arch/x86/xen/smp_pv.c"
+          }
+        ],
+        "files_truncated": false,
+        "hash": "7652ac92018536eb807b6c2130100c85f1ba7e3b",
+        "is_merge": false,
+        "subject": "x86/asm: Move native_write_cr0/4() out of line"
+      },
       "76b043848fd22dbf7f8bf3a1452f8c70d557b860": {
         "author": "David Woodhouse",
         "author_date": "2018-01-11",
@@ -9762,6 +9814,22 @@
         "is_merge": false,
         "subject": "Memory controller: cgroups setup"
       },
+      "8dbec27a242cd3e2816eeb98d3237b9f57cf6232": {
+        "author": "Kees Cook",
+        "author_date": "2019-06-17",
+        "body": "With sensitive CR4 bits pinned now, it's possible that the WP bit for\nCR0 might become a target as well.\n\nFollowing the same reasoning for the CR4 pinning, pin CR0's WP\nbit. Contrary to the cpu feature dependend CR4 pinning this can be done\nwith a constant value.\n\nSuggested-by: Peter Zijlstra <peterz@infradead.org>\nSigned-off-by: Kees Cook <keescook@chromium.org>\nSigned-off-by: Thomas Gleixner <tglx@linutronix.de>\nCc: Linus Torvalds <torvalds@linux-foundation.org>\nCc: Dave Hansen <dave.hansen@intel.com>\nCc: kernel-hardening@lists.openwall.com\nLink: https://lkml.kernel.org/r/20190618045503.39105-4-keescook@chromium.org",
+        "files": [
+          {
+            "added": 14,
+            "deleted": 1,
+            "path": "arch/x86/include/asm/special_insns.h"
+          }
+        ],
+        "files_truncated": false,
+        "hash": "8dbec27a242cd3e2816eeb98d3237b9f57cf6232",
+        "is_merge": false,
+        "subject": "x86/asm: Pin sensitive CR0 bits"
+      },
       "8e7d838103feac320baf9e68d73f954840ac1eea": {
         "author": "Vivek Goyal",
         "author_date": "2014-08-08",
@@ -10231,6 +10299,22 @@
         "hash": "9e2b4be377f0d715d9d910507890f9620cc22a9d",
         "is_merge": false,
         "subject": "ima: add a new CONFIG for loading arch-specific policies"
+      },
+      "a13b9d0b97211579ea63b96c606de79b963c0f47": {
+        "author": "Kees Cook",
+        "author_date": "2020-06-08",
+        "body": "The X86_CR4_FSGSBASE bit of CR4 should not change after boot[1]. Older\nkernels should enforce this bit to zero, and newer kernels need to\nenforce it depending on boot-time configuration (e.g. \"nofsgsbase\").\nTo support a pinned bit being either 1 or 0, use an explicit mask in\ncombination with the expected pinned bit values.\n\n[1] https://lore.kernel.org/lkml/20200527103147.GI325280@hirez.programming.kicks-ass.net\n\nSigned-off-by: Kees Cook <keescook@chromium.org>\nSigned-off-by: Thomas Gleixner <tglx@linutronix.de>\nCc: stable@vger.kernel.org\nLink: https://lkml.kernel.org/r/202006082013.71E29A42@keescook",
+        "files": [
+          {
+            "added": 12,
+            "deleted": 12,
+            "path": "arch/x86/kernel/cpu/common.c"
+          }
+        ],
+        "files_truncated": false,
+        "hash": "a13b9d0b97211579ea63b96c606de79b963c0f47",
+        "is_merge": false,
+        "subject": "x86/cpu: Use pinning mask for CR4 bits needing to be 0"
       },
       "a73ec77ee17ec556fe7f165d00314cb7c047b1ac": {
         "author": "Thomas Gleixner",

@@ -3033,6 +3033,51 @@ mechanisms:
       (compiler-enforced). T_age=2 (landed 2022-09), T_maintained=2 (only
       sporadic non-trivial work on the cited harden-sls build-config files
       in the 18-month window); T = min(2, 2) = 2.
+  C1e.9:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "zircon/kernel/arch/x86/include/arch/x86.h:244-250 (x86_set_cr0/x86_set_cr4 — bare mov, no check)"
+      - "zircon/kernel/arch/x86/mmu.cc:1173-1187 (x86_mmu_percpu_init sets CR0.WP and CR4 SMEP/SMAP once per CPU)"
+      default_state: >-
+        x86_mmu_percpu_init() sets CR0.WP and, when supported,
+        CR4.SMEP and SMAP through the arch::X86Cr0/X86Cr4 register
+        helpers, and the older x86_set_cr0()/x86_set_cr4() accessors
+        are bare inline mov instructions. Neither records the security
+        bits nor re-checks them on a later write.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: the surface exists (CR0.WP and CR4.SMEP/SMAP are set per
+      CPU), but Zircon does not pin them after boot. D=S=A=T=0 follow
+      from absence.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "zircon/kernel/arch/arm64/arch.cc:274-296 (SCTLR_EL1 built from zero and written once per CPU, no pinned-bit check)"
+        default_state: >-
+          arm64 builds SCTLR_EL1 from zero during per-CPU init (MMU,
+          caches, SPAN, EL0 traps) and writes it with a plain
+          system-register write; later writes are not checked
+          against the boot value.
+      rationale: >-
+        arm64: P=0 — the surface exists (an EL1 ROP chain that reaches
+        an msr to SCTLR_EL1, TCR_EL1 or VBAR_EL1 can disable or
+        redirect protections), but there is no system-register
+        pinning. D=S=A=T=0 follow from absence.
   C4.8:
     P: 1
     D: 3

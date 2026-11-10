@@ -2847,6 +2847,50 @@ mechanisms:
       section-level =0xCC fill), so T = min(3,1) = 1.
       arm64 note: the aarch64 ldscript has no equivalent fill, so this
       remains an amd64/i386 hardening.
+  C1e.9:
+    P: 0
+    D: 0
+    S: 0
+    A: 0
+    T_age: 0
+    T_maintained: 0
+    implementation:
+      config_options: []
+      source_files:
+      - "sys/arch/x86/include/cpufunc.h:214-226 (FUNC_CR macro generates lcr0/lcr4 as bare mov instructions)"
+      - "sys/arch/x86/x86/cpu.c:649 (cpu_init sets CR0.WP)"
+      - "sys/arch/x86/x86/cpu.c:672-689 (cpu_init sets CR4 SMEP/SMAP once)"
+      - "sys/arch/amd64/amd64/cpufunc.S:226-247 (x86_hotpatch clears CR0.WP while patching kernel text)"
+      default_state: >-
+        cpu_init() sets CR0.WP and, when supported, CR4.SMEP and SMAP. The
+        lcr0()/lcr4() accessors are macro-generated inline mov instructions
+        with no pinned-bit check, and x86_hotpatch() clears CR0.WP itself
+        while it rewrites kernel text.
+    commits: []
+    discussions: []
+    rationale: >-
+      P=0: the surface exists (CR0.WP and CR4.SMEP/SMAP are set at boot),
+      but nothing pins them after boot. D=S=A=T=0 follow from absence.
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - "sys/arch/aarch64/aarch64/locore.S:193-196 (SCTLR_EL1 programmed with a plain msr)"
+        - "sys/arch/aarch64/aarch64/cpufunc.c:559-561 (reg_sctlr_el1_write — no pinned-bit check)"
+        default_state: >-
+          SCTLR_EL1 and the other EL1 system registers are written with
+          plain msr instructions; nothing re-checks security-relevant bits
+          (PAN, WXN, pointer-authentication enables) after boot.
+      rationale: >-
+        arm64: P=0 — the surface exists (an EL1 ROP chain that reaches an
+        msr to SCTLR_EL1 can turn protections off), but there is no
+        system-register pinning. D=S=A=T=0 follow from absence.
   C4.8:
     P: 0
     D: 0

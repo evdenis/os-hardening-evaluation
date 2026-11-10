@@ -7729,6 +7729,17 @@
         ],
         "skipped_files": 0
       },
+      "411df123c017169922cc767affce76282b8e6c85": {
+        "files": [
+          {
+            "diff": "@@ -433,7 +433,7 @@ static __always_inline void setup_lass(struct cpuinfo_x86 *c)\n \n /* These bits should not change their value after CPU init is finished. */\n static const unsigned long cr4_pinned_mask = X86_CR4_SMEP | X86_CR4_SMAP | X86_CR4_UMIP |\n-\t\t\t\t\t     X86_CR4_FSGSBASE | X86_CR4_CET | X86_CR4_FRED;\n+\t\t\t\t\t     X86_CR4_FSGSBASE | X86_CR4_CET;\n static DEFINE_STATIC_KEY_FALSE_RO(cr_pinning);\n static unsigned long cr4_pinned_bits __ro_after_init;\n \n",
+            "language": "c",
+            "path": "arch/x86/kernel/cpu/common.c",
+            "truncated": false
+          }
+        ],
+        "skipped_files": 0
+      },
       "44f65d900698278a8451988abe0d5ca37fd46882": {
         "files": [
           {
@@ -9196,6 +9207,41 @@
         ],
         "skipped_files": 0
       },
+      "7652ac92018536eb807b6c2130100c85f1ba7e3b": {
+        "files": [
+          {
+            "diff": "@@ -366,10 +366,62 @@ static __always_inline void setup_umip(struct cpuinfo_x86 *c)\n \tcr4_clear_bits(X86_CR4_UMIP);\n }\n \n-DEFINE_STATIC_KEY_FALSE_RO(cr_pinning);\n-EXPORT_SYMBOL(cr_pinning);\n-unsigned long cr4_pinned_bits __ro_after_init;\n-EXPORT_SYMBOL(cr4_pinned_bits);\n+static DEFINE_STATIC_KEY_FALSE_RO(cr_pinning);\n+static unsigned long cr4_pinned_bits __ro_after_init;\n+\n+void native_write_cr0(unsigned long val)\n+{\n+\tunsigned long bits_missing = 0;\n+\n+set_register:\n+\tasm volatile(\"mov %0,%%cr0\": \"+r\" (val), \"+m\" (__force_order));\n+\n+\tif (static_branch_likely(&cr_pinning)) {\n+\t\tif (unlikely((val & X86_CR0_WP) != X86_CR0_WP)) {\n+\t\t\tbits_missing = X86_CR0_WP;\n+\t\t\tval |= bits_missing;\n+\t\t\tgoto set_register;\n+\t\t}\n+\t\t/* Warn after we've set the missing bits. */\n+\t\tWARN_ONCE(bits_missing, \"CR0 WP bit went missing!?\\n\");\n+\t}\n+}\n+EXPORT_SYMBOL(native_write_cr0);\n+\n+void native_write_cr4(unsigned long val)\n+{\n+\tunsigned long bits_missing = 0;\n+\n+set_register:\n+\tasm volatile(\"mov %0,%%cr4\": \"+r\" (val), \"+m\" (cr4_pinned_bits));\n+\n+\tif (static_branch_likely(&cr_pinning)) {\n+\t\tif (unlikely((val & cr4_pinned_bits) != cr4_pinned_bits)) {\n+\t\t\tbits_missing = ~val & cr4_pinned_bits;\n+\t\t\tval |= bits_missing;\n+\t\t\tgoto set_register;\n+\t\t}\n+\t\t/* Warn after we've set the missing bits. */\n+\t\tWARN_ONCE(bits_missing, \"CR4 bits went missing: %lx!?\\n\",\n+\t\t\t  bits_missing);\n+\t}\n+}\n+EXPORT_SYMBOL(native_write_cr4);\n+\n+void cr4_init(void)\n+{\n+\tunsigned long cr4 = __read_cr4();\n+\n+\tif (boot_cpu_has(X86_FEATURE_PCID))\n+\t\tcr4 |= X86_CR4_PCIDE;\n+\tif (static_branch_likely(&cr_pinning))\n+\t\tcr4 |= cr4_pinned_bits;\n+\n+\t__write_cr4(cr4);\n+\n+\t/* Initialize cr4 shadow for this CPU. */\n+\tthis_cpu_write(cpu_tlbstate.cr4, cr4);\n+}\n \n /*\n  * Once CPU feature detection is finished (and boot params have been\n@@ -1723,12 +1775,6 @@ void cpu_init(void)\n \n \twait_for_master_cpu(cpu);\n \n-\t/*\n-\t * Initialize the CR4 shadow before doing anything that could\n-\t * try to read it.\n-\t */\n-\tcr4_init_shadow();\n-\n \tif (cpu)\n \t\tload_ucode_ap();\n \n@@ -1823,12 +1869,6 @@ void cpu_init(void)\n \n \twait_for_master_cpu(cpu);\n \n-\t/*\n-\t * Initialize the CR4 shadow before doing anything that could\n-\t * try to read it.\n-\t */\n-\tcr4_init_shadow();\n-\n \tshow_ucode_info_early();\n \n \tpr_info(\"Initializing CPU#%d\\n\", cpu);",
+            "language": "c",
+            "path": "arch/x86/kernel/cpu/common.c",
+            "truncated": false
+          },
+          {
+            "diff": "@@ -18,9 +18,7 @@\n  */\n extern unsigned long __force_order;\n \n-/* Starts false and gets enabled once CPU feature detection is done. */\n-DECLARE_STATIC_KEY_FALSE(cr_pinning);\n-extern unsigned long cr4_pinned_bits;\n+void native_write_cr0(unsigned long val);\n \n static inline unsigned long native_read_cr0(void)\n {\n@@ -29,24 +27,6 @@ static inline unsigned long native_read_cr0(void)\n \treturn val;\n }\n \n-static inline void native_write_cr0(unsigned long val)\n-{\n-\tunsigned long bits_missing = 0;\n-\n-set_register:\n-\tasm volatile(\"mov %0,%%cr0\": \"+r\" (val), \"+m\" (__force_order));\n-\n-\tif (static_branch_likely(&cr_pinning)) {\n-\t\tif (unlikely((val & X86_CR0_WP) != X86_CR0_WP)) {\n-\t\t\tbits_missing = X86_CR0_WP;\n-\t\t\tval |= bits_missing;\n-\t\t\tgoto set_register;\n-\t\t}\n-\t\t/* Warn after we've set the missing bits. */\n-\t\tWARN_ONCE(bits_missing, \"CR0 WP bit went missing!?\\n\");\n-\t}\n-}\n-\n static inline unsigned long native_read_cr2(void)\n {\n \tunsigned long val;\n@@ -91,24 +71,7 @@ static inline unsigned long native_read_cr4(void)\n \treturn val;\n }\n \n-static inline void native_write_cr4(unsigned long val)\n-{\n-\tunsigned long bits_missing = 0;\n-\n-set_register:\n-\tasm volatile(\"mov %0,%%cr4\": \"+r\" (val), \"+m\" (cr4_pinned_bits));\n-\n-\tif (static_branch_likely(&cr_pinning)) {\n-\t\tif (unlikely((val & cr4_pinned_bits) != cr4_pinned_bits)) {\n-\t\t\tbits_missing = ~val & cr4_pinned_bits;\n-\t\t\tval |= bits_missing;\n-\t\t\tgoto set_register;\n-\t\t}\n-\t\t/* Warn after we've set the missing bits. */\n-\t\tWARN_ONCE(bits_missing, \"CR4 bits went missing: %lx!?\\n\",\n-\t\t\t  bits_missing);\n-\t}\n-}\n+void native_write_cr4(unsigned long val);\n \n #ifdef CONFIG_X86_64\n static inline unsigned long native_read_cr8(void)",
+            "language": "c",
+            "path": "arch/x86/include/asm/special_insns.h",
+            "truncated": false
+          },
+          {
+            "diff": "@@ -210,28 +210,16 @@ static int enable_start_cpu0;\n  */\n static void notrace start_secondary(void *unused)\n {\n-\tunsigned long cr4 = __read_cr4();\n-\n \t/*\n \t * Don't put *anything* except direct CPU state initialization\n \t * before cpu_init(), SMP booting is too fragile that we want to\n \t * limit the things done here to the most necessary things.\n \t */\n-\tif (boot_cpu_has(X86_FEATURE_PCID))\n-\t\tcr4 |= X86_CR4_PCIDE;\n-\tif (static_branch_likely(&cr_pinning))\n-\t\tcr4 |= cr4_pinned_bits;\n-\n-\t__write_cr4(cr4);\n+\tcr4_init();\n \n #ifdef CONFIG_X86_32\n \t/* switch away from the initial page table */\n \tload_cr3(swapper_pg_dir);\n-\t/*\n-\t * Initialize the CR4 shadow before doing anything that could\n-\t * try to read it.\n-\t */\n-\tcr4_init_shadow();\n \t__flush_tlb_all();\n #endif\n \tload_current_idt();",
+            "language": "c",
+            "path": "arch/x86/kernel/smpboot.c",
+            "truncated": false
+          },
+          {
+            "diff": "@@ -741,6 +741,7 @@ extern void load_direct_gdt(int);\n extern void load_fixmap_gdt(int);\n extern void load_percpu_segment(int);\n extern void cpu_init(void);\n+extern void cr4_init(void);\n \n static inline unsigned long get_debugctlmsr(void)\n {",
+            "language": "c",
+            "path": "arch/x86/include/asm/processor.h",
+            "truncated": false
+          },
+          {
+            "diff": "@@ -58,6 +58,7 @@ static void cpu_bringup(void)\n {\n \tint cpu;\n \n+\tcr4_init();\n \tcpu_init();\n \ttouch_softlockup_watchdog();\n \tpreempt_disable();\n",
+            "language": "c",
+            "path": "arch/x86/xen/smp_pv.c",
+            "truncated": false
+          }
+        ],
+        "skipped_files": 0
+      },
       "76b043848fd22dbf7f8bf3a1452f8c70d557b860": {
         "files": [
           {
@@ -9670,6 +9716,17 @@
             "diff": "@@ -32,4 +32,5 @@ obj-$(CONFIG_FS_XIP) += filemap_xip.o\n obj-$(CONFIG_MIGRATION) += migrate.o\n obj-$(CONFIG_SMP) += allocpercpu.o\n obj-$(CONFIG_QUICKLIST) += quicklist.o\n+obj-$(CONFIG_CGROUP_MEM_CONT) += memcontrol.o\n ",
             "language": "makefile",
             "path": "mm/Makefile",
+            "truncated": false
+          }
+        ],
+        "skipped_files": 0
+      },
+      "8dbec27a242cd3e2816eeb98d3237b9f57cf6232": {
+        "files": [
+          {
+            "diff": "@@ -31,7 +31,20 @@ static inline unsigned long native_read_cr0(void)\n \n static inline void native_write_cr0(unsigned long val)\n {\n-\tasm volatile(\"mov %0,%%cr0\": : \"r\" (val), \"m\" (__force_order));\n+\tunsigned long bits_missing = 0;\n+\n+set_register:\n+\tasm volatile(\"mov %0,%%cr0\": \"+r\" (val), \"+m\" (__force_order));\n+\n+\tif (static_branch_likely(&cr_pinning)) {\n+\t\tif (unlikely((val & X86_CR0_WP) != X86_CR0_WP)) {\n+\t\t\tbits_missing = X86_CR0_WP;\n+\t\t\tval |= bits_missing;\n+\t\t\tgoto set_register;\n+\t\t}\n+\t\t/* Warn after we've set the missing bits. */\n+\t\tWARN_ONCE(bits_missing, \"CR0 WP bit went missing!?\\n\");\n+\t}\n }\n \n static inline unsigned long native_read_cr2(void)\n",
+            "language": "c",
+            "path": "arch/x86/include/asm/special_insns.h",
             "truncated": false
           }
         ],
@@ -10152,6 +10209,17 @@
             "diff": "@@ -230,6 +230,7 @@ config X86\n \tselect VIRT_TO_BUS\n \tselect X86_FEATURE_NAMES\t\tif PROC_FS\n \tselect PROC_PID_ARCH_STATUS\t\tif PROC_FS\n+\timply IMA_SECURE_AND_OR_TRUSTED_BOOT    if EFI\n \n config INSTRUCTION_DECODER\n \tdef_bool y",
             "language": "plaintext",
             "path": "arch/x86/Kconfig",
+            "truncated": false
+          }
+        ],
+        "skipped_files": 0
+      },
+      "a13b9d0b97211579ea63b96c606de79b963c0f47": {
+        "files": [
+          {
+            "diff": "@@ -347,6 +347,9 @@ static __always_inline void setup_umip(struct cpuinfo_x86 *c)\n \tcr4_clear_bits(X86_CR4_UMIP);\n }\n \n+/* These bits should not change their value after CPU init is finished. */\n+static const unsigned long cr4_pinned_mask =\n+\tX86_CR4_SMEP | X86_CR4_SMAP | X86_CR4_UMIP | X86_CR4_FSGSBASE;\n static DEFINE_STATIC_KEY_FALSE_RO(cr_pinning);\n static unsigned long cr4_pinned_bits __ro_after_init;\n \n@@ -371,20 +374,20 @@ EXPORT_SYMBOL(native_write_cr0);\n \n void native_write_cr4(unsigned long val)\n {\n-\tunsigned long bits_missing = 0;\n+\tunsigned long bits_changed = 0;\n \n set_register:\n \tasm volatile(\"mov %0,%%cr4\": \"+r\" (val), \"+m\" (cr4_pinned_bits));\n \n \tif (static_branch_likely(&cr_pinning)) {\n-\t\tif (unlikely((val & cr4_pinned_bits) != cr4_pinned_bits)) {\n-\t\t\tbits_missing = ~val & cr4_pinned_bits;\n-\t\t\tval |= bits_missing;\n+\t\tif (unlikely((val & cr4_pinned_mask) != cr4_pinned_bits)) {\n+\t\t\tbits_changed = (val & cr4_pinned_mask) ^ cr4_pinned_bits;\n+\t\t\tval = (val & ~cr4_pinned_mask) | cr4_pinned_bits;\n \t\t\tgoto set_register;\n \t\t}\n-\t\t/* Warn after we've set the missing bits. */\n-\t\tWARN_ONCE(bits_missing, \"CR4 bits went missing: %lx!?\\n\",\n-\t\t\t  bits_missing);\n+\t\t/* Warn after we've corrected the changed bits. */\n+\t\tWARN_ONCE(bits_changed, \"pinned CR4 bits changed: 0x%lx!?\\n\",\n+\t\t\t  bits_changed);\n \t}\n }\n #if IS_MODULE(CONFIG_LKDTM)\n@@ -419,7 +422,7 @@ void cr4_init(void)\n \tif (boot_cpu_has(X86_FEATURE_PCID))\n \t\tcr4 |= X86_CR4_PCIDE;\n \tif (static_branch_likely(&cr_pinning))\n-\t\tcr4 |= cr4_pinned_bits;\n+\t\tcr4 = (cr4 & ~cr4_pinned_mask) | cr4_pinned_bits;\n \n \t__write_cr4(cr4);\n \n@@ -434,10 +437,7 @@ void cr4_init(void)\n  */\n static void __init setup_cr_pinning(void)\n {\n-\tunsigned long mask;\n-\n-\tmask = (X86_CR4_SMEP | X86_CR4_SMAP | X86_CR4_UMIP);\n-\tcr4_pinned_bits = this_cpu_read(cpu_tlbstate.cr4) & mask;\n+\tcr4_pinned_bits = this_cpu_read(cpu_tlbstate.cr4) & cr4_pinned_mask;\n \tstatic_key_enable(&cr_pinning.key);\n }\n \n",
+            "language": "c",
+            "path": "arch/x86/kernel/cpu/common.c",
             "truncated": false
           }
         ],

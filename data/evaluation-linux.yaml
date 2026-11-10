@@ -3273,6 +3273,90 @@ mechanisms:
       P=0: no equivalent of OpenBSD's link-time trapsled fill.
       Linker scripts emit zero-byte alignment padding, which
       decodes as add %al,(%rax) — not a trap.
+  C1e.9:
+    P: 1
+    D: 3
+    S: 2
+    A: 2
+    T_age: 3
+    T_maintained: 3
+    implementation:
+      config_options: []
+      source_files:
+      - arch/x86/kernel/cpu/common.c:436-542 (cr4_pinned_mask, native_write_cr0/cr4 post-write check, setup_cr_pinning)
+      - arch/x86/include/asm/special_insns.h
+      - drivers/misc/lkdtm/bugs.c:676-741 (lkdtm_UNSET_SMEP regression test, incl. jump to the mov-to-CR4 instruction)
+      default_state: >-
+        setup_cr_pinning() runs unconditionally from identify_boot_cpu(): it records
+        the SMEP/SMAP/UMIP/FSGSBASE/CET bits of the boot CPU's CR4 into the
+        __ro_after_init cr4_pinned_bits and enables the read-only-after-init
+        cr_pinning static key. From then on native_write_cr4() re-checks the
+        pinned bits immediately after the mov to CR4 and rewrites them (with a
+        one-time WARN) if they changed, and native_write_cr0() does the same for
+        CR0.WP. cr4_init() applies the pinned bits on every secondary CPU. There is
+        no Kconfig option and no boot parameter that disables the pinning; the
+        nosmep/nosmap parameters were removed in 5.18. The Xen PV write path
+        (xen_write_cr4) also ends in native_write_cr4().
+    commits:
+    - hash: 873d50d58f67ef15d2777b5e7f7a5268bb1fbae2
+      date: '2019-06-17'
+      description: 'x86/asm: Pin sensitive CR4 bits (SMEP, SMAP, UMIP)'
+    - hash: 8dbec27a242cd3e2816eeb98d3237b9f57cf6232
+      date: '2019-06-17'
+      description: 'x86/asm: Pin sensitive CR0 bits (CR0.WP)'
+    - hash: 7652ac92018536eb807b6c2130100c85f1ba7e3b
+      date: '2019-07-10'
+      description: 'x86/asm: Move native_write_cr0/4() out of line (keeps the pinning key read-only after init)'
+    - hash: a13b9d0b97211579ea63b96c606de79b963c0f47
+      date: '2020-06-08'
+      description: 'x86/cpu: Use pinning mask for CR4 bits needing to be 0 (adds FSGSBASE, pins bits to 0 or 1)'
+    - hash: 411df123c017169922cc767affce76282b8e6c85
+      date: '2026-03-19'
+      description: 'x86/cpu: Remove X86_CR4_FRED from the CR4 pinned bits mask (CVE-2026-31561 boot-time triple fault under SEV-ES/SNP/TDX)'
+    discussions:
+    - https://lore.kernel.org/all/20190618045503.39105-1-keescook@chromium.org/
+    - https://lore.kernel.org/lkml/202006082013.71E29A42@keescook/
+    - https://lore.kernel.org/all/20260320115417.4156-3-bp@kernel.org/
+    rationale: >-
+      P=1: the kernel pins CR0.WP and the CR4 SMEP/SMAP/UMIP/FSGSBASE/CET bits after
+      boot. D=3: pinning is enabled unconditionally once CPU feature detection
+      finishes; no Kconfig option or boot parameter turns it off, and the CR0.WP pin
+      applies on every x86-64 CPU (which CR4 bits are pinned depends on the CPU's
+      features, but the pin itself cannot be disabled). S=2; decisive property: a
+      post-write check in the only CR0/CR4 write functions reverts a cleared bit even
+      when control jumps straight to the mov instruction (LKDTM UNSET_SMEP), so the
+      direct-call SMEP/SMAP-disable step used by public exploits no longer works.
+      The remaining gaps keep it below S=3: it is a software check at the
+      attacker's privilege level rather than a hardware lock; it covers only the
+      listed bits (CR3, EFER.NXE and the CET MSRs are not pinned); and it does not
+      stop an unintended mov-to-CR gadget elsewhere in the image or a page-table
+      write that makes the mask and static key writable again. A=2: in-tree check
+      in the core x86 CPU-register accessors, not a structural design property.
+      T=3: T_age=3 (since 5.3, 2019); T_maintained=3, as the pinned mask was revised
+      in March 2026 (FRED removed, CVE-2026-31561).
+    arm64:
+      P: 0
+      D: 0
+      S: 0
+      A: 0
+      T_age: 0
+      T_maintained: 0
+      implementation:
+        config_options: []
+        source_files:
+        - arch/arm64/include/asm/sysreg.h (write_sysreg/sysreg_clear_set — unconditional MSR writes, no pinned-bit check)
+        default_state: >-
+          arm64 writes SCTLR_EL1, TCR_EL1 and VBAR_EL1 with plain MSR instructions
+          through write_sysreg()/sysreg_clear_set(); nothing re-checks
+          security-relevant bits (SPAN/EPAN, BT1 for BTI, EnIA/EnIB for pointer
+          authentication, TCF for MTE) after boot. pKVM, even when booted,
+          does not pin host EL1 system registers.
+      commits: []
+      rationale: >-
+        arm64: P=0 — the attack surface exists (an EL1 ROP chain that reaches an
+        MSR to SCTLR_EL1 can turn off kernel BTI or pointer authentication), but
+        there is no arm64 counterpart of the x86 CR0/CR4 pinning. D=S=A=T=0 follow
+        from absence.
   C4.8:
     P: 0
     D: 0
